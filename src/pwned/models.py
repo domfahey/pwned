@@ -87,7 +87,9 @@ class Subscription(_HIBPBase):
         alias="SubscriptionName", description="Name of the subscription tier."
     )
     description: str = Field(alias="Description", description="Human-readable description.")
-    subscribed_until: datetime = Field(alias="SubscribedUntil", description="Subscription expiry date.")
+    subscribed_until: datetime = Field(
+        alias="SubscribedUntil", description="Subscription expiry date."
+    )
     rpm: int = Field(alias="Rpm", description="Requests per minute allowed.")
     domain_search_max_breached_accounts: int = Field(
         alias="DomainSearchMaxBreachedAccounts",
