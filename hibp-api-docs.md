@@ -313,6 +313,7 @@ Each breach contains a number of attributes describing the incident. In the futu
     "IsSpamList": false,
     "IsMalware": false,
     "IsSubscriptionFree": false,
+    "IsStealerLog": false,
     "LogoPath": "Adobe.png",
     "Attribution": null
   },
@@ -333,6 +334,7 @@ Each breach contains a number of attributes describing the incident. In the futu
     "IsSpamList": false,
     "IsMalware": false,
     "IsSubscriptionFree": false,
+    "IsStealerLog": false,
     "LogoPath": "BattlefieldHeroes.png",
     "Attribution": null
   }

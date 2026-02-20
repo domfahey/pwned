@@ -5,7 +5,7 @@
 ```bash
 make install          # Set up venv and install deps
 make doctor           # Verify environment and dependencies
-make test             # Run all tests
+make test             # Run unit tests (integration excluded by default)
 make test-unit        # Run unit tests only
 make test-integration # Run integration tests (hits live API)
 make lint             # Check code with ruff
@@ -17,6 +17,11 @@ make check            # Run format + lint + type + test (all-in-one)
 ## Dependencies
 
 Uses **uv** for package management (not pip/poetry).
+All commands run through `uv run` (e.g., `uv run pytest`, `uv run mypy`). Python >=3.12 required.
+
+## CLI Entrypoint
+
+`pwned = "pwned.cli:cli"` — run with `uv run pwned` after install.
 
 ## Architecture
 
@@ -38,10 +43,12 @@ Two separate HTTP clients: `HIBPClient` (main API, auth required for most endpoi
   Serialization uses `by_alias=True` to preserve API field names.
 - `src/` layout — imports are `from pwned.xxx import ...` (not `from src.pwned`).
 - Strict mypy (`mypy --strict`). Ruff rules: E, F, I, N, UP, B, SIM, S. Line length 100.
+- Tests allow `assert` (`S101`), hardcoded passwords (`S106`), and insecure hash (`S324`) via ruff per-file-ignores.
 
 ## Testing
 
 - Unit tests use **pytest-httpx** for HTTP mocking and **click.testing.CliRunner** for CLI tests.
+- Test layout: `tests/unit/` and `tests/integration/`, shared fixtures in `tests/conftest.py`.
 - Integration tests are marked `@pytest.mark.integration` and excluded by default.
   Run with `make test-integration`. They use the HIBP test API key (`00000000000000000000000000000000`)
   and test accounts on `hibp-integration-tests.com`.
