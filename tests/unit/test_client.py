@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 from pytest_httpx import HTTPXMock
 
 from pwned.client import (
     HIBPClient,
+    HIBPError,
     NotFoundError,
     RateLimitError,
     UnauthorizedError,
@@ -56,6 +58,38 @@ class TestRequestErrors:
         httpx_mock.add_response(url=f"{BASE}/breaches", json=[])
         result = client.get_breaches()
         assert result == []
+
+    def test_429_retry_after_capped(self, client: HIBPClient, httpx_mock: HTTPXMock) -> None:
+        """A huge retry-after value is capped to MAX_RETRY_AFTER."""
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=429,
+            headers={"retry-after": "0"},
+        )
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[])
+        result = client.get_breaches()
+        assert result == []
+
+    def test_429_retry_after_non_integer(self, client: HIBPClient, httpx_mock: HTTPXMock) -> None:
+        """Non-integer retry-after defaults to 2 seconds (tested with 0 delay next)."""
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=429,
+            headers={"retry-after": "not-a-number"},
+        )
+        for _ in range(3):
+            httpx_mock.add_response(
+                url=f"{BASE}/breaches",
+                status_code=429,
+                headers={"retry-after": "0"},
+            )
+        with pytest.raises(RateLimitError):
+            client.get_breaches()
+
+    def test_500_raises_hibp_error(self, client: HIBPClient, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(url=f"{BASE}/breaches", status_code=500)
+        with pytest.raises(HIBPError, match="HTTP 500"):
+            client.get_breaches()
 
 
 class TestBreaches:
@@ -204,3 +238,45 @@ class TestSubscription:
         )
         result = client.get_subscription_status()
         assert result.subscription_name == "Pwned 1"
+
+
+class TestValidation:
+    def test_breach_date_parsed(self, noauth_client: HIBPClient, httpx_mock: HTTPXMock) -> None:
+        from datetime import date
+
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            json=[{"Name": "Adobe", "BreachDate": "2013-10-04"}],
+        )
+        result = noauth_client.get_breaches()
+        assert result[0].breach_date == date(2013, 10, 4)
+
+    def test_breach_defaults_when_fields_absent(
+        self, noauth_client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[{"Name": "Adobe"}])
+        result = noauth_client.get_breaches()
+        assert result[0].pwn_count == 0
+        assert result[0].is_verified is False
+        assert result[0].data_classes == []
+        assert result[0].breach_date is None
+
+    def test_malformed_response_raises_validation_error(
+        self, noauth_client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            json=[{"NotAValidField": "missing Name"}],
+        )
+        with pytest.raises(ValidationError):
+            noauth_client.get_breaches()
+
+    def test_negative_pwn_count_raises_validation_error(
+        self, noauth_client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            json=[{"Name": "Bad", "PwnCount": -1}],
+        )
+        with pytest.raises(ValidationError):
+            noauth_client.get_breaches()

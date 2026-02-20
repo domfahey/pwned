@@ -1,5 +1,7 @@
 # Have I Been Pwned - API Documentation
 
+> Reference copy of the [HIBP API v3 docs](https://haveibeenpwned.com/API/v3), captured February 2025. Check the upstream source for the latest version.
+
 The API allows the list of pwned accounts (email addresses, usernames and phone numbers) to be quickly searched via a RESTful service.
 
 ## Index

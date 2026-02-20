@@ -6,8 +6,8 @@ https://haveibeenpwned.com/API/v3#TestAccounts
 Note: The test API key only supports breachedaccount lookups on the
 hibp-integration-tests.com domain. The stealer logs, pastes, domain search,
 and subscription API endpoints require a real key and are not directly
-exercised here (though some tests verify breach lookups for accounts with
-stealer log or subscription-free data).
+exercised here (though some tests verify breachedaccount lookups for accounts
+associated with stealer logs or subscription-free breaches).
 """
 
 from __future__ import annotations

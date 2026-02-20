@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from pydantic import field_validator
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="HIBP_",
+        env_file=".env",
+        env_file_encoding="utf-8",
         frozen=True,
     )
 
-    api_key: str | None = None
+    api_key: SecretStr | None = None
     user_agent: str = "pwned-cli"
 
     @field_validator("api_key", mode="before")
@@ -19,6 +21,10 @@ class Settings(BaseSettings):
         if isinstance(v, str) and not v:
             return None
         return v
+
+    def get_api_key(self) -> str | None:
+        """Return the plaintext API key, or None."""
+        return self.api_key.get_secret_value() if self.api_key else None
 
 
 def load_settings(
@@ -31,4 +37,4 @@ def load_settings(
         kwargs["api_key"] = api_key
     if user_agent is not None:
         kwargs["user_agent"] = user_agent
-    return Settings(_env_file=".env", **kwargs)  # type: ignore[call-arg]
+    return Settings(**kwargs)  # type: ignore[arg-type]

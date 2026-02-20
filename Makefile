@@ -1,4 +1,4 @@
-.PHONY: install doctor test test-unit test-integration lint format type
+.PHONY: install doctor test test-unit test-integration lint format type check
 
 install:
 	uv sync --all-extras
@@ -7,7 +7,8 @@ doctor:
 	uv run python --version
 	uv run python -c "from importlib.metadata import version; print(f'click {version(\"click\")}')"
 	uv run python -c "from importlib.metadata import version; print(f'httpx {version(\"httpx\")}')"
-	uv run python -c "from importlib.metadata import version; print(f'python-dotenv {version(\"python-dotenv\")}')"
+	uv run python -c "from importlib.metadata import version; print(f'pydantic {version(\"pydantic\")}')"
+	uv run python -c "from importlib.metadata import version; print(f'pydantic-settings {version(\"pydantic-settings\")}')"
 
 test:
 	uv run pytest
@@ -28,3 +29,5 @@ format:
 
 type:
 	uv run mypy
+
+check: format lint type test

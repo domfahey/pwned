@@ -61,6 +61,7 @@ class PwnedPasswordsClient:
             parts = line.strip().split(":")
             if len(parts) == 2 and parts[0].upper() == suffix:
                 count = int(parts[1])
+                # Padded responses include fake entries with count=0; only report genuine matches.
                 if count > 0:
                     return count
         return 0
@@ -75,11 +76,12 @@ def _md4(data: bytes) -> str:
 
     A custom implementation is required because Python's hashlib does not
     guarantee MD4 availability -- OpenSSL 3.0+ disables legacy algorithms
-    by default, making hashlib.new("md4") fail on many systems.
+    by default, making hashlib.new("md4") fail on many systems. Performance
+    is not a concern since only a single short password is hashed per call.
     """
 
     def _f(x: int, y: int, z: int) -> int:
-        return (x & y) | (~x & z)
+        return (x & y) | ((~x & 0xFFFFFFFF) & z)
 
     def _g(x: int, y: int, z: int) -> int:
         return (x & y) | (x & z) | (y & z)

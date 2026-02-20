@@ -6,6 +6,7 @@ import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
+from pwned.client import HIBPError
 from pwned.passwords import PwnedPasswordsClient, _md4, _ntlm_hash
 
 SHA1_PASSWORD = hashlib.sha1(b"password").hexdigest().upper()
@@ -75,6 +76,14 @@ class TestCheckPassword:
         )
         count = client.check_password("password", pad=True)
         assert count == 0
+
+    def test_http_error_wrapped(self, client: PwnedPasswordsClient, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{PREFIX}",
+            status_code=500,
+        )
+        with pytest.raises(HIBPError, match="HTTP 500"):
+            client.check_password("password")
 
 
 class TestNtlmHash:

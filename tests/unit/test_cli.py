@@ -203,6 +203,36 @@ class TestPasswordCommand:
         assert data["count"] == 100
         assert "password" not in data
 
+    def test_password_from_stdin(self, httpx_mock: HTTPXMock, cli_runner: CliRunner) -> None:
+        import hashlib
+
+        sha1 = hashlib.sha1(b"password").hexdigest().upper()
+        prefix = sha1[:5]
+        suffix = sha1[5:]
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{prefix}",
+            text=f"{suffix}:500\n",
+        )
+        result = cli_runner.invoke(cli, ["password", "--stdin"], input="password\n")
+        assert result.exit_code == 0
+        assert "500" in result.output
+
+    def test_password_interactive_prompt(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        import hashlib
+
+        sha1 = hashlib.sha1(b"password").hexdigest().upper()
+        prefix = sha1[:5]
+        suffix = sha1[5:]
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{prefix}",
+            text=f"{suffix}:999\n",
+        )
+        result = cli_runner.invoke(cli, ["password"], input="password\n")
+        assert result.exit_code == 0
+        assert "999" in result.output
+
 
 class TestSubscriptionCommand:
     def test_subscription(self, httpx_mock: HTTPXMock, cli_runner: CliRunner) -> None:
@@ -237,6 +267,17 @@ class TestErrorHandling:
         result = cli_runner.invoke(cli, ["breaches"])
         assert result.exit_code == 1
         assert "Error:" in result.output
+
+    def test_validation_error_handled_gracefully(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            json=[{"NotAValidField": "missing Name"}],
+        )
+        result = cli_runner.invoke(cli, ["breaches"])
+        assert result.exit_code == 1
+        assert "expected schema" in result.output
 
 
 class TestGlobalOptionGroup:

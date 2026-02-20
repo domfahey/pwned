@@ -7,7 +7,7 @@ from functools import wraps
 from typing import Any
 
 import click
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from pwned.client import HIBPClient, HIBPError, NotFoundError, UnauthorizedError
 from pwned.config import load_settings
@@ -28,12 +28,15 @@ def handle_errors(f: Callable[..., Any]) -> Callable[..., Any]:
         except HIBPError as e:
             click.echo(f"Error: {e}", err=True)
             sys.exit(1)
+        except ValidationError as e:
+            click.echo(f"Error: API response did not match expected schema: {e}", err=True)
+            sys.exit(1)
 
     return wrapper
 
 
 def _serialize(data: Any) -> Any:
-    """Convert Pydantic models to JSON-safe dicts, preserving PascalCase API field names."""
+    """Convert Pydantic models to JSON-safe dicts, using field aliases as keys."""
     if isinstance(data, BaseModel):
         return data.model_dump(by_alias=True, exclude_unset=True, mode="json")
     if isinstance(data, list):
@@ -70,7 +73,6 @@ class _GlobalOptionGroup(click.Group):
     """Allow global options (--api-key, --user-agent, --json) to appear after subcommands."""
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
-        # Move known global options to before the subcommand
         global_flags = {"--api-key", "--user-agent", "--json"}
         reordered: list[str] = []
         rest: list[str] = []
@@ -103,7 +105,7 @@ def cli(ctx: click.Context, api_key: str | None, user_agent: str | None, use_jso
     ctx.obj["use_json"] = use_json
 
 
-# --- Breach commands (no auth) ---
+# --- Breach commands ---
 
 
 @cli.command()
@@ -154,7 +156,7 @@ def dataclasses(ctx: click.Context) -> None:
     _output(data, use_json=ctx.obj["use_json"])
 
 
-# --- Account commands (auth required) ---
+# --- Account commands ---
 
 
 @cli.command()
@@ -173,7 +175,7 @@ def account(
 ) -> None:
     """Get breaches for an account (email or username). Requires API key."""
     s = ctx.obj["settings"]
-    with HIBPClient(api_key=s.api_key, user_agent=s.user_agent) as client:
+    with HIBPClient(api_key=s.get_api_key(), user_agent=s.user_agent) as client:
         data = client.get_account_breaches(
             account,
             truncate=not no_truncate,
@@ -190,7 +192,7 @@ def account(
 def domain_cmd(ctx: click.Context, domain: str) -> None:
     """Get breached email addresses for a domain. Requires API key."""
     s = ctx.obj["settings"]
-    with HIBPClient(api_key=s.api_key, user_agent=s.user_agent) as client:
+    with HIBPClient(api_key=s.get_api_key(), user_agent=s.user_agent) as client:
         data = client.get_domain_breaches(domain)
     _output(data, use_json=ctx.obj["use_json"])
 
@@ -201,7 +203,7 @@ def domain_cmd(ctx: click.Context, domain: str) -> None:
 def subscribed_domains(ctx: click.Context) -> None:
     """List subscribed domains. Requires API key."""
     s = ctx.obj["settings"]
-    with HIBPClient(api_key=s.api_key, user_agent=s.user_agent) as client:
+    with HIBPClient(api_key=s.get_api_key(), user_agent=s.user_agent) as client:
         data = client.get_subscribed_domains()
     _output(data, use_json=ctx.obj["use_json"])
 
@@ -213,12 +215,12 @@ def subscribed_domains(ctx: click.Context) -> None:
 def pastes(ctx: click.Context, email: str) -> None:
     """Get pastes for an email address. Requires API key."""
     s = ctx.obj["settings"]
-    with HIBPClient(api_key=s.api_key, user_agent=s.user_agent) as client:
+    with HIBPClient(api_key=s.get_api_key(), user_agent=s.user_agent) as client:
         data = client.get_pastes(email)
     _output(data, use_json=ctx.obj["use_json"])
 
 
-# --- Stealer log commands (auth required) ---
+# --- Stealer log commands ---
 
 
 @cli.group()
@@ -233,7 +235,7 @@ def stealer() -> None:
 def stealer_email(ctx: click.Context, email: str) -> None:
     """Get stealer log domains for an email address."""
     s = ctx.obj["settings"]
-    with HIBPClient(api_key=s.api_key, user_agent=s.user_agent) as client:
+    with HIBPClient(api_key=s.get_api_key(), user_agent=s.user_agent) as client:
         data = client.get_stealer_logs_by_email(email)
     _output(data, use_json=ctx.obj["use_json"])
 
@@ -245,7 +247,7 @@ def stealer_email(ctx: click.Context, email: str) -> None:
 def stealer_website(ctx: click.Context, domain: str) -> None:
     """Get stealer log email addresses for a website domain."""
     s = ctx.obj["settings"]
-    with HIBPClient(api_key=s.api_key, user_agent=s.user_agent) as client:
+    with HIBPClient(api_key=s.get_api_key(), user_agent=s.user_agent) as client:
         data = client.get_stealer_logs_by_website_domain(domain)
     _output(data, use_json=ctx.obj["use_json"])
 
@@ -257,12 +259,12 @@ def stealer_website(ctx: click.Context, domain: str) -> None:
 def stealer_domain(ctx: click.Context, domain: str) -> None:
     """Get stealer log email aliases for an email domain."""
     s = ctx.obj["settings"]
-    with HIBPClient(api_key=s.api_key, user_agent=s.user_agent) as client:
+    with HIBPClient(api_key=s.get_api_key(), user_agent=s.user_agent) as client:
         data = client.get_stealer_logs_by_email_domain(domain)
     _output(data, use_json=ctx.obj["use_json"])
 
 
-# --- Password command (free, no auth) ---
+# --- Password command ---
 
 
 @cli.command()
@@ -300,7 +302,7 @@ def password(
         click.echo("Password not found in any data breaches.")
 
 
-# --- Subscription command (auth required) ---
+# --- Subscription command ---
 
 
 @cli.command()
@@ -309,6 +311,6 @@ def password(
 def subscription(ctx: click.Context) -> None:
     """Get current subscription status. Requires API key."""
     s = ctx.obj["settings"]
-    with HIBPClient(api_key=s.api_key, user_agent=s.user_agent) as client:
+    with HIBPClient(api_key=s.get_api_key(), user_agent=s.user_agent) as client:
         data = client.get_subscription_status()
     _output(data, use_json=ctx.obj["use_json"])
