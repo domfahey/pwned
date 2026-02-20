@@ -7,6 +7,7 @@ from functools import wraps
 from typing import Any
 
 import click
+from pydantic import BaseModel
 
 from pwned.client import HIBPClient, HIBPError, NotFoundError, UnauthorizedError
 from pwned.config import load_settings
@@ -31,7 +32,17 @@ def handle_errors(f: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
+def _serialize(data: Any) -> Any:
+    """Convert Pydantic models to JSON-safe dicts, preserving PascalCase API field names."""
+    if isinstance(data, BaseModel):
+        return data.model_dump(by_alias=True, exclude_unset=True, mode="json")
+    if isinstance(data, list):
+        return [_serialize(item) for item in data]
+    return data
+
+
 def _output(data: Any, *, use_json: bool) -> None:
+    data = _serialize(data)
     if use_json:
         click.echo(json.dumps(data, indent=2))
     elif isinstance(data, list):
@@ -56,7 +67,7 @@ def _print_dict(d: dict[str, Any]) -> None:
 
 
 class _GlobalOptionGroup(click.Group):
-    """Allow global options (--api-key, --json) to appear after subcommands."""
+    """Allow global options (--api-key, --user-agent, --json) to appear after subcommands."""
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         # Move known global options to before the subcommand
@@ -75,7 +86,12 @@ class _GlobalOptionGroup(click.Group):
 
 
 @click.group(cls=_GlobalOptionGroup)
-@click.option("--api-key", envvar="HIBP_API_KEY", default=None, help="HIBP API key.")
+@click.option(
+    "--api-key",
+    envvar="HIBP_API_KEY",
+    default=None,
+    help="HIBP API key. Prefer HIBP_API_KEY env var or .env file to avoid process-table exposure.",
+)
 @click.option("--user-agent", envvar="HIBP_USER_AGENT", default=None, help="User-Agent string.")
 @click.option("--json", "use_json", is_flag=True, help="Output raw JSON.")
 @click.pass_context
@@ -250,18 +266,34 @@ def stealer_domain(ctx: click.Context, domain: str) -> None:
 
 
 @cli.command()
-@click.argument("password")
+@click.argument("password", required=False)
+@click.option("--stdin", "from_stdin", is_flag=True, help="Read password from stdin.")
 @click.option("--ntlm", is_flag=True, help="Use NTLM hash instead of SHA-1.")
 @click.option("--pad", is_flag=True, help="Request padded responses.")
 @click.pass_context
 @handle_errors
-def password(ctx: click.Context, password: str, ntlm: bool, pad: bool) -> None:
-    """Check if a password has been exposed in data breaches."""
+def password(
+    ctx: click.Context,
+    password: str | None,
+    from_stdin: bool,
+    ntlm: bool,
+    pad: bool,
+) -> None:
+    """Check if a password has been exposed in data breaches.
+
+    Accepts PASSWORD as an argument, via --stdin, or prompts interactively.
+    Using --stdin or the interactive prompt avoids exposing the password in the
+    process table.
+    """
+    if from_stdin:
+        password = click.get_text_stream("stdin").readline().rstrip("\n")
+    elif password is None:
+        password = click.prompt("Password", hide_input=True)
     s = ctx.obj["settings"]
     with PwnedPasswordsClient(user_agent=s.user_agent) as client:
         count = client.check_password(password, ntlm=ntlm, pad=pad)
     if ctx.obj["use_json"]:
-        click.echo(json.dumps({"password": password, "count": count}))
+        click.echo(json.dumps({"count": count}))
     elif count > 0:
         click.echo(f"Password found {count:,} times in data breaches!")
     else:

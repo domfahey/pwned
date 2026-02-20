@@ -5,7 +5,10 @@ import struct
 
 import httpx
 
+from pwned.client import HIBPError
+
 BASE_URL = "https://api.pwnedpasswords.com"
+REQUEST_TIMEOUT = 10.0
 
 
 class PwnedPasswordsClient:
@@ -13,6 +16,7 @@ class PwnedPasswordsClient:
         self._client = httpx.Client(
             base_url=BASE_URL,
             headers={"User-Agent": user_agent},
+            timeout=REQUEST_TIMEOUT,
         )
 
     def close(self) -> None:
@@ -48,7 +52,10 @@ class PwnedPasswordsClient:
             params["mode"] = "ntlm"
 
         resp = self._client.get(f"/range/{prefix}", headers=headers, params=params)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise HIBPError(f"HTTP {resp.status_code}") from exc
 
         for line in resp.text.splitlines():
             parts = line.strip().split(":")
@@ -64,7 +71,12 @@ def _ntlm_hash(password: str) -> str:
 
 
 def _md4(data: bytes) -> str:
-    """Pure Python MD4 implementation (RFC 1320). Used only for NTLM hashing."""
+    """Pure-Python MD4 (RFC 1320) used for NTLM hashing.
+
+    A custom implementation is required because Python's hashlib does not
+    guarantee MD4 availability -- OpenSSL 3.0+ disables legacy algorithms
+    by default, making hashlib.new("md4") fail on many systems.
+    """
 
     def _f(x: int, y: int, z: int) -> int:
         return (x & y) | (~x & z)

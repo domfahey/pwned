@@ -66,7 +66,7 @@ class TestBreaches:
         )
         result = noauth_client.get_breaches()
         assert len(result) == 1
-        assert result[0]["Name"] == "Adobe"
+        assert result[0].name == "Adobe"
 
     def test_get_breaches_with_domain(
         self, noauth_client: HIBPClient, httpx_mock: HTTPXMock
@@ -92,7 +92,7 @@ class TestBreaches:
             json={"Name": "Adobe", "Title": "Adobe", "Domain": "adobe.com"},
         )
         result = noauth_client.get_breach("Adobe")
-        assert result["Name"] == "Adobe"
+        assert result.name == "Adobe"
 
     def test_get_latest_breach(self, noauth_client: HIBPClient, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
@@ -100,7 +100,7 @@ class TestBreaches:
             json={"Name": "Latest", "Title": "Latest Breach"},
         )
         result = noauth_client.get_latest_breach()
-        assert result["Name"] == "Latest"
+        assert result.name == "Latest"
 
     def test_get_data_classes(self, noauth_client: HIBPClient, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
@@ -117,7 +117,8 @@ class TestAccountBreaches:
     ) -> None:
         httpx_mock.add_response(json=[{"Name": "Adobe"}])
         result = client.get_account_breaches("test@example.com")
-        assert result == [{"Name": "Adobe"}]
+        assert len(result) == 1
+        assert result[0].name == "Adobe"
 
     def test_get_account_breaches_full(self, client: HIBPClient, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(json=[{"Name": "Adobe", "Title": "Adobe", "Domain": "adobe.com"}])
@@ -151,7 +152,7 @@ class TestDomainSearch:
             json=[{"DomainName": "example.com", "PwnCount": 100}],
         )
         result = client.get_subscribed_domains()
-        assert result[0]["DomainName"] == "example.com"
+        assert result[0].domain_name == "example.com"
 
 
 class TestPastes:
@@ -160,7 +161,7 @@ class TestPastes:
             json=[{"Source": "Pastebin", "Id": "abc123", "EmailCount": 10}],
         )
         result = client.get_pastes("test@example.com")
-        assert result[0]["Source"] == "Pastebin"
+        assert result[0].source == "Pastebin"
 
 
 class TestStealerLogs:
@@ -180,6 +181,14 @@ class TestStealerLogs:
         assert "andy" in result
 
 
+class TestContextManager:
+    def test_close_called_on_exit(self) -> None:
+        client = HIBPClient(user_agent="test")
+        with client:
+            pass
+        assert client._client.is_closed
+
+
 class TestSubscription:
     def test_get_subscription_status(self, client: HIBPClient, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
@@ -194,4 +203,4 @@ class TestSubscription:
             },
         )
         result = client.get_subscription_status()
-        assert result["SubscriptionName"] == "Pwned 1"
+        assert result.subscription_name == "Pwned 1"

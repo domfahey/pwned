@@ -6,9 +6,9 @@ import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
-from pwned.passwords import PwnedPasswordsClient, _ntlm_hash
+from pwned.passwords import PwnedPasswordsClient, _md4, _ntlm_hash
 
-SHA1_PASSWORD = hashlib.sha1(b"password").hexdigest().upper()  # noqa: S324
+SHA1_PASSWORD = hashlib.sha1(b"password").hexdigest().upper()
 PREFIX = SHA1_PASSWORD[:5]
 SUFFIX = SHA1_PASSWORD[5:]
 
@@ -81,3 +81,36 @@ class TestNtlmHash:
     def test_known_value(self) -> None:
         result = _ntlm_hash("password")
         assert result == "8846F7EAEE8FB117AD06BDD830B7586C"
+
+
+class TestMd4Rfc1320:
+    """RFC 1320 Appendix A.5 test vectors."""
+
+    def test_empty_string(self) -> None:
+        assert _md4(b"") == "31d6cfe0d16ae931b73c59d7e0c089c0"
+
+    def test_a(self) -> None:
+        assert _md4(b"a") == "bde52cb31de33e46245e05fbdbd6fb24"
+
+    def test_abc(self) -> None:
+        assert _md4(b"abc") == "a448017aaf21d8525fc10ae87aa6729d"
+
+    def test_message_digest(self) -> None:
+        assert _md4(b"message digest") == "d9130a8164549fe818874806e1c7014b"
+
+    def test_alphabet(self) -> None:
+        assert _md4(b"abcdefghijklmnopqrstuvwxyz") == "d79e1c308aa5bbcdeea8ed63df412da9"
+
+    def test_alphanumeric(self) -> None:
+        assert (
+            _md4(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+            == "043f8582f241db351ce627e153e7f0e4"
+        )
+
+    def test_numeric_sequence(self) -> None:
+        assert (
+            _md4(
+                b"12345678901234567890123456789012345678901234567890123456789012345678901234567890"
+            )
+            == "e33b4ddc9c38f2199c3e7b164fcc0536"
+        )

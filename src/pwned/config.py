@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass
-
-from dotenv import load_dotenv
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-@dataclass(frozen=True)
-class Settings:
-    api_key: str | None
-    user_agent: str
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="HIBP_",
+        frozen=True,
+    )
+
+    api_key: str | None = None
+    user_agent: str = "pwned-cli"
 
 
 def load_settings(
@@ -17,8 +18,9 @@ def load_settings(
     api_key: str | None = None,
     user_agent: str | None = None,
 ) -> Settings:
-    load_dotenv()
-    return Settings(
-        api_key=api_key or os.environ.get("HIBP_API_KEY"),
-        user_agent=user_agent or os.environ.get("HIBP_USER_AGENT", "pwned-cli"),
-    )
+    kwargs: dict[str, str] = {}
+    if api_key is not None:
+        kwargs["api_key"] = api_key
+    if user_agent is not None:
+        kwargs["user_agent"] = user_agent
+    return Settings(_env_file=".env", **kwargs)  # type: ignore[call-arg]

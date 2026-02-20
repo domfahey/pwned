@@ -4,8 +4,10 @@ Uses the test API key and test accounts documented at
 https://haveibeenpwned.com/API/v3#TestAccounts
 
 Note: The test API key only supports breachedaccount lookups on the
-hibp-integration-tests.com domain. Pastes, stealer logs, domain search,
-and subscription endpoints require a real API key and are not tested here.
+hibp-integration-tests.com domain. The stealer logs, pastes, domain search,
+and subscription API endpoints require a real key and are not directly
+exercised here (though some tests verify breach lookups for accounts with
+stealer log or subscription-free data).
 """
 
 from __future__ import annotations
@@ -24,16 +26,16 @@ DOMAIN = "hibp-integration-tests.com"
 
 pytestmark = pytest.mark.integration
 
-runner = CliRunner()
-
 
 def _run(*args: str) -> tuple[int, str]:
-    """Invoke CLI and return (exit_code, combined output).
+    """Invoke CLI and return (exit_code, output).
 
-    Clears HIBP env vars so only explicit --api-key is used.
+    Overrides HIBP env vars so only explicit --api-key is used
+    and a consistent User-Agent is set.
     """
+    runner = CliRunner()
     env_override = {"HIBP_API_KEY": "", "HIBP_USER_AGENT": "pwned-e2e-test"}
-    with patch("pwned.config.load_dotenv"), patch.dict(os.environ, env_override):
+    with patch.dict(os.environ, env_override):
         result = runner.invoke(cli, list(args))
     return result.exit_code, result.output
 
@@ -45,7 +47,7 @@ def _run_ok(*args: str) -> str:
     return out
 
 
-def _run_json(*args: str) -> object:
+def _run_json(*args: str) -> Any:
     """Invoke CLI with --json, assert success, return parsed JSON."""
     out = _run_ok("--json", *args)
     return json.loads(out)
@@ -260,7 +262,7 @@ class TestPasswordCommand:
     def test_known_pwned_json(self) -> None:
         data = _run_json("password", "password")
         assert isinstance(data, dict)
-        assert data["password"] == "password"
+        assert "password" not in data
         assert data["count"] > 0
 
     def test_strong_password_not_found(self) -> None:
@@ -282,12 +284,12 @@ class TestPasswordCommand:
         assert isinstance(data, dict)
         assert data["count"] > 0
 
-    def test_common_passwords(self) -> None:
+    @pytest.mark.parametrize("pw", ["123456", "qwerty", "letmein"])
+    def test_common_passwords(self, pw: str) -> None:
         """Spot-check several known-pwned passwords."""
-        for pw in ["123456", "qwerty", "letmein"]:
-            data = _run_json("password", pw)
-            assert isinstance(data, dict)
-            assert data["count"] > 0, f"Expected {pw!r} to be pwned"
+        data = _run_json("password", pw)
+        assert isinstance(data, dict)
+        assert data["count"] > 0, f"Expected {pw!r} to be pwned"
 
     def test_strong_password_json(self) -> None:
         data = _run_json("password", "xK9#mL2$vQ7@nR4!pW8&jF5*hT3^bY6")

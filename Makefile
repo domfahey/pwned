@@ -16,7 +16,7 @@ test-unit:
 	uv run pytest tests/unit
 
 test-integration:
-	uv run pytest -m integration tests/integration
+	uv run pytest -m integration -o "addopts=" tests/integration
 
 lint:
 	uv run ruff check src tests
