@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,6 +12,13 @@ class Settings(BaseSettings):
 
     api_key: str | None = None
     user_agent: str = "pwned-cli"
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def _empty_str_to_none(cls, v: str | None) -> str | None:
+        if isinstance(v, str) and not v:
+            return None
+        return v
 
 
 def load_settings(

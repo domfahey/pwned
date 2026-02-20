@@ -17,18 +17,18 @@ class TestPublicEndpoints:
         with HIBPClient(user_agent="pwned-integration-test") as client:
             breaches = client.get_breaches()
             assert len(breaches) > 0
-            assert "Name" in breaches[0]
+            assert breaches[0].name
 
     def test_get_breach_adobe(self) -> None:
         with HIBPClient(user_agent="pwned-integration-test") as client:
             breach = client.get_breach("Adobe")
-            assert breach["Name"] == "Adobe"
-            assert breach["Domain"] == "adobe.com"
+            assert breach.name == "Adobe"
+            assert breach.domain == "adobe.com"
 
     def test_get_latest_breach(self) -> None:
         with HIBPClient(user_agent="pwned-integration-test") as client:
             breach = client.get_latest_breach()
-            assert "Name" in breach
+            assert breach.name
 
     def test_get_data_classes(self) -> None:
         with HIBPClient(user_agent="pwned-integration-test") as client:

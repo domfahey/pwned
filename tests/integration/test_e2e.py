@@ -47,7 +47,7 @@ def _run_ok(*args: str) -> str:
     return out
 
 
-def _run_json(*args: str) -> Any:
+def _run_json(*args: str) -> object:
     """Invoke CLI with --json, assert success, return parsed JSON."""
     out = _run_ok("--json", *args)
     return json.loads(out)
