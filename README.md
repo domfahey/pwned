@@ -31,11 +31,20 @@ cp .env.sample .env
 ### Password check (no API key needed)
 
 ```bash
-# Check if a password has been exposed
+# Interactive prompt (hidden input, safest)
+pwned password
+
+# Read from stdin (useful in scripts)
+echo "hunter2" | pwned password --stdin
+
+# Pass as argument (visible in process table)
 pwned password "hunter2"
 
 # Use NTLM hash mode
 pwned password "hunter2" --ntlm
+
+# Request padded responses (prevents fingerprinting by response size)
+pwned password "hunter2" --pad
 
 # Output as JSON
 pwned --json password "hunter2"
@@ -130,13 +139,14 @@ pwned breach Adobe --json
 
 ```bash
 make install          # Set up venv and install deps
-make test             # Run all tests (unit + integration)
+make test             # Run unit tests (default; integration excluded)
 make test-unit        # Run unit tests only
 make test-integration # Run integration tests (hits live API)
 make lint             # Check code style
 make format           # Auto-fix lint/formatting
 make type             # Run mypy strict type checking
 make doctor           # Verify environment and dependencies
+make check            # Run format + lint + type + test (all-in-one)
 ```
 
 ### Project structure
@@ -146,8 +156,8 @@ src/pwned/
 ├── cli.py          # Click commands and output formatting
 ├── client.py       # HIBP API client (haveibeenpwned.com)
 ├── passwords.py    # Pwned Passwords client (api.pwnedpasswords.com)
-├── config.py       # .env loading, Settings dataclass
-└── models.py       # TypedDicts for API responses
+├── config.py       # pydantic-settings configuration and .env loading
+└── models.py       # Pydantic models for API responses
 
 tests/
 ├── unit/           # Fast tests with mocked HTTP
