@@ -142,7 +142,12 @@ def load_settings(
     api_key: str | None = None,
     user_agent: str | None = None,
 ) -> Settings:
-    kwargs: dict[str, Any] = {"_env_file": (get_config_file(), Path(".env"))}
+    env_files: Path | tuple[Path, Path]
+    try:
+        env_files = (get_config_file(), Path(".env"))
+    except RuntimeError:
+        env_files = Path(".env")
+    kwargs: dict[str, Any] = {"_env_file": env_files}
     if api_key is not None:
         kwargs["api_key"] = SecretStr(api_key) if api_key else None
     if user_agent is not None:

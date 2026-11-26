@@ -169,6 +169,19 @@ class TestLoadSettings:
         assert s.get_api_key() == "cli-key"
         assert s.user_agent == "cli-ua"
 
+    def test_load_settings_falls_back_when_home_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        def _raise_no_home() -> Path:
+            raise RuntimeError("Could not determine home directory.")
+
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr(Path, "home", _raise_no_home)
+        (tmp_path / ".env").write_text("HIBP_API_KEY=cwd-only\n", encoding="utf-8")
+
+        s = load_settings()
+        assert s.get_api_key() == "cwd-only"
+
 
 class TestConfigPaths:
     def test_get_config_dir_uses_xdg_config_home(
@@ -204,8 +217,9 @@ class TestSaveApiKey:
         expected = get_config_file()
         assert returned == expected
         assert expected.read_text(encoding="utf-8") == "HIBP_API_KEY=my-secret-key\n"
-        assert stat.S_IMODE(expected.parent.stat().st_mode) == 0o700
-        assert stat.S_IMODE(expected.stat().st_mode) == 0o600
+        if os.name == "posix":
+            assert stat.S_IMODE(expected.parent.stat().st_mode) == 0o700
+            assert stat.S_IMODE(expected.stat().st_mode) == 0o600
 
     def test_save_api_key_explicit_path_preserves_other_lines(self, tmp_path: Path) -> None:
         custom = tmp_path / "nested" / ".env"
@@ -220,7 +234,8 @@ class TestSaveApiKey:
         assert custom.read_text(encoding="utf-8") == (
             "# comment\nHIBP_USER_AGENT=custom-ua\nHIBP_API_KEY=new-key\nOTHER=1\n"
         )
-        assert stat.S_IMODE(custom.stat().st_mode) == 0o600
+        if os.name == "posix":
+            assert stat.S_IMODE(custom.stat().st_mode) == 0o600
 
     def test_save_api_key_appends_when_key_not_present(self, tmp_path: Path) -> None:
         custom = tmp_path / ".env"
@@ -299,7 +314,8 @@ class TestClearApiKey:
         custom.write_text("HIBP_USER_AGENT=ua\nHIBP_API_KEY=secret\n", encoding="utf-8")
         assert clear_api_key(path=custom) is True
         assert custom.read_text(encoding="utf-8") == "HIBP_USER_AGENT=ua\n"
-        assert stat.S_IMODE(custom.stat().st_mode) == 0o600
+        if os.name == "posix":
+            assert stat.S_IMODE(custom.stat().st_mode) == 0o600
 
     def test_clear_api_key_uses_default_config_file(self) -> None:
         save_api_key("secret-key")
