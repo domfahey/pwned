@@ -3,8 +3,8 @@ class Pwned < Formula
 
   desc "Command-line interface and Python client for Have I Been Pwned"
   homepage "https://github.com/domfahey/pwned"
-  url "https://github.com/domfahey/pwned/releases/download/v0.2.0/pwned-0.2.0.tar.gz"
-  sha256 "16093beb6bc94a38e8fc93cd334b0f48a6026b2486a5ffdb403467f4262932d0"
+  url "https://github.com/domfahey/pwned/releases/download/v0.3.0/pwned-0.3.0.tar.gz"
+  sha256 "9768e8db91b93d6dab7306d9c9e91c0552e75863999e40c4165d7a41a99d2762"
   license "MIT"
 
   depends_on "python@3.12"
