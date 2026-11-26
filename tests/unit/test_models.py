@@ -9,6 +9,7 @@ from pwned.models import (
     BreachedAccountRangeResult,
     DataClassDescription,
     DnsToken,
+    MetaTag,
     SearchResult,
     Subscription,
 )
@@ -103,6 +104,13 @@ class TestNewModelsAndFields:
         token = DnsToken.model_validate({"txtRecordValue": "hibp-verify=abc123"})
         assert token.txt_record_value == "hibp-verify=abc123"
         assert token.model_dump(by_alias=True) == {"txtRecordValue": "hibp-verify=abc123"}
+
+    def test_meta_tag(self) -> None:
+        tag = MetaTag.model_validate({"metaTag": '<meta name="hibp-verify" content="dweb_123">'})
+        assert tag.meta_tag == '<meta name="hibp-verify" content="dweb_123">'
+        assert tag.model_dump(by_alias=True) == {
+            "metaTag": '<meta name="hibp-verify" content="dweb_123">'
+        }
 
     def test_search_result_defaults_and_dump(self) -> None:
         res = SearchResult(

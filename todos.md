@@ -33,8 +33,34 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 - [x] **Homebrew formula template (`Formula/pwned.rb`)** — valid template pointing to the GitHub Release tarball for publishing via a `homebrew-tap` repo.
 - [x] **ClusterFuzzLite fuzzing (`.github/workflows/cifuzz.yml`)** — Atheris fuzz target covering `_md4`, `_parse_range_response`, `strip_html`, and `parse_input_lines`.
 
-## Open / Future
+## Completed (v0.3.0 — Ready on `main`, Pending Release Tag)
 
-- [ ] **Optional OS Keychain backend (`keyring`)** — optional extra (`pwned[keyring]`) for storing API keys in macOS Keychain / Windows Credential Manager / SecretService via `pwned auth`.
+- [x] **Update `CHANGELOG.md` and architecture doc trees** — rolled post-`v0.2.0` fixes (`ea44a3c`, `c835bec`) and `_parsers.py` doc updates into `0.3.0` on `main`.
+- [x] **Integration tests for `v0.2.0` features** — expand `tests/integration/` to cover `AsyncHIBPClient`, `AsyncPwnedPasswordsClient`, `dataclasses --descriptions`, `get_password_range`, `is_pwned`, and `check_hash`.
+
+### Password & Vault Auditing
+- [x] **Pre-hashed password lookups (`--hashed` / `check_hash()`)** — accept 40-char SHA-1 or 32-char NTLM hashes directly on `pwned password` and in `PwnedPasswordsClient` / `AsyncPwnedPasswordsClient` (for AD NTLM dumps and pre-hashed lists).
+- [x] **Async concurrent password batch & vault auditing** — run `batch_check_passwords` and `audit_entries` concurrently via `AsyncPwnedPasswordsClient` with bounded concurrency (`--concurrency`) for ~10x faster vault audits.
+- [x] **Reused-password detection (`pwned audit --check-reuse`)** — report entries sharing duplicate passwords locally during vault audits.
+- [x] **Additional password manager & browser export formats** — add zero-dep parsers for 1Password CSV/1PUX, Chrome/Edge CSV, Firefox CSV, and Apple Passwords CSV, plus optional Bitwarden encrypted JSON decryption (`cryptography` extra).
+
+### CLI UX & Library Ergonomics
+- [x] **Optional OS Keychain backend (`keyring`)** — optional extra (`pwned[keyring]`) for storing API keys in macOS Keychain / Windows Credential Manager / SecretService via `pwned auth`.
+- [x] **Client-side breach filtering & sorting (`breaches` / `account`)** — add `--since YYYY-MM-DD`, `--data-class`, `--verified-only`, `--exclude-retired`, and `--sort pwn-count|date`.
+- [x] **Batch summary stats (`--stats`)** — optional stderr summary (`checked / pwned / clean / errors / elapsed`) for batch runs.
+- [x] **Shell completions (`pwned completion bash|zsh|fish`)** — expose Click's built-in tab-completion scripts cleanly in CLI and docs.
+- [x] **Optional short command aliases** — ergonomic shortcuts inspired by `wKovacs64/pwned` (`pw`, `ba`, `bar`, `pa`, `bd`, `sd`, `lb`, `dc`).
+- [x] **Framework password-validator recipes/helpers** — thin validators/docs for Pydantic (`AfterValidator`), FastAPI, and Django built on `is_pwned()` / `AsyncPwnedPasswordsClient.is_pwned()`.
+
+## Completed (v0.4.0 — Offline Lookups, Monitoring & CI Integrations)
+
+- [x] **Offline sorted hash file lookup (`--offline-db <path>` / `OfflinePasswordsClient`)** — `O(log N)` binary search via `seek`/`mmap` (stdlib only) over official `PwnedPasswordsDownloader` SHA-1/NTLM dumps for air-gapped and high-scale checks.
+- [x] **Baseline diffing (`--baseline` / `--save-baseline`)** — snapshot known breaches/pastes/stealer logs to JSON and report/exit non-zero only on newly discovered exposures for cron/CI monitoring.
+- [x] **SARIF output format (`--format sarif`)** — emit GitHub Code Scanning-compatible SARIF from `account`, `domain`, and `audit`.
+- [x] **Reusable GitHub Action / `pre-commit` hook** — composite `action.yml` for scheduled domain/account breach monitoring in CI.
+- [x] **Meta-tag domain verification (`domain-verify meta-tag|meta-check`)** — verify and support HIBP HTML `<meta>` tag verification endpoints alongside DNS TXT and email verification.
+
+## Backlog / External
+
 - [ ] **PyPI publishing (optional)** — pick a non-colliding distribution name (since `pwned` is already taken on PyPI) while keeping the `pwned` CLI entrypoint, and configure OIDC Trusted Publishing in `.github/workflows/release.yml`.
 - [ ] **OpenSSF Best Practices badge** — manual web registration on `bestpractices.dev`.

@@ -80,6 +80,13 @@ class TestBreachCommand:
         out = _run_fail("breach", "ZzzNonExistentBreach999")
         assert "Not found" in out
 
+    def test_breach_sarif(self) -> None:
+        out = _run_ok("--format", "sarif", "breach", "Adobe")
+        doc = json.loads(out)
+        assert doc["version"] == "2.1.0"
+        assert len(doc["runs"]) == 1
+        assert len(doc["runs"][0]["results"]) >= 1
+
 
 class TestBreachesCommand:
     def test_list_all(self) -> None:
@@ -127,6 +134,32 @@ class TestDataclassesCommand:
         assert isinstance(data, list)
         assert "Email addresses" in data
         assert "Passwords" in data
+
+    def test_descriptions_text(self) -> None:
+        out = _run_ok("dataclasses", "--descriptions")
+        assert "Email addresses" in out
+        assert "description:" in out
+
+    def test_descriptions_json(self) -> None:
+        data = _run_json("dataclasses", "--descriptions")
+        assert isinstance(data, list)
+        assert len(data) > 0
+        assert all(
+            isinstance(item, dict) and "name" in item and "description" in item for item in data
+        )
+        assert any(item["name"] == "Email addresses" and item["description"] for item in data)
+
+    def test_table_format(self) -> None:
+        out = _run_ok("--format", "table", "dataclasses")
+        assert "Value" in out
+        assert "---" in out
+        assert "Email addresses" in out
+
+    def test_csv_format(self) -> None:
+        out = _run_ok("--format", "csv", "dataclasses")
+        lines = out.splitlines()
+        assert lines[0] == "value"
+        assert "Email addresses" in lines
 
 
 # ── Account breaches (test API key) ──────────────────────────────────
@@ -249,6 +282,42 @@ class TestAccountCommand:
         data = json.loads(out)
         assert isinstance(data, list)
 
+    def test_account_sarif(self) -> None:
+        out = _run_ok(
+            "--format",
+            "sarif",
+            "--api-key",
+            TEST_KEY,
+            "account",
+            f"account-exists@{DOMAIN}",
+        )
+        doc = json.loads(out)
+        assert doc["version"] == "2.1.0"
+        assert len(doc["runs"]) == 1
+        assert len(doc["runs"][0]["results"]) >= 1
+
+    def test_account_fail_if_pwned_exits_one(self) -> None:
+        code, out = _run(
+            "--api-key",
+            TEST_KEY,
+            "account",
+            f"account-exists@{DOMAIN}",
+            "--fail-if-pwned",
+        )
+        assert code == 1
+        assert "Name:" in out
+
+    def test_account_fail_if_pwned_clean_exits_zero(self) -> None:
+        code, out = _run(
+            "--api-key",
+            TEST_KEY,
+            "account",
+            f"opt-out@{DOMAIN}",
+            "--fail-if-pwned",
+        )
+        assert code == 0
+        assert "Clean" in out
+
 
 # ── Password command (free, no auth) ─────────────────────────────────
 
@@ -295,6 +364,16 @@ class TestPasswordCommand:
         data = _run_json("password", "xK9#mL2$vQ7@nR4!pW8&jF5*hT3^bY6")
         assert isinstance(data, dict)
         assert data["count"] == 0
+
+    def test_fail_if_pwned_exits_one(self) -> None:
+        code, out = _run("password", "password", "--fail-if-pwned")
+        assert code == 1
+        assert "found" in out.lower()
+
+    def test_fail_if_pwned_strong_exits_zero(self) -> None:
+        code, out = _run("password", "xK9#mL2$vQ7@nR4!pW8&jF5*hT3^bY6", "--fail-if-pwned")
+        assert code == 0
+        assert "not found" in out.lower()
 
 
 # ── Error handling ───────────────────────────────────────────────────

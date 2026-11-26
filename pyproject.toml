@@ -1,6 +1,6 @@
 [project]
 name = "pwned"
-version = "0.2.0"
+version = "0.3.0"
 description = "CLI tool and Python client for the Have I Been Pwned API v3"
 readme = "README.md"
 license = "MIT"
@@ -31,6 +31,9 @@ dependencies = [
 
 [project.optional-dependencies]
 keepass = ["pykeepass>=4.0"]
+keyring = ["keyring>=25.0"]
+crypto = ["cryptography>=42.0"]
+all = ["pykeepass>=4.0", "keyring>=25.0", "cryptography>=42.0"]
 
 [project.urls]
 Homepage = "https://github.com/domfahey/pwned"
@@ -52,13 +55,15 @@ packages = ["src/pwned"]
 exclude = [
     "/.claude",
     "/.clusterfuzzlite",
-    "/.github",
     "/.env.sample",
+    "/.github",
+    "/.pre-commit-hooks.yaml",
     "/.python-version",
     "/AGENTS.md",
     "/CLAUDE.md",
     "/Formula",
     "/Makefile",
+    "/action.yml",
     "/todos.md",
 ]
 

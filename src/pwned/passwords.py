@@ -28,6 +28,16 @@ def _validate_prefix(prefix: str) -> str:
     return normalized
 
 
+def _validate_full_hash(hash_hex: str, *, ntlm: bool) -> str:
+    """Normalize and validate a full SHA-1 (40-char) or NTLM (32-char) hex digest."""
+    normalized = hash_hex.strip().upper()
+    expected_len = 32 if ntlm else 40
+    if len(normalized) != expected_len or any(ch not in _HEX_CHARS for ch in normalized):
+        kind = "NTLM" if ntlm else "SHA-1"
+        raise ValueError(f"{kind} hash must be exactly {expected_len} hexadecimal characters")
+    return normalized
+
+
 def _validate_threshold(threshold: int) -> None:
     if threshold < 1:
         raise ValueError("threshold must be at least 1")
@@ -98,6 +108,30 @@ class PwnedPasswordsClient:
             raise HIBPError(f"Request failed: {exc}") from exc
         return _parse_range_response(resp.text)
 
+    def check_hash(
+        self,
+        hash_hex: str,
+        *,
+        ntlm: bool = False,
+        pad: bool = False,
+    ) -> int:
+        """Return the breach prevalence count for a pre-hashed SHA-1 or NTLM hex digest."""
+        normalized = _validate_full_hash(hash_hex, ntlm=ntlm)
+        counts = self.get_password_range(normalized[:5], ntlm=ntlm, pad=pad)
+        return counts.get(normalized[5:], 0)
+
+    def is_hash_pwned(
+        self,
+        hash_hex: str,
+        *,
+        threshold: int = 1,
+        ntlm: bool = False,
+        pad: bool = False,
+    ) -> bool:
+        """Return True if a pre-hashed digest appears at least `threshold` times in breaches."""
+        _validate_threshold(threshold)
+        return self.check_hash(hash_hex, ntlm=ntlm, pad=pad) >= threshold
+
     def check_password(
         self,
         password: str,
@@ -106,9 +140,7 @@ class PwnedPasswordsClient:
         pad: bool = False,
     ) -> int:
         """Return the breach prevalence count for a password (0 if not found)."""
-        hash_value = _hash_password(password, ntlm=ntlm)
-        counts = self.get_password_range(hash_value[:5], ntlm=ntlm, pad=pad)
-        return counts.get(hash_value[5:], 0)
+        return self.check_hash(_hash_password(password, ntlm=ntlm), ntlm=ntlm, pad=pad)
 
     def is_pwned(
         self,
@@ -178,6 +210,30 @@ class AsyncPwnedPasswordsClient:
             raise HIBPError(f"Request failed: {exc}") from exc
         return _parse_range_response(resp.text)
 
+    async def check_hash(
+        self,
+        hash_hex: str,
+        *,
+        ntlm: bool = False,
+        pad: bool = False,
+    ) -> int:
+        """Return the breach prevalence count for a pre-hashed SHA-1 or NTLM hex digest."""
+        normalized = _validate_full_hash(hash_hex, ntlm=ntlm)
+        counts = await self.get_password_range(normalized[:5], ntlm=ntlm, pad=pad)
+        return counts.get(normalized[5:], 0)
+
+    async def is_hash_pwned(
+        self,
+        hash_hex: str,
+        *,
+        threshold: int = 1,
+        ntlm: bool = False,
+        pad: bool = False,
+    ) -> bool:
+        """Return True if a pre-hashed digest appears at least `threshold` times in breaches."""
+        _validate_threshold(threshold)
+        return await self.check_hash(hash_hex, ntlm=ntlm, pad=pad) >= threshold
+
     async def check_password(
         self,
         password: str,
@@ -186,9 +242,7 @@ class AsyncPwnedPasswordsClient:
         pad: bool = False,
     ) -> int:
         """Return the breach prevalence count for a password (0 if not found)."""
-        hash_value = _hash_password(password, ntlm=ntlm)
-        counts = await self.get_password_range(hash_value[:5], ntlm=ntlm, pad=pad)
-        return counts.get(hash_value[5:], 0)
+        return await self.check_hash(_hash_password(password, ntlm=ntlm), ntlm=ntlm, pad=pad)
 
     async def is_pwned(
         self,

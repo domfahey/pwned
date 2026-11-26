@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Password Pre-Hashed Lookups & Offline Hash Files**:
+  - Support pre-hashed 40-char SHA-1 or 32-char NTLM hashes via `--hashed` in `pwned password` and `check_hash()` across sync/async Pwned Passwords clients.
+  - `OfflinePasswordsClient` for fast `O(log N)` binary search over official local Pwned Passwords SHA-1/NTLM text dumps (`--offline-db <path>`).
+- **Expanded Vault & Browser Audit Formats**:
+  - Vault and browser export auditing supporting 10 source formats: Bitwarden JSON, Bitwarden Encrypted JSON (`cryptography` extra), Bitwarden CSV, 1Password CSV, 1Password 1PUX, Chrome/Edge CSV, Firefox CSV, Apple Passwords CSV, generic CSV, and KeePass `.kdbx` (`pykeepass` extra).
+  - Reused-password detection during vault audits (`--check-reuse`).
+- **Async Concurrency & Performance**:
+  - Bounded async concurrency (`--concurrency`) for vault audits and batch password checks.
+- **Breach Filtering, Sorting & Monitoring**:
+  - Client-side filtering and sorting for breaches and account checks (`--since YYYY-MM-DD`, `--data-class`, `--verified-only`, `--exclude-retired`, `--sort pwn-count|date|name`).
+  - Exposure baseline snapshotting and diffing (`--baseline`, `--save-baseline`) for cron/CI monitoring.
+- **SARIF & Batch Summary Stats**:
+  - GitHub Code Scanning-compatible SARIF output (`--format sarif`).
+  - Batch summary execution statistics on stderr (`--stats`).
+- **Domain Verification & Shell Completions**:
+  - HTML meta-tag domain ownership verification (`domain-verify meta-tag|meta-check`).
+  - Shell tab-completion script generation (`completion bash|zsh|fish`).
+- **OS Keychain & Short Aliases**:
+  - Optional OS Keychain credential backend via `pwned auth set|clear --backend keyring` (`keyring` extra) with source reporting in `pwned auth show`.
+  - Ergonomic short command aliases (`pw`, `ba`, `bar`, `pa`, `bd`, `sd`, `lb`, `dc`).
+- **Framework Validators & CI Integration**:
+  - Password validator factories and helpers for Pydantic, FastAPI, and Django (`pwned.validators`).
+  - Reusable GitHub Action (`action.yml`) and pre-commit hook configuration (`.pre-commit-hooks.yaml`).
+- **Expanded Integration Test Suite**:
+  - Live API integration tests covering async clients, data class descriptions, password range/hash lookups, SARIF output, and `--fail-if-pwned`.
+
+### Fixed
+- Handled CPython `HTMLParser` `AssertionError` on malformed SGML marked sections in `strip_html` (discovered by ClusterFuzzLite).
+- Wired automatic subscription RPM detection, TTY stderr progress, duplicate password line-index preservation, `--no-truncate` batch rejection, `NO_COLOR`/TTY status styling, and missing-home resilience in `auth show`.
+- Fixed [Formula/pwned.rb](Formula/pwned.rb) Ruby syntax/URL and extracted standalone `_parsers.py` so ClusterFuzzLite builds without native Rust compilation.
+
 ## [0.2.0] - 2026-11-26
 
 ### Added

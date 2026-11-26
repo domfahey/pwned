@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -174,6 +174,33 @@ class DnsToken(_HIBPBase):
         alias="txtRecordValue",
         description="Complete DNS TXT record value to publish for domain verification.",
     )
+
+
+class MetaTag(_HIBPBase):
+    meta_tag: str = Field(
+        alias="metaTag",
+        description="HTML meta tag to embed in the domain homepage for verification.",
+    )
+
+
+class PasswordChecker(Protocol):
+    """Structural protocol satisfied by sync online and offline password clients."""
+
+    def check_password(
+        self,
+        password: str,
+        *,
+        ntlm: bool = False,
+        pad: bool = False,
+    ) -> int: ...
+
+    def check_hash(
+        self,
+        hash_hex: str,
+        *,
+        ntlm: bool = False,
+        pad: bool = False,
+    ) -> int: ...
 
 
 class SearchResult(_HIBPBase):

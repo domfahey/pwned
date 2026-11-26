@@ -28,23 +28,30 @@ All commands run through `uv run` (e.g., `uv run pytest`, `uv run mypy`). Python
 ```
 src/pwned/
 ├── __init__.py         # Public library API exports
+├── _parsers.py         # Zero-dependency stdlib parsers (MD4, range response, HTML stripper, input lines)
 ├── async_client.py     # Async HIBP API client (`AsyncHIBPClient`)
-├── audit.py            # Password manager vault auditing (`Bitwarden`, `KeePass`, CSV)
-├── batch.py            # Batch account/password checks with RPM rate limiting
+├── audit.py            # Password manager vault auditing & reused password detection
+├── baseline.py         # Exposure baseline snapshotting and diffing
+├── batch.py            # Batch account/password checks with RPM rate limiting and stats
 ├── cache.py            # File-based TTL response caching for public endpoints
 ├── cli.py              # Click command groups and global option parser
-├── cli_commands.py     # Additional commands (`auth`, `search`, `account-range`, `domain-verify`, `audit`, `cache`)
+├── cli_commands.py     # Additional commands (`auth`, `search`, `account-range`, `domain-verify`, `audit`, `cache`, `completion`)
 ├── cli_helpers.py      # CLI output rendering, error handling, and API key validation
 ├── client.py           # Sync HIBP API client (`HIBPClient`)
-├── config.py           # pydantic-settings configuration with XDG fallback (`~/.config/pwned/.env`)
-├── formatting.py       # Output formatters (`text`, `json`, `jsonl`, `csv`, `table`)
+├── config.py           # pydantic-settings configuration with XDG fallback and OS Keychain backend
+├── filtering.py        # Breach filtering and sorting helpers
+├── formatting.py       # Output formatters (`text`, `json`, `jsonl`, `csv`, `table`, `sarif`)
 ├── models.py           # Pydantic v2 models for API responses
+├── offline.py          # Offline sorted hash file lookups (`OfflinePasswordsClient`)
 ├── passwords.py        # Sync & async Pwned Passwords clients (`PwnedPasswordsClient`, `AsyncPwnedPasswordsClient`)
-└── py.typed            # PEP 561 type marker
+├── py.typed            # PEP 561 type marker
+└── validators.py       # Framework password validation helpers (Pydantic / FastAPI / Django)
 ```
 
-Two main HTTP client families: `HIBPClient` / `AsyncHIBPClient` (main API, auth required for most endpoints) and
-`PwnedPasswordsClient` / `AsyncPwnedPasswordsClient` (password range API, no auth, uses k-anonymity).
+Client families and features:
+- HTTP client families: `HIBPClient` / `AsyncHIBPClient` (main API, auth required for most endpoints) and `PwnedPasswordsClient` / `AsyncPwnedPasswordsClient` (password range API, no auth, uses k-anonymity).
+- Offline client: `OfflinePasswordsClient` for local `O(log N)` binary search over official HIBP password hash dumps.
+- Optional extras: `keepass` (`pykeepass`), `keyring` (`keyring`), `crypto` (`cryptography` for Bitwarden encrypted JSON), and `all`.
 
 ## Code Conventions
 
@@ -64,7 +71,7 @@ Two main HTTP client families: `HIBPClient` / `AsyncHIBPClient` (main API, auth 
 
 ## Configuration
 
-Settings are loaded via pydantic-settings with env prefix `HIBP_` and XDG fallback (`~/.config/pwned/.env`):
+Settings are loaded via pydantic-settings with env prefix `HIBP_` and XDG fallback (`~/.config/pwned/.env`) plus OS Keychain backend support:
 - `HIBP_API_KEY` — required for authenticated endpoints
 - `HIBP_USER_AGENT` — custom User-Agent (default: `pwned-cli`)
-- Precedence: `--api-key` > `HIBP_API_KEY` > CWD `.env` > `~/.config/pwned/.env`
+- Precedence: `--api-key` > `HIBP_API_KEY` > CWD `.env` > `~/.config/pwned/.env` > OS Keychain (`keyring`)

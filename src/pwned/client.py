@@ -17,6 +17,7 @@ from pwned.models import (
     DataClassDescription,
     DnsToken,
     EmailAlias,
+    MetaTag,
     Paste,
     SearchResult,
     SubscribedDomain,
@@ -329,6 +330,21 @@ class HIBPClient:
             "POST",
             "/domainVerification/sendEmail",
             json={"DomainName": domain, "EmailAlias": email_alias},
+        )
+
+    def generate_meta_tag(self, domain: str) -> MetaTag:
+        resp = self._request(
+            "POST",
+            "/domainVerification/generateMetaTag",
+            json={"DomainName": domain},
+        )
+        return MetaTag.model_validate_json(resp.content)
+
+    def verify_meta_tag(self, domain: str) -> None:
+        self._request(
+            "POST",
+            "/domainVerification/verifyMetaTag",
+            json={"DomainName": domain},
         )
 
     def get_pastes(self, email: str) -> list[Paste]:

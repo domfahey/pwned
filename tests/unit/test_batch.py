@@ -1,21 +1,31 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 from pathlib import Path
-from unittest.mock import MagicMock, call
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from pydantic import ValidationError
+from pytest_httpx import HTTPXMock
 
+from pwned._parsers import _md4
 from pwned.batch import (
     AccountBatchItem,
+    BatchStats,
     PasswordBatchItem,
+    async_batch_check_passwords,
     batch_check_accounts,
     batch_check_passwords,
+    compute_batch_stats,
+    format_batch_stats,
     load_input_file,
     parse_input_lines,
 )
 from pwned.client import HIBPError, NotFoundError, RateLimitError
 from pwned.models import Breach, Subscription
+from pwned.offline import OfflinePasswordsClient
+from pwned.passwords import AsyncPwnedPasswordsClient
 
 
 class TestParseInputLines:
@@ -398,3 +408,402 @@ class TestBatchCheckPasswords:
 
         assert results == [PasswordBatchItem(index=1, pwn_count=1, status="pwned")]
         client.check_password.assert_called_once_with("hunter2", ntlm=False, pad=True)
+
+    def test_hashed_mode_calls_check_hash_and_catches_errors(self) -> None:
+        h1 = hashlib.sha1(b"pwned").hexdigest().upper()
+        h2 = hashlib.sha1(b"clean").hexdigest().upper()
+        bad_hash = "NOT_A_VALID_HASH"
+        client = MagicMock()
+        client.check_hash.side_effect = [
+            12,
+            0,
+            ValueError("SHA-1 hash must be exactly 40 hexadecimal characters"),
+            HIBPError("HTTP 502"),
+        ]
+        h3 = hashlib.sha1(b"err").hexdigest().upper()
+
+        results = batch_check_passwords(
+            [h1, h2, h1, bad_hash, h3],
+            client,
+            threshold=5,
+            ntlm=False,
+            pad=False,
+            hashed=True,
+        )
+
+        assert results == [
+            PasswordBatchItem(index=1, pwn_count=12, status="pwned"),
+            PasswordBatchItem(index=2, pwn_count=0, status="clean"),
+            PasswordBatchItem(index=3, pwn_count=12, status="pwned"),
+            PasswordBatchItem(
+                index=4,
+                pwn_count=0,
+                status="error",
+                error="SHA-1 hash must be exactly 40 hexadecimal characters",
+            ),
+            PasswordBatchItem(index=5, pwn_count=0, status="error", error="HTTP 502"),
+        ]
+        assert client.check_hash.call_args_list == [
+            call(h1, ntlm=False, pad=False),
+            call(h2, ntlm=False, pad=False),
+            call(bad_hash, ntlm=False, pad=False),
+            call(h3, ntlm=False, pad=False),
+        ]
+        client.check_password.assert_not_called()
+
+    def test_plaintext_mode_catches_value_error_without_aborting(self) -> None:
+        client = MagicMock()
+        client.check_password.side_effect = [
+            ValueError("Client mode mismatch"),
+            9,
+        ]
+
+        results = batch_check_passwords(["first", "second"], client)
+
+        assert results == [
+            PasswordBatchItem(index=1, pwn_count=0, status="error", error="Client mode mismatch"),
+            PasswordBatchItem(index=2, pwn_count=9, status="pwned"),
+        ]
+
+    def test_with_real_offline_client_sha1_plaintext_and_hashed(self, tmp_path: Path) -> None:
+        h_pwned = hashlib.sha1(b"letmein").hexdigest().upper()
+        h_below = hashlib.sha1(b"rarepass").hexdigest().upper()
+        entries = sorted([(h_pwned, 25), (h_below, 2)], key=lambda item: item[0])
+        dump = tmp_path / "sha1_dump.txt"
+        dump.write_text(
+            "\n".join(f"{digest}:{count}" for digest, count in entries) + "\n",
+            encoding="utf-8",
+        )
+
+        with OfflinePasswordsClient(dump) as client:
+            plain_results = batch_check_passwords(
+                ["letmein", "rarepass", "notfound", "letmein"],
+                client,
+                threshold=5,
+            )
+            hash_results = batch_check_passwords(
+                [h_pwned, "INVALID", h_below],
+                client,
+                threshold=5,
+                hashed=True,
+            )
+
+        assert plain_results == [
+            PasswordBatchItem(index=1, pwn_count=25, status="pwned"),
+            PasswordBatchItem(index=2, pwn_count=2, status="clean"),
+            PasswordBatchItem(index=3, pwn_count=0, status="clean"),
+            PasswordBatchItem(index=4, pwn_count=25, status="pwned"),
+        ]
+        assert hash_results[0] == PasswordBatchItem(index=1, pwn_count=25, status="pwned")
+        assert hash_results[1].index == 2
+        assert hash_results[1].status == "error"
+        assert hash_results[1].error is not None
+        assert hash_results[2] == PasswordBatchItem(index=3, pwn_count=2, status="clean")
+
+    def test_with_real_offline_client_ntlm(self, tmp_path: Path) -> None:
+        ntlm_hash = _md4("hunter2".encode("utf-16-le")).upper()
+        dump = tmp_path / "ntlm_dump.txt"
+        dump.write_text(f"{ntlm_hash}:15\n", encoding="utf-8")
+
+        with OfflinePasswordsClient(dump, ntlm=True) as client:
+            results = batch_check_passwords(["hunter2", "cleanpw"], client, ntlm=True)
+            hash_results = batch_check_passwords([ntlm_hash], client, ntlm=True, hashed=True)
+            mismatch_results = batch_check_passwords(["hunter2"], client, ntlm=False)
+
+        assert results == [
+            PasswordBatchItem(index=1, pwn_count=15, status="pwned"),
+            PasswordBatchItem(index=2, pwn_count=0, status="clean"),
+        ]
+        assert hash_results == [PasswordBatchItem(index=1, pwn_count=15, status="pwned")]
+        assert mismatch_results[0].status == "error"
+        assert mismatch_results[0].error is not None
+
+
+class TestBatchStats:
+    def test_valid_and_frozen(self) -> None:
+        stats = BatchStats(checked=5, pwned=2, clean=2, errors=1, elapsed_seconds=1.23)
+        assert stats.checked == 5
+        assert stats.pwned == 2
+        assert stats.clean == 2
+        assert stats.errors == 1
+        assert stats.elapsed_seconds == 1.23
+        with pytest.raises(ValidationError):
+            stats.checked = 10
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"checked": -1, "pwned": 0, "clean": 0, "errors": 0, "elapsed_seconds": 0.0},
+            {"checked": 0, "pwned": -1, "clean": 0, "errors": 0, "elapsed_seconds": 0.0},
+            {"checked": 0, "pwned": 0, "clean": -1, "errors": 0, "elapsed_seconds": 0.0},
+            {"checked": 0, "pwned": 0, "clean": 0, "errors": -1, "elapsed_seconds": 0.0},
+            {"checked": 0, "pwned": 0, "clean": 0, "errors": 0, "elapsed_seconds": -0.1},
+        ],
+    )
+    def test_rejects_negative_values(self, kwargs: dict[str, int | float]) -> None:
+        with pytest.raises(ValidationError):
+            BatchStats.model_validate(kwargs)
+
+
+class TestComputeAndFormatBatchStats:
+    def test_compute_empty(self) -> None:
+        stats = compute_batch_stats([])
+        assert stats == BatchStats(checked=0, pwned=0, clean=0, errors=0, elapsed_seconds=0.0)
+
+    def test_compute_account_items(self) -> None:
+        items = [
+            AccountBatchItem(account="a@example.com", breaches=["Adobe"], status="pwned"),
+            AccountBatchItem(account="b@example.com", status="clean"),
+            AccountBatchItem(account="c@example.com", status="error", error="timeout"),
+            AccountBatchItem(account="d@example.com", breaches=["LinkedIn"], status="pwned"),
+            AccountBatchItem(account="e@example.com", status="clean"),
+        ]
+        stats = compute_batch_stats(items, elapsed_seconds=1.234)
+        assert stats == BatchStats(
+            checked=5,
+            pwned=2,
+            clean=2,
+            errors=1,
+            elapsed_seconds=1.234,
+        )
+
+    def test_compute_password_items(self) -> None:
+        items = [
+            PasswordBatchItem(index=1, pwn_count=10, status="pwned"),
+            PasswordBatchItem(index=2, pwn_count=0, status="clean"),
+            PasswordBatchItem(index=3, pwn_count=0, status="error", error="HTTP 500"),
+        ]
+        stats = compute_batch_stats(items, elapsed_seconds=0.5)
+        assert stats == BatchStats(checked=3, pwned=1, clean=1, errors=1, elapsed_seconds=0.5)
+
+    def test_compute_negative_elapsed_raises(self) -> None:
+        with pytest.raises(ValueError, match="elapsed_seconds"):
+            compute_batch_stats([], elapsed_seconds=-0.01)
+
+    def test_format_batch_stats(self) -> None:
+        stats = BatchStats(checked=5, pwned=2, clean=2, errors=1, elapsed_seconds=1.234)
+        assert format_batch_stats(stats) == "Checked 5: 2 pwned, 2 clean, 1 error(s) in 1.23s"
+
+    def test_format_batch_stats_zeros(self) -> None:
+        stats = BatchStats(checked=0, pwned=0, clean=0, errors=0, elapsed_seconds=0.0)
+        assert format_batch_stats(stats) == "Checked 0: 0 pwned, 0 clean, 0 error(s) in 0.00s"
+
+
+class TestAsyncBatchCheckPasswords:
+    @pytest.mark.parametrize("bad_threshold", [0, -1])
+    def test_invalid_threshold_raises(self, bad_threshold: int) -> None:
+        client = MagicMock()
+        client.check_password = AsyncMock()
+
+        async def _run() -> None:
+            with pytest.raises(ValueError, match="threshold"):
+                await async_batch_check_passwords(["secret"], client, threshold=bad_threshold)
+
+        asyncio.run(_run())
+        client.check_password.assert_not_called()
+
+    @pytest.mark.parametrize("bad_concurrency", [0, -2])
+    def test_invalid_concurrency_raises(self, bad_concurrency: int) -> None:
+        client = MagicMock()
+        client.check_password = AsyncMock()
+
+        async def _run() -> None:
+            with pytest.raises(ValueError, match="concurrency"):
+                await async_batch_check_passwords(["secret"], client, concurrency=bad_concurrency)
+
+        asyncio.run(_run())
+        client.check_password.assert_not_called()
+
+    def test_empty_passwords_returns_empty(self) -> None:
+        client = MagicMock()
+        client.check_password = AsyncMock()
+        progress = MagicMock()
+
+        results = asyncio.run(async_batch_check_passwords([], client, on_progress=progress))
+
+        assert results == []
+        client.check_password.assert_not_called()
+        progress.assert_not_called()
+
+    def test_dedup_order_errors_progress_and_no_plaintext(self) -> None:
+        counts: dict[str, int | Exception] = {
+            "SuperSecretPwned": 100,
+            "BelowThresholdPw": 4,
+            "CleanPassword": 0,
+            "ErrorPassword": HIBPError("HTTP 503"),
+        }
+
+        async def fake_check_password(
+            password: str,
+            *,
+            ntlm: bool = False,
+            pad: bool = True,
+        ) -> int:
+            _ = (ntlm, pad)
+            val = counts[password]
+            if isinstance(val, Exception):
+                raise val
+            return val
+
+        client = MagicMock()
+        client.check_password = AsyncMock(side_effect=fake_check_password)
+        progress_calls: list[tuple[int, int, PasswordBatchItem]] = []
+        passwords = [
+            "SuperSecretPwned",
+            "BelowThresholdPw",
+            "CleanPassword",
+            "SuperSecretPwned",
+            "ErrorPassword",
+            "ErrorPassword",
+        ]
+
+        results = asyncio.run(
+            async_batch_check_passwords(
+                passwords,
+                client,
+                threshold=5,
+                ntlm=True,
+                pad=False,
+                concurrency=2,
+                on_progress=lambda idx, total, item: progress_calls.append((idx, total, item)),
+            )
+        )
+
+        assert results == [
+            PasswordBatchItem(index=1, pwn_count=100, status="pwned"),
+            PasswordBatchItem(index=2, pwn_count=4, status="clean"),
+            PasswordBatchItem(index=3, pwn_count=0, status="clean"),
+            PasswordBatchItem(index=4, pwn_count=100, status="pwned"),
+            PasswordBatchItem(index=5, pwn_count=0, status="error", error="HTTP 503"),
+            PasswordBatchItem(index=6, pwn_count=0, status="error", error="HTTP 503"),
+        ]
+        assert client.check_password.call_count == 4
+        assert client.check_password.call_args_list == [
+            call("SuperSecretPwned", ntlm=True, pad=False),
+            call("BelowThresholdPw", ntlm=True, pad=False),
+            call("CleanPassword", ntlm=True, pad=False),
+            call("ErrorPassword", ntlm=True, pad=False),
+        ]
+        assert progress_calls == [(i + 1, 6, item) for i, item in enumerate(results)]
+        serialized = "".join(item.model_dump_json() for item in results)
+        for pw in passwords:
+            assert pw not in serialized
+
+    def test_hashed_mode_and_value_error_capture(self) -> None:
+        h1 = hashlib.sha1(b"pwned").hexdigest().upper()
+        h2 = hashlib.sha1(b"clean").hexdigest().upper()
+        bad_hash = "BAD"
+
+        async def fake_check_hash(
+            hash_hex: str,
+            *,
+            ntlm: bool = False,
+            pad: bool = True,
+        ) -> int:
+            _ = (ntlm, pad)
+            if hash_hex == bad_hash:
+                raise ValueError("Invalid hash")
+            return 50 if hash_hex == h1 else 0
+
+        client = MagicMock()
+        client.check_hash = AsyncMock(side_effect=fake_check_hash)
+        client.check_password = AsyncMock()
+
+        results = asyncio.run(
+            async_batch_check_passwords(
+                [h1, bad_hash, h2, h1],
+                client,
+                hashed=True,
+                ntlm=False,
+                pad=True,
+            )
+        )
+
+        assert results == [
+            PasswordBatchItem(index=1, pwn_count=50, status="pwned"),
+            PasswordBatchItem(index=2, pwn_count=0, status="error", error="Invalid hash"),
+            PasswordBatchItem(index=3, pwn_count=0, status="clean"),
+            PasswordBatchItem(index=4, pwn_count=50, status="pwned"),
+        ]
+        assert client.check_hash.call_count == 3
+        client.check_password.assert_not_called()
+        serialized = "".join(item.model_dump_json() for item in results)
+        for item_val in [h1, h2, bad_hash]:
+            assert item_val not in serialized
+
+    def test_bounded_concurrency_and_out_of_order_completion_preserves_order(self) -> None:
+        active = 0
+        max_active = 0
+        delays = {"pw1": 0.04, "pw2": 0.01, "pw3": 0.03, "pw4": 0.005, "pw5": 0.02}
+
+        async def fake_check_password(
+            password: str,
+            *,
+            ntlm: bool = False,
+            pad: bool = True,
+        ) -> int:
+            nonlocal active, max_active
+            _ = (ntlm, pad)
+            active += 1
+            max_active = max(max_active, active)
+            try:
+                await asyncio.sleep(delays[password])
+                return int(password[-1])
+            finally:
+                active -= 1
+
+        client = MagicMock()
+        client.check_password = AsyncMock(side_effect=fake_check_password)
+        progress_indices: list[int] = []
+
+        results = asyncio.run(
+            async_batch_check_passwords(
+                ["pw1", "pw2", "pw3", "pw4", "pw5", "pw1"],
+                client,
+                concurrency=2,
+                threshold=3,
+                on_progress=lambda idx, total, item: progress_indices.append(idx),
+            )
+        )
+
+        assert max_active == 2
+        assert [r.index for r in results] == [1, 2, 3, 4, 5, 6]
+        assert [r.pwn_count for r in results] == [1, 2, 3, 4, 5, 1]
+        assert [r.status for r in results] == [
+            "clean",
+            "clean",
+            "pwned",
+            "pwned",
+            "pwned",
+            "clean",
+        ]
+        assert progress_indices == [1, 2, 3, 4, 5, 6]
+
+    def test_with_real_async_client_and_httpx_mock(self, httpx_mock: HTTPXMock) -> None:
+        h_pwned = hashlib.sha1(b"password").hexdigest().upper()
+        h_clean = hashlib.sha1(b"unique-clean-pw-123").hexdigest().upper()
+
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{h_pwned[:5]}",
+            text=f"{h_pwned[5:]}:999\r\n",
+        )
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{h_clean[:5]}",
+            text="00000000000000000000000000000000000:1\r\n",
+        )
+
+        async def _run() -> list[PasswordBatchItem]:
+            async with AsyncPwnedPasswordsClient(user_agent="test") as client:
+                return await async_batch_check_passwords(
+                    ["password", "unique-clean-pw-123", "password"],
+                    client,
+                    pad=False,
+                )
+
+        results = asyncio.run(_run())
+
+        assert results == [
+            PasswordBatchItem(index=1, pwn_count=999, status="pwned"),
+            PasswordBatchItem(index=2, pwn_count=0, status="clean"),
+            PasswordBatchItem(index=3, pwn_count=999, status="pwned"),
+        ]

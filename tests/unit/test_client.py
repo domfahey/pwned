@@ -27,6 +27,7 @@ from pwned.config import DEFAULT_USER_AGENT
 from pwned.models import (
     Breach,
     DataClassDescription,
+    MetaTag,
     Paste,
     SearchResult,
     SubscribedDomain,
@@ -813,6 +814,31 @@ class TestDomainVerification:
         req = httpx_mock.get_request()
         assert req is not None
         assert req.read() == b'{"DomainName":"example.com","EmailAlias":"security"}'
+
+    def test_generate_meta_tag(self, client: HIBPClient, httpx_mock: HTTPXMock) -> None:
+        tag_html = '<meta name="hibp-verify" content="abc123" />'
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{BASE}/domainVerification/generateMetaTag",
+            json={"metaTag": tag_html},
+        )
+        result = client.generate_meta_tag("example.com")
+        assert isinstance(result, MetaTag)
+        assert result.meta_tag == tag_html
+        req = httpx_mock.get_request()
+        assert req is not None
+        assert req.read() == b'{"DomainName":"example.com"}'
+
+    def test_verify_meta_tag(self, client: HIBPClient, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{BASE}/domainVerification/verifyMetaTag",
+            status_code=204,
+        )
+        client.verify_meta_tag("example.com")
+        req = httpx_mock.get_request()
+        assert req is not None
+        assert req.read() == b'{"DomainName":"example.com"}'
 
 
 class TestSearchAccount:

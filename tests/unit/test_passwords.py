@@ -508,3 +508,208 @@ class TestAsyncPwnedPasswordsClient:
                     await ac.is_pwned("password", threshold=0)
 
         asyncio.run(run())
+
+
+class TestCheckHash:
+    def test_sha1_found(self, client: PwnedPasswordsClient, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{PREFIX}",
+            text=RANGE_RESPONSE,
+        )
+        assert client.check_hash(SHA1_PASSWORD) == 3861493
+
+    def test_sha1_not_found(self, client: PwnedPasswordsClient, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{PREFIX}",
+            text="0018A45C4D1DEF81644B54AB7F969B88D65:1\n",
+        )
+        assert client.check_hash(SHA1_PASSWORD) == 0
+
+    def test_sha1_normalizes_lowercase_and_whitespace(
+        self, client: PwnedPasswordsClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{PREFIX}",
+            text=f"{SUFFIX}:55\n",
+        )
+        assert client.check_hash(f"  {SHA1_PASSWORD.lower()} \n") == 55
+
+    def test_ntlm_found_and_normalized(
+        self, client: PwnedPasswordsClient, httpx_mock: HTTPXMock
+    ) -> None:
+        ntlm = _ntlm_hash("password")
+        httpx_mock.add_response(
+            url=httpx.URL(f"{BASE_URL}/range/{ntlm[:5]}", params={"mode": "ntlm"}),
+            text=f"{ntlm[5:]}:999\n",
+        )
+        assert client.check_hash(f" {ntlm.lower()} ", ntlm=True) == 999
+
+    def test_padding_header_and_ntlm_combined(
+        self, client: PwnedPasswordsClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/{PREFIX}",
+            text=f"{SUFFIX}:42\n",
+        )
+        assert client.check_hash(SHA1_PASSWORD, pad=True) == 42
+        req1 = httpx_mock.get_request()
+        assert req1 is not None
+        assert req1.headers["Add-Padding"] == "true"
+        assert "mode" not in req1.url.params
+
+        ntlm = _ntlm_hash("password")
+        httpx_mock.add_response(
+            url=httpx.URL(f"{BASE_URL}/range/{ntlm[:5]}", params={"mode": "ntlm"}),
+            text=f"{ntlm[5:]}:77\n",
+        )
+        assert client.check_hash(ntlm, ntlm=True, pad=True) == 77
+        req2 = httpx_mock.get_requests()[-1]
+        assert req2.headers["Add-Padding"] == "true"
+        assert req2.url.params["mode"] == "ntlm"
+
+    @pytest.mark.parametrize(
+        "bad_hash",
+        [
+            "",
+            "     ",
+            "A" * 39,
+            "A" * 41,
+            _ntlm_hash("password"),
+            "G" + "0" * 39,
+            "0x" + "A" * 38,
+        ],
+    )
+    def test_invalid_sha1_hash_raises_value_error(
+        self, client: PwnedPasswordsClient, bad_hash: str
+    ) -> None:
+        with pytest.raises(ValueError, match="40 hexadecimal"):
+            client.check_hash(bad_hash)
+
+    @pytest.mark.parametrize(
+        "bad_hash",
+        [
+            "",
+            "     ",
+            "A" * 31,
+            "A" * 33,
+            SHA1_PASSWORD,
+            "Z" + "0" * 31,
+            "1_23" + "A" * 28,
+        ],
+    )
+    def test_invalid_ntlm_hash_raises_value_error(
+        self, client: PwnedPasswordsClient, bad_hash: str
+    ) -> None:
+        with pytest.raises(ValueError, match="32 hexadecimal"):
+            client.check_hash(bad_hash, ntlm=True)
+
+
+class TestIsHashPwned:
+    @pytest.mark.parametrize(
+        ("count", "threshold", "expected"),
+        [
+            (0, 1, False),
+            (1, 1, True),
+            (4, 5, False),
+            (5, 5, True),
+            (10, 5, True),
+        ],
+    )
+    def test_threshold_comparison(
+        self,
+        client: PwnedPasswordsClient,
+        httpx_mock: HTTPXMock,
+        count: int,
+        threshold: int,
+        expected: bool,
+    ) -> None:
+        body = f"{SUFFIX}:{count}\n" if count > 0 else ""
+        httpx_mock.add_response(url=f"{BASE_URL}/range/{PREFIX}", text=body)
+        assert client.is_hash_pwned(SHA1_PASSWORD, threshold=threshold) is expected
+
+    def test_normalizes_and_forwards_ntlm_and_pad(
+        self, client: PwnedPasswordsClient, httpx_mock: HTTPXMock
+    ) -> None:
+        ntlm = _ntlm_hash("password")
+        httpx_mock.add_response(
+            url=httpx.URL(f"{BASE_URL}/range/{ntlm[:5]}", params={"mode": "ntlm"}),
+            text=f"{ntlm[5:]}:3\n",
+        )
+        assert client.is_hash_pwned(f" {ntlm.lower()} ", threshold=2, ntlm=True, pad=True) is True
+        req = httpx_mock.get_request()
+        assert req is not None
+        assert req.headers["Add-Padding"] == "true"
+        assert req.url.params["mode"] == "ntlm"
+
+    @pytest.mark.parametrize("bad_threshold", [0, -1, -100])
+    def test_invalid_threshold_raises_value_error(
+        self, client: PwnedPasswordsClient, bad_threshold: int
+    ) -> None:
+        with pytest.raises(ValueError, match="threshold must be at least 1"):
+            client.is_hash_pwned(SHA1_PASSWORD, threshold=bad_threshold)
+
+    def test_invalid_hash_raises_value_error(self, client: PwnedPasswordsClient) -> None:
+        with pytest.raises(ValueError, match="40 hexadecimal"):
+            client.is_hash_pwned("not-a-hash")
+
+
+class TestAsyncHashMethods:
+    def test_async_check_hash(self, httpx_mock: HTTPXMock) -> None:
+        async def run() -> None:
+            ntlm = _ntlm_hash("password")
+            httpx_mock.add_response(
+                url=f"{BASE_URL}/range/{PREFIX}",
+                text=f"{SUFFIX}:15\n",
+            )
+            httpx_mock.add_response(
+                url=f"{BASE_URL}/range/{PREFIX}",
+                text="",
+            )
+            httpx_mock.add_response(
+                url=httpx.URL(f"{BASE_URL}/range/{ntlm[:5]}", params={"mode": "ntlm"}),
+                text=f"{ntlm[5:]}:88\n",
+            )
+            async with AsyncPwnedPasswordsClient(user_agent="test-agent") as ac:
+                assert await ac.check_hash(f" {SHA1_PASSWORD.lower()} ", pad=True) == 15
+                assert await ac.check_hash(SHA1_PASSWORD) == 0
+                assert await ac.check_hash(f" {ntlm.lower()} ", ntlm=True, pad=True) == 88
+                with pytest.raises(ValueError, match="40 hexadecimal"):
+                    await ac.check_hash(ntlm)
+                with pytest.raises(ValueError, match="32 hexadecimal"):
+                    await ac.check_hash(SHA1_PASSWORD, ntlm=True)
+
+            reqs = httpx_mock.get_requests()
+            assert reqs[0].headers["Add-Padding"] == "true"
+            assert "Add-Padding" not in reqs[1].headers
+            assert reqs[2].headers["Add-Padding"] == "true"
+            assert reqs[2].url.params["mode"] == "ntlm"
+
+        asyncio.run(run())
+
+    def test_async_is_hash_pwned(self, httpx_mock: HTTPXMock) -> None:
+        async def run() -> None:
+            ntlm = _ntlm_hash("password")
+            httpx_mock.add_response(
+                url=f"{BASE_URL}/range/{PREFIX}",
+                text=f"{SUFFIX}:4\n",
+            )
+            httpx_mock.add_response(
+                url=httpx.URL(f"{BASE_URL}/range/{ntlm[:5]}", params={"mode": "ntlm"}),
+                text=f"{ntlm[5:]}:5\n",
+            )
+            async with AsyncPwnedPasswordsClient(user_agent="test-agent") as ac:
+                assert await ac.is_hash_pwned(SHA1_PASSWORD, threshold=5) is False
+                assert (
+                    await ac.is_hash_pwned(f" {ntlm.lower()} ", threshold=5, ntlm=True, pad=True)
+                    is True
+                )
+                with pytest.raises(ValueError, match="threshold must be at least 1"):
+                    await ac.is_hash_pwned(SHA1_PASSWORD, threshold=0)
+                with pytest.raises(ValueError, match="40 hexadecimal"):
+                    await ac.is_hash_pwned("INVALID")
+
+            req = httpx_mock.get_requests()[-1]
+            assert req.headers["Add-Padding"] == "true"
+            assert req.url.params["mode"] == "ntlm"
+
+        asyncio.run(run())

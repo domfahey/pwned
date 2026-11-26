@@ -1,0 +1,76 @@
+name: "Have I Been Pwned (pwned) Audit"
+description: "Run pwned CLI audits securely in GitHub Actions workflows using astral-sh/setup-uv"
+author: "Dominic Fahey"
+
+inputs:
+  args:
+    description: "CLI arguments passed to pwned (e.g. account --file emails.txt --fail-if-pwned)"
+    required: true
+  api-key:
+    description: "HIBP API key (passed securely via HIBP_API_KEY environment variable)"
+    required: false
+    default: ""
+  version:
+    description: "Git ref, tag, or branch of domfahey/pwned to run via uvx"
+    required: false
+    default: "main"
+  output-file:
+    description: "Optional file path to redirect stdout (e.g. pwned.sarif)"
+    required: false
+    default: ""
+  python-version:
+    description: "Python version to set up for uv"
+    required: false
+    default: "3.12"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up uv
+      uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Run pwned audit
+      shell: bash
+      env:
+        INPUT_ARGS: ${{ inputs.args }}
+        INPUT_API_KEY: ${{ inputs.api-key }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_OUTPUT_FILE: ${{ inputs.output-file }}
+        INPUT_PYTHON_VERSION: ${{ inputs.python-version }}
+      run: |
+        uv run --no-project --python "$INPUT_PYTHON_VERSION" python -c '
+        import os
+        import shlex
+        import subprocess
+        import sys
+
+        args_str = os.environ.get("INPUT_ARGS", "")
+        version = os.environ.get("INPUT_VERSION", "main")
+        output_file = os.environ.get("INPUT_OUTPUT_FILE", "").strip()
+        api_key = os.environ.get("INPUT_API_KEY", "").strip()
+        py_ver = os.environ.get("INPUT_PYTHON_VERSION", "3.12").strip()
+
+        argv = shlex.split(args_str)
+        cmd = [
+            "uvx",
+            "--python",
+            py_ver,
+            "--from",
+            f"git+https://github.com/domfahey/pwned.git@{version}",
+            "pwned",
+            *argv,
+        ]
+
+        env = dict(os.environ)
+        if api_key:
+            env["HIBP_API_KEY"] = api_key
+
+        if output_file:
+            with open(output_file, "w", encoding="utf-8") as f:
+                res = subprocess.run(cmd, env=env, stdout=f, stderr=sys.stderr, check=False)
+            sys.exit(res.returncode)
+        res = subprocess.run(cmd, env=env, check=False)
+        sys.exit(res.returncode)
+        '

@@ -1,0 +1,8 @@
+- id: pwned-audit
+  name: Audit password export with pwned
+  description: "Check password vault exports or credential files against Have I Been Pwned via pwned audit"
+  entry: pwned audit --fail-if-pwned
+  language: python
+  pass_filenames: true
+  types: [file]
+  stages: [manual]

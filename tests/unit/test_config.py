@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from pathlib import Path
+from types import SimpleNamespace
+from typing import get_args
 from unittest.mock import patch
 
 import pytest
@@ -10,13 +13,21 @@ from pydantic import SecretStr, ValidationError
 
 from pwned.config import (
     DEFAULT_USER_AGENT,
+    KEYRING_SERVICE,
+    KEYRING_USERNAME,
+    ConfigBackend,
     Settings,
     clear_api_key,
+    clear_api_key_keyring,
+    get_api_key_source,
     get_config_dir,
     get_config_file,
+    get_keyring_api_key,
+    keyring_available,
     load_settings,
     mask_api_key,
     save_api_key,
+    save_api_key_keyring,
 )
 
 
@@ -339,3 +350,271 @@ class TestMaskApiKey:
     )
     def test_mask_api_key(self, api_key: str | None, expected: str) -> None:
         assert mask_api_key(api_key) == expected
+
+
+def _make_fake_keyring(store: dict[tuple[str, str], str]) -> SimpleNamespace:
+    class PasswordDeleteError(Exception):
+        pass
+
+    def get_password(service: str, username: str) -> str | None:
+        return store.get((service, username))
+
+    def set_password(service: str, username: str, password: str) -> None:
+        store[(service, username)] = password
+
+    def delete_password(service: str, username: str) -> None:
+        if (service, username) not in store:
+            raise PasswordDeleteError("Password not found")
+        del store[(service, username)]
+
+    return SimpleNamespace(
+        get_password=get_password,
+        set_password=set_password,
+        delete_password=delete_password,
+        errors=SimpleNamespace(PasswordDeleteError=PasswordDeleteError),
+    )
+
+
+class TestKeyringBackend:
+    def test_constants_and_type_alias(self) -> None:
+        assert KEYRING_SERVICE == "pwned"
+        assert KEYRING_USERNAME == "hibp_api_key"
+        assert get_args(ConfigBackend) == ("file", "keyring")
+
+    def test_keyring_available_true_when_installed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(sys.modules, "keyring", _make_fake_keyring({}))
+        assert keyring_available() is True
+
+    def test_keyring_available_false_when_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setitem(sys.modules, "keyring", None)
+        assert keyring_available() is False
+
+    def test_get_keyring_api_key_returns_stored_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _make_fake_keyring({(KEYRING_SERVICE, KEYRING_USERNAME): "kr-secret"})
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+        assert get_keyring_api_key() == "kr-secret"
+
+    @pytest.mark.parametrize("stored", [None, ""])
+    def test_get_keyring_api_key_returns_none_when_empty_or_none(
+        self, monkeypatch: pytest.MonkeyPatch, stored: str | None
+    ) -> None:
+        fake = SimpleNamespace(get_password=lambda _s, _u: stored)
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+        assert get_keyring_api_key() is None
+
+    def test_get_keyring_api_key_returns_none_when_missing_module(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "keyring", None)
+        assert get_keyring_api_key() is None
+
+    def test_get_keyring_api_key_returns_none_on_backend_exception(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fail_get(_service: str, _username: str) -> str | None:
+            raise RuntimeError("NoKeyringError: no backend available")
+
+        monkeypatch.setitem(sys.modules, "keyring", SimpleNamespace(get_password=fail_get))
+        assert get_keyring_api_key() is None
+
+    def test_save_api_key_keyring_stores_password(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        store: dict[tuple[str, str], str] = {}
+        monkeypatch.setitem(sys.modules, "keyring", _make_fake_keyring(store))
+        save_api_key_keyring("my-keyring-key")
+        assert store[(KEYRING_SERVICE, KEYRING_USERNAME)] == "my-keyring-key"
+
+    @pytest.mark.parametrize(
+        "bad_key",
+        ["", "   ", "\t", "abc\ndef", "abc\rdef", "abc\r\ndef"],
+    )
+    def test_save_api_key_keyring_rejects_invalid(
+        self, monkeypatch: pytest.MonkeyPatch, bad_key: str
+    ) -> None:
+        store: dict[tuple[str, str], str] = {}
+        monkeypatch.setitem(sys.modules, "keyring", _make_fake_keyring(store))
+        with pytest.raises(ValueError):
+            save_api_key_keyring(bad_key)
+        assert store == {}
+
+    def test_save_api_key_keyring_raises_when_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "keyring", None)
+        with pytest.raises(RuntimeError, match=r"uv pip install 'pwned\[keyring\]'"):
+            save_api_key_keyring("my-keyring-key")
+
+    def test_clear_api_key_keyring_deletes_when_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = {(KEYRING_SERVICE, KEYRING_USERNAME): "kr-secret"}
+        monkeypatch.setitem(sys.modules, "keyring", _make_fake_keyring(store))
+        assert clear_api_key_keyring() is True
+        assert store == {}
+
+    def test_clear_api_key_keyring_returns_false_when_not_stored(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        delete_called = False
+
+        def fail_if_called(_s: str, _u: str) -> None:
+            nonlocal delete_called
+            delete_called = True
+
+        fake = SimpleNamespace(get_password=lambda _s, _u: None, delete_password=fail_if_called)
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+        assert clear_api_key_keyring() is False
+        assert delete_called is False
+
+    def test_clear_api_key_keyring_handles_password_delete_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _make_fake_keyring({})
+        fake.get_password = lambda _s, _u: "stale-key"
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+        assert clear_api_key_keyring() is False
+
+    def test_clear_api_key_keyring_reraises_unexpected_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def boom(_s: str, _u: str) -> None:
+            raise RuntimeError("locked keyring")
+
+        fake = SimpleNamespace(get_password=lambda _s, _u: "kr-key", delete_password=boom)
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+        with pytest.raises(RuntimeError, match="locked keyring"):
+            clear_api_key_keyring()
+
+    def test_clear_api_key_keyring_raises_when_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "keyring", None)
+        with pytest.raises(RuntimeError, match=r"uv pip install 'pwned\[keyring\]'"):
+            clear_api_key_keyring()
+
+
+class TestKeyringPrecedenceAndSource:
+    def test_load_settings_falls_back_to_keyring(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _make_fake_keyring({(KEYRING_SERVICE, KEYRING_USERNAME): "kr-key"})
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+        monkeypatch.setenv("HIBP_USER_AGENT", "custom-ua")
+
+        s = load_settings()
+        assert s.get_api_key() == "kr-key"
+        assert s.user_agent == "custom-ua"
+
+    def test_load_settings_xdg_overrides_keyring(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _make_fake_keyring({(KEYRING_SERVICE, KEYRING_USERNAME): "kr-key"})
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+        cfg = get_config_file()
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text("HIBP_API_KEY=xdg-key\n", encoding="utf-8")
+
+        assert load_settings().get_api_key() == "xdg-key"
+
+    def test_load_settings_cwd_dotenv_overrides_keyring(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        fake = _make_fake_keyring({(KEYRING_SERVICE, KEYRING_USERNAME): "kr-key"})
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+        (tmp_path / ".env").write_text("HIBP_API_KEY=cwd-key\n", encoding="utf-8")
+
+        assert load_settings().get_api_key() == "cwd-key"
+
+    def test_load_settings_env_overrides_keyring(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _make_fake_keyring({(KEYRING_SERVICE, KEYRING_USERNAME): "kr-key"})
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+        monkeypatch.setenv("HIBP_API_KEY", "env-key")
+
+        assert load_settings().get_api_key() == "env-key"
+
+    def test_load_settings_explicit_overrides_keyring(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _make_fake_keyring({(KEYRING_SERVICE, KEYRING_USERNAME): "kr-key"})
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+
+        assert load_settings(api_key="cli-key").get_api_key() == "cli-key"
+
+    def test_load_settings_empty_explicit_does_not_fallback_to_keyring(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _make_fake_keyring({(KEYRING_SERVICE, KEYRING_USERNAME): "kr-key"})
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+
+        s = load_settings(api_key="")
+        assert s.api_key is None
+        assert s.get_api_key() is None
+
+    def test_load_settings_empty_env_does_not_fallback_to_keyring(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _make_fake_keyring({(KEYRING_SERVICE, KEYRING_USERNAME): "kr-key"})
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+        monkeypatch.setenv("HIBP_API_KEY", "")
+
+        s = load_settings()
+        assert s.api_key is None
+        assert s.get_api_key() is None
+
+    def test_get_api_key_source_precedence(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        fake = _make_fake_keyring({(KEYRING_SERVICE, KEYRING_USERNAME): "kr-key"})
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+        assert get_api_key_source() == "keyring"
+
+        cfg = get_config_file()
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text("HIBP_API_KEY=xdg-key\n", encoding="utf-8")
+        assert get_api_key_source() == "xdg"
+
+        (tmp_path / ".env").write_text("HIBP_API_KEY=cwd-key\n", encoding="utf-8")
+        assert get_api_key_source() == "dotenv"
+
+        monkeypatch.setenv("HIBP_API_KEY", "env-key")
+        assert get_api_key_source() == "env"
+
+        assert get_api_key_source(api_key="cli-key") == "cli"
+
+    def test_get_api_key_source_empty_overrides_return_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        fake = _make_fake_keyring({(KEYRING_SERVICE, KEYRING_USERNAME): "kr-key"})
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+        cfg = get_config_file()
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text("HIBP_API_KEY=xdg-key\n", encoding="utf-8")
+        (tmp_path / ".env").write_text("HIBP_API_KEY=cwd-key\n", encoding="utf-8")
+        monkeypatch.setenv("HIBP_API_KEY", "env-key")
+
+        assert get_api_key_source(api_key="") == "none"
+
+        monkeypatch.setenv("HIBP_API_KEY", "")
+        assert get_api_key_source() == "none"
+
+    def test_get_api_key_source_empty_dotenv_shadows_xdg(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setitem(sys.modules, "keyring", None)
+        cfg = get_config_file()
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text("HIBP_API_KEY=xdg-key\n", encoding="utf-8")
+        (tmp_path / ".env").write_text("HIBP_API_KEY=\n", encoding="utf-8")
+
+        assert get_api_key_source() == "none"
+
+        fake = _make_fake_keyring({(KEYRING_SERVICE, KEYRING_USERNAME): "kr-key"})
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+        assert get_api_key_source() == "keyring"
+
+    def test_get_api_key_source_handles_home_unavailable_and_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _raise_no_home() -> Path:
+            raise RuntimeError("Could not determine home directory.")
+
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr(Path, "home", _raise_no_home)
+        monkeypatch.setitem(sys.modules, "keyring", None)
+
+        assert get_api_key_source() == "none"

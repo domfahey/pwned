@@ -10,10 +10,38 @@ from pydantic import BaseModel
 
 from pwned._parsers import strip_html as strip_html
 
-OutputFormat = Literal["text", "json", "jsonl", "csv", "table"]
-OUTPUT_FORMATS: tuple[OutputFormat, ...] = ("text", "json", "jsonl", "csv", "table")
+OutputFormat = Literal["text", "json", "jsonl", "csv", "table", "sarif"]
+OUTPUT_FORMATS: tuple[OutputFormat, ...] = ("text", "json", "jsonl", "csv", "table", "sarif")
 
 _TABLE_MAX_CELL = 60
+_SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
+_SARIF_INFO_URI = "https://github.com/domfahey/pwned"
+_SARIF_RULES: list[dict[str, Any]] = [
+    {
+        "id": "HIBP001",
+        "name": "AccountBreachExposure",
+        "shortDescription": {"text": "Account found in a data breach, paste, or stealer log."},
+        "defaultConfiguration": {"level": "error"},
+    },
+    {
+        "id": "HIBP002",
+        "name": "CompromisedPassword",
+        "shortDescription": {"text": "Password found in the Pwned Passwords corpus."},
+        "defaultConfiguration": {"level": "error"},
+    },
+    {
+        "id": "HIBP003",
+        "name": "DomainAliasBreach",
+        "shortDescription": {"text": "Domain email alias exposed in a data breach."},
+        "defaultConfiguration": {"level": "warning"},
+    },
+    {
+        "id": "HIBP004",
+        "name": "BreachRecord",
+        "shortDescription": {"text": "Known data breach record from Have I Been Pwned."},
+        "defaultConfiguration": {"level": "warning"},
+    },
+]
 
 
 def serialize(data: Any) -> Any:
@@ -180,6 +208,146 @@ def _format_table(serialized: Any) -> str:
     return _render_table(["Value"], [[_truncate_cell(_format_cell("value", serialized))]])
 
 
+def _sarif_result(rule_id: str, level: str, text: str) -> dict[str, Any]:
+    return {"ruleId": rule_id, "level": level, "message": {"text": text}}
+
+
+def _sarif_breach_result(
+    breach: dict[str, Any],
+    *,
+    rule_id: str,
+    level: str,
+    prefix: str,
+) -> dict[str, Any]:
+    name = breach.get("Name", "")
+    domain = breach.get("Domain", "")
+    pwn_count = breach.get("PwnCount", 0)
+    return _sarif_result(
+        rule_id,
+        level,
+        f"{prefix}{name} (domain: {domain}, pwn count: {pwn_count}).",
+    )
+
+
+def _sarif_dict_results(serialized: dict[str, Any]) -> list[dict[str, Any]]:
+    if "findings" in serialized and isinstance(serialized["findings"], list):
+        return [
+            _sarif_result(
+                "HIBP002",
+                "error",
+                f"Compromised password for {f.get('name', '')} "
+                f"({f.get('username', '')}): "
+                f"seen {f.get('pwn_count', 0)} times in breaches.",
+            )
+            for f in serialized["findings"]
+        ]
+    if "breaches" in serialized or "pastes" in serialized or "stealer_logs" in serialized:
+        results = [
+            _sarif_breach_result(
+                b,
+                rule_id="HIBP001",
+                level="error",
+                prefix="Account found in breach ",
+            )
+            for b in serialized.get("breaches") or []
+        ]
+        results.extend(
+            _sarif_result(
+                "HIBP001",
+                "error",
+                f"Account found in paste {p.get('Source', '')} (id: {p.get('Id', '')}).",
+            )
+            for p in serialized.get("pastes") or []
+        )
+        results.extend(
+            _sarif_result("HIBP001", "error", f"Account found in stealer log for {domain}.")
+            for domain in serialized.get("stealer_logs") or []
+        )
+        return results
+    if "Name" in serialized:
+        return [
+            _sarif_breach_result(
+                serialized,
+                rule_id="HIBP004",
+                level="warning",
+                prefix="Breach ",
+            )
+        ]
+    if serialized and _is_str_list_mapping(serialized):
+        return [
+            _sarif_result(
+                "HIBP003",
+                "warning",
+                f"Domain alias {alias} exposed in breaches: {', '.join(breaches)}.",
+            )
+            for alias, breaches in serialized.items()
+        ]
+    return []
+
+
+def _sarif_list_results(serialized: list[Any]) -> list[dict[str, Any]]:
+    if not serialized or not all(isinstance(item, dict) for item in serialized):
+        return []
+    if all("account" in item and "status" in item for item in serialized):
+        return [
+            _sarif_result(
+                "HIBP001",
+                "error",
+                f"Account {item['account']} found in breaches: "
+                f"{', '.join(item.get('breaches', []))}.",
+            )
+            for item in serialized
+            if item.get("status") == "pwned"
+        ]
+    if all("index" in item and "status" in item for item in serialized):
+        return [
+            _sarif_result(
+                "HIBP002",
+                "error",
+                f"Password #{item['index']} seen {item.get('pwn_count', 0)} times in breaches.",
+            )
+            for item in serialized
+            if item.get("status") == "pwned"
+        ]
+    if all("Name" in item for item in serialized):
+        return [
+            _sarif_breach_result(
+                item,
+                rule_id="HIBP004",
+                level="warning",
+                prefix="Breach ",
+            )
+            for item in serialized
+        ]
+    return []
+
+
+def _format_sarif(serialized: Any) -> str:
+    results: list[dict[str, Any]] = []
+    if isinstance(serialized, dict):
+        results = _sarif_dict_results(serialized)
+    elif isinstance(serialized, list):
+        results = _sarif_list_results(serialized)
+
+    doc = {
+        "$schema": _SARIF_SCHEMA,
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "pwned",
+                        "informationUri": _SARIF_INFO_URI,
+                        "rules": _SARIF_RULES,
+                    }
+                },
+                "results": results,
+            }
+        ],
+    }
+    return json.dumps(doc, indent=2)
+
+
 def format_output(data: Any, *, fmt: OutputFormat = "text") -> str:
     """Format API response data according to the requested output format."""
     serialized = serialize(data)
@@ -193,6 +361,8 @@ def format_output(data: Any, *, fmt: OutputFormat = "text") -> str:
         return _format_csv(serialized)
     if fmt == "table":
         return _format_table(serialized)
+    if fmt == "sarif":
+        return _format_sarif(serialized)
     raise ValueError(f"Unsupported output format: {fmt!r}")
 
 

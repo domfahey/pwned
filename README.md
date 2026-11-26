@@ -9,7 +9,7 @@
 
 A command-line tool and typed Python client for the [Have I Been Pwned](https://haveibeenpwned.com/) API v3.
 
-Check email addresses against data breaches, search for compromised passwords, query stealer logs, audit password vaults, and more — all from the terminal or Python.
+Check email addresses against data breaches, search for compromised passwords, query stealer logs, audit password vaults, perform offline hash checks, and more — all from the terminal or Python.
 
 ## Installation
 
@@ -26,10 +26,15 @@ uvx --from git+https://github.com/domfahey/pwned.git pwned password
 uv tool install git+https://github.com/domfahey/pwned.git
 ```
 
-With optional KeePass vault auditing support:
+With optional extras (KeePass vault support, OS Keychain credential storage, or Bitwarden encrypted JSON decryption):
 ```bash
-uv tool install "pwned[keepass] @ git+https://github.com/domfahey/pwned.git"
+uv tool install "pwned[all] @ git+https://github.com/domfahey/pwned.git"
 ```
+Available optional extras:
+- `keepass` (`pykeepass`)
+- `keyring` (`keyring` for OS Keychain storage)
+- `crypto` (`cryptography` for encrypted Bitwarden JSON dumps)
+- `all` (installs all optional dependencies)
 
 ### Development setup
 ```bash
@@ -43,9 +48,9 @@ When running from a local clone, prefix commands with `uv run pwned ...`. Exampl
 
 Some commands require an [HIBP API key](https://haveibeenpwned.com/API/Key). Manage stored credentials with `pwned auth`:
 
-- `pwned auth set` — Interactively prompt for and store your API key in `~/.config/pwned/.env` (with secure `0600` file permissions).
-- `pwned auth show` — Display masked API key status and config file path.
-- `pwned auth clear` — Remove the stored API key.
+- `pwned auth set` — Interactively prompt for and store your API key in `~/.config/pwned/.env` (with secure `0600` file permissions) or OS Keychain via `--backend keyring`.
+- `pwned auth show` — Display masked API key status, storage backend, and configuration path.
+- `pwned auth clear` — Remove the stored API key from file or keychain storage.
 
 ### API Key Precedence
 Configuration is resolved in the following order (highest precedence first):
@@ -53,25 +58,27 @@ Configuration is resolved in the following order (highest precedence first):
 2. `HIBP_API_KEY` environment variable
 3. Current working directory `.env` file
 4. User XDG config file (`~/.config/pwned/.env`)
+5. OS Keychain backend (`keyring`)
 
 ## CLI Usage (by HIBP Plan Tier)
 
 ### Free / No API key
-- `password` — Check password exposure (supports `--stdin`, `--file`, `--ntlm`, `--pad`, `--threshold`, `--fail-if-pwned`)
-- `audit` — Audit local password manager exports (Bitwarden JSON/CSV, generic CSV, KeePass via `--source keepass`)
+- `password` — Check password exposure (supports `--stdin`, `--file`, `--hashed`, `--offline-db`, `--concurrency`, `--stats`, `--ntlm`, `--pad`, `--threshold`, `--fail-if-pwned`)
+- `audit` — Audit local password manager or browser exports (Bitwarden JSON/Encrypted-JSON/CSV, 1Password CSV/1PUX, Chrome/Firefox/Apple CSV, generic CSV, KeePass via `--source keepass`, `--check-reuse`, `--concurrency`, `--offline-db`, `--fail-if-pwned`)
 - `breach` — Get details for a specific breach
-- `breaches` — List all known breaches (supports `--domain`, `--spam-list`, `--no-spam-list`)
+- `breaches` — List all known breaches (supports `--domain`, `--spam-list`, `--no-spam-list`, `--since`, `--data-class`, `--verified-only`, `--exclude-retired`, `--sort pwn-count|date|name`)
 - `latest-breach` — Get the most recently added breach
 - `dataclasses` — List tracked data classes (supports `--descriptions`)
 - `cache clear` — Clear local response cache
-- `auth set|show|clear` — Manage stored API key credentials
+- `auth set|show|clear` — Manage stored API key credentials (`--backend file|keyring`)
+- `completion` — Generate shell tab-completion scripts (`completion bash|zsh|fish`)
 
 ### Core / Pro / High RPM
-- `account` — Check email or username breaches (supports `--file`, `--stdin`, `--rpm`, `--fail-if-pwned`, `--no-truncate`, `--domain`, `--no-include-unverified`)
-- `search` — Composite search for breaches, pastes, and stealer logs (`--include-stealer-logs`)
+- `account` — Check email or username breaches (supports `--file`, `--stdin`, `--rpm`, `--fail-if-pwned`, `--no-truncate`, `--domain`, `--no-include-unverified`, `--baseline`, `--save-baseline`, `--stats`)
+- `search` — Composite search for breaches, pastes, and stealer logs (`--include-stealer-logs`, `--baseline`, `--save-baseline`)
 - `pastes` — Get pastes for an email address
 - `subscription` — View HIBP subscription status and rate limits
-- `domain` — Get breached email addresses for a domain
+- `domain` — Get breached email addresses for a domain (supports `--baseline`, `--save-baseline`, `--fail-if-pwned`)
 - `subscribed-domains` — List subscribed domains
 
 ### Pro / High RPM
@@ -79,7 +86,18 @@ Configuration is resolved in the following order (highest precedence first):
 
 ### Pro
 - `stealer email|website|domain` — Query stealer log records by email address, website domain, or email domain
-- `domain-verify dns-token|dns-check|email` — Manage domain ownership verification via DNS TXT records or email aliases
+- `domain-verify dns-token|dns-check|meta-tag|meta-check|email` — Manage domain ownership verification via DNS TXT records, HTML meta tags, or email aliases
+
+### Short Command Aliases
+For convenience, ergonomic short aliases are available:
+- `pw` (`password`)
+- `ba` (`account`)
+- `bar` (`account-range`)
+- `pa` (`pastes`)
+- `bd` (`domain`)
+- `sd` (`subscribed-domains`)
+- `lb` (`latest-breach`)
+- `dc` (`dataclasses`)
 
 ### Global Options
 
@@ -87,7 +105,7 @@ Configuration is resolved in the following order (highest precedence first):
 |---|---|
 | `--api-key TEXT` | HIBP API key override |
 | `--user-agent TEXT` | Custom User-Agent string override (default `pwned-cli`) |
-| `--format TEXT` | Output format: `text`, `json`, `jsonl`, `csv`, or `table` |
+| `--format TEXT` | Output format: `text`, `json`, `jsonl`, `csv`, `table`, or `sarif` |
 | `--json` | Shorthand for `--format json` |
 | `--cache / --no-cache` | Cache public endpoint responses locally |
 | `--version` | Show CLI version and exit |
@@ -133,6 +151,53 @@ async def main():
 asyncio.run(main())
 ```
 
+### Offline Password DB Lookups
+For high-scale or air-gapped password auditing against official Pwned Passwords SHA-1/NTLM hash dumps:
+```python
+from pathlib import Path
+from pwned import OfflinePasswordsClient
+
+with OfflinePasswordsClient(Path("/path/to/pwned-passwords-sha1.txt")) as offline:
+    count = offline.check_password("hunter2")
+    print(f"Compromised {count} times")
+```
+
+### Framework Password Validators (Pydantic / FastAPI / Django)
+```python
+from typing import Annotated
+from pydantic import AfterValidator, BaseModel
+from pwned import make_password_validator
+
+SafePassword = Annotated[str, AfterValidator(make_password_validator(threshold=1))]
+
+class SignupForm(BaseModel):
+    username: str
+    password: SafePassword
+```
+
+## CI/CD Integrations & Pre-commit
+
+### GitHub Action
+Use the official composite GitHub Action to audit repositories or credential exports in CI:
+```yaml
+steps:
+  - uses: actions/checkout@v4
+  - uses: domfahey/pwned@main
+    with:
+      args: audit --source bitwarden-json --fail-if-pwned vault.json
+      api-key: ${{ secrets.HIBP_API_KEY }}
+```
+
+### Pre-commit Hook
+Add `pwned` to your `.pre-commit-config.yaml`:
+```yaml
+repos:
+  - repo: https://github.com/domfahey/pwned
+    rev: v0.3.0
+    hooks:
+      - id: pwned-audit
+```
+
 ## Official HIBP MCP Server
 
 If you want to query Have I Been Pwned directly from an MCP-capable AI client, HIBP also provides an official remote [Model Context Protocol (MCP) server](https://haveibeenpwned.com/mcp):
@@ -176,19 +241,24 @@ make check            # Run lint + type + test (non-mutating, CI-safe)
 ```
 src/pwned/
 ├── __init__.py         # Public library API exports
+├── _parsers.py         # Zero-dependency stdlib parsers (MD4, range response, HTML stripper, input lines)
 ├── async_client.py     # Async HIBP API client (httpx.AsyncClient)
-├── audit.py            # Password manager vault auditing logic
+├── audit.py            # Password manager vault auditing & reused password detection
+├── baseline.py         # Exposure baseline snapshotting and diffing
 ├── batch.py            # Batch processing & rate limiting for accounts/passwords
 ├── cache.py            # File-based TTL response caching for public endpoints
 ├── cli.py              # Click command groups and global option parser
-├── cli_commands.py     # Additional command modules (auth, search, audit, cache, etc.)
+├── cli_commands.py     # Additional command modules (auth, search, audit, cache, completion, etc.)
 ├── cli_helpers.py      # CLI error handling, output rendering, and validation helpers
 ├── client.py           # Sync HIBP API client (haveibeenpwned.com)
-├── config.py           # pydantic-settings configuration & XDG credential storage
-├── formatting.py       # Output formatters (text, json, jsonl, csv, table)
+├── config.py           # pydantic-settings configuration & XDG / keyring credential storage
+├── filtering.py        # Breach filtering and sorting helpers
+├── formatting.py       # Output formatters (text, json, jsonl, csv, table, sarif)
 ├── models.py           # Pydantic v2 models for API responses
+├── offline.py          # Offline sorted hash file lookups (OfflinePasswordsClient)
 ├── passwords.py        # Sync & async Pwned Passwords client (api.pwnedpasswords.com)
-└── py.typed            # PEP 561 type marker
+├── py.typed            # PEP 561 type marker
+└── validators.py       # Framework password validation helpers
 
 tests/
 ├── unit/               # Fast tests with mocked HTTP

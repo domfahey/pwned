@@ -21,7 +21,7 @@ from pwned.client import (
     UnauthorizedError,
 )
 from pwned.config import DEFAULT_USER_AGENT
-from pwned.models import DataClassDescription, SearchResult
+from pwned.models import DataClassDescription, MetaTag, SearchResult
 
 BASE = "https://haveibeenpwned.com/api/v3"
 TEST_KEY = "testkey123456789012345678901234"
@@ -473,6 +473,31 @@ class TestAsyncEndpoints:
         assert requests[2].read() == b'{"DomainName":"example.com"}'
         assert requests[3].read() == b'{"DomainName":"example.com"}'
         assert requests[4].read() == b'{"DomainName":"example.com","EmailAlias":"security"}'
+
+    def test_generate_and_verify_meta_tag(self, httpx_mock: HTTPXMock) -> None:
+        tag_html = '<meta name="hibp-verify" content="xyz789" />'
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{BASE}/domainVerification/generateMetaTag",
+            json={"metaTag": tag_html},
+        )
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{BASE}/domainVerification/verifyMetaTag",
+            status_code=204,
+        )
+
+        async def _run() -> None:
+            async with AsyncHIBPClient(api_key=TEST_KEY, user_agent="test") as client:
+                meta = await client.generate_meta_tag("example.com")
+                assert isinstance(meta, MetaTag)
+                assert meta.meta_tag == tag_html
+                await client.verify_meta_tag("example.com")
+
+        asyncio.run(_run())
+        requests = httpx_mock.get_requests()
+        assert requests[0].read() == b'{"DomainName":"example.com"}'
+        assert requests[1].read() == b'{"DomainName":"example.com"}'
 
     def test_pastes_stealer_logs_and_subscription(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(

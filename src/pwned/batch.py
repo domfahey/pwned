@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -9,8 +10,8 @@ from pydantic import Field
 
 from pwned._parsers import parse_input_lines as parse_input_lines
 from pwned.client import HIBPClient, HIBPError, NotFoundError
-from pwned.models import NonNegativeInt, _HIBPBase
-from pwned.passwords import PwnedPasswordsClient
+from pwned.models import NonNegativeInt, PasswordChecker, _HIBPBase
+from pwned.passwords import AsyncPwnedPasswordsClient
 
 
 class AccountBatchItem(_HIBPBase):
@@ -29,6 +30,51 @@ class PasswordBatchItem(_HIBPBase):
     pwn_count: NonNegativeInt = 0
     status: Literal["pwned", "clean", "error"]
     error: str | None = None
+
+
+class BatchStats(_HIBPBase):
+    """Aggregate summary statistics for a batch check run."""
+
+    checked: NonNegativeInt
+    pwned: NonNegativeInt
+    clean: NonNegativeInt
+    errors: NonNegativeInt
+    elapsed_seconds: float = Field(ge=0.0)
+
+
+def compute_batch_stats(
+    items: Sequence[AccountBatchItem | PasswordBatchItem],
+    *,
+    elapsed_seconds: float = 0.0,
+) -> BatchStats:
+    """Compute aggregate pwned, clean, and error counts for a batch run."""
+    if elapsed_seconds < 0.0:
+        raise ValueError("elapsed_seconds must be non-negative")
+    pwned = 0
+    clean = 0
+    errors = 0
+    for item in items:
+        if item.status == "pwned":
+            pwned += 1
+        elif item.status == "clean":
+            clean += 1
+        else:
+            errors += 1
+    return BatchStats(
+        checked=len(items),
+        pwned=pwned,
+        clean=clean,
+        errors=errors,
+        elapsed_seconds=elapsed_seconds,
+    )
+
+
+def format_batch_stats(stats: BatchStats) -> str:
+    """Format batch statistics as a concise single-line summary."""
+    return (
+        f"Checked {stats.checked}: {stats.pwned} pwned, {stats.clean} clean, "
+        f"{stats.errors} error(s) in {stats.elapsed_seconds:.2f}s"
+    )
 
 
 def load_input_file(
@@ -135,14 +181,15 @@ def _password_item(index: int, count: int, threshold: int) -> PasswordBatchItem:
 
 def batch_check_passwords(
     passwords: Sequence[str],
-    client: PwnedPasswordsClient,
+    client: PasswordChecker,
     *,
     threshold: int = 1,
     ntlm: bool = False,
     pad: bool = True,
+    hashed: bool = False,
     on_progress: Callable[[int, int, PasswordBatchItem], None] | None = None,
 ) -> list[PasswordBatchItem]:
-    """Check a sequence of passwords without storing plaintext passwords in results."""
+    """Check a sequence of passwords or hashes without storing inputs in results."""
     if threshold < 1:
         raise ValueError("threshold must be at least 1")
 
@@ -154,8 +201,11 @@ def batch_check_passwords(
             item = _password_item(idx, cache[password], threshold)
         else:
             try:
-                count = client.check_password(password, ntlm=ntlm, pad=pad)
-            except HIBPError as exc:
+                if hashed:
+                    count = client.check_hash(password, ntlm=ntlm, pad=pad)
+                else:
+                    count = client.check_password(password, ntlm=ntlm, pad=pad)
+            except (HIBPError, ValueError) as exc:
                 item = PasswordBatchItem(
                     index=idx,
                     pwn_count=0,
@@ -165,6 +215,61 @@ def batch_check_passwords(
             else:
                 cache[password] = count
                 item = _password_item(idx, count, threshold)
+        results.append(item)
+        if on_progress is not None:
+            on_progress(idx, total, item)
+    return results
+
+
+async def async_batch_check_passwords(
+    passwords: Sequence[str],
+    client: AsyncPwnedPasswordsClient,
+    *,
+    threshold: int = 1,
+    ntlm: bool = False,
+    pad: bool = True,
+    hashed: bool = False,
+    concurrency: int = 10,
+    on_progress: Callable[[int, int, PasswordBatchItem], None] | None = None,
+) -> list[PasswordBatchItem]:
+    """Check passwords or hashes concurrently while preserving input index order."""
+    if threshold < 1:
+        raise ValueError("threshold must be at least 1")
+    if concurrency < 1:
+        raise ValueError("concurrency must be at least 1")
+    if not passwords:
+        return []
+
+    semaphore = asyncio.Semaphore(concurrency)
+    unique_inputs = list(dict.fromkeys(passwords))
+
+    async def _lookup_one(value: str) -> tuple[str, int | None, str | None]:
+        async with semaphore:
+            try:
+                if hashed:
+                    count = await client.check_hash(value, ntlm=ntlm, pad=pad)
+                else:
+                    count = await client.check_password(value, ntlm=ntlm, pad=pad)
+            except (HIBPError, ValueError) as exc:
+                return value, None, str(exc)
+            return value, count, None
+
+    outcomes = await asyncio.gather(*(_lookup_one(value) for value in unique_inputs))
+    resolved = {value: (count, error) for value, count, error in outcomes}
+
+    results: list[PasswordBatchItem] = []
+    total = len(passwords)
+    for idx, password in enumerate(passwords, start=1):
+        count, error = resolved[password]
+        if count is None:
+            item = PasswordBatchItem(
+                index=idx,
+                pwn_count=0,
+                status="error",
+                error=error,
+            )
+        else:
+            item = _password_item(idx, count, threshold)
         results.append(item)
         if on_progress is not None:
             on_progress(idx, total, item)

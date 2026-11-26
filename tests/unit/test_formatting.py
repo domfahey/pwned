@@ -7,6 +7,8 @@ from typing import Any
 
 import pytest
 
+from pwned.audit import AuditFinding, AuditSummary
+from pwned.batch import AccountBatchItem, PasswordBatchItem
 from pwned.formatting import (
     OUTPUT_FORMATS,
     format_output,
@@ -19,7 +21,7 @@ from pwned.models import Breach, Paste, SearchResult
 
 class TestConstants:
     def test_output_formats(self) -> None:
-        assert OUTPUT_FORMATS == ("text", "json", "jsonl", "csv", "table")
+        assert OUTPUT_FORMATS == ("text", "json", "jsonl", "csv", "table", "sarif")
 
 
 class TestStripHtml:
@@ -347,6 +349,155 @@ class TestFormatTable:
     def test_table_scalar(self) -> None:
         out = format_output(42, fmt="table")
         assert out.splitlines() == ["Value", "-----", "42"]
+
+
+class TestFormatSarif:
+    def _assert_valid_sarif_envelope(self, raw: str) -> dict[str, Any]:
+        assert "\n" in raw  # indented JSON
+        doc = json.loads(raw)
+        assert doc["$schema"] == "https://json.schemastore.org/sarif-2.1.0.json"
+        assert doc["version"] == "2.1.0"
+        assert len(doc["runs"]) == 1
+        driver = doc["runs"][0]["tool"]["driver"]
+        assert driver["name"] == "pwned"
+        assert driver["informationUri"] == "https://github.com/domfahey/pwned"
+        assert isinstance(driver["rules"], list)
+        assert {r["id"] for r in driver["rules"]} >= {"HIBP001", "HIBP002", "HIBP003", "HIBP004"}
+        assert isinstance(doc["runs"][0]["results"], list)
+        return doc  # type: ignore[no-any-return]
+
+    def test_sarif_empty_list_and_dict_and_other(self) -> None:
+        for payload in ([], {}, ["a", "b"], 42, {"unrelated": "value"}):
+            doc = self._assert_valid_sarif_envelope(format_output(payload, fmt="sarif"))
+            assert doc["runs"][0]["results"] == []
+
+    def test_sarif_unrelated_list_of_dicts(self) -> None:
+        doc = self._assert_valid_sarif_envelope(format_output([{"foo": "bar"}], fmt="sarif"))
+        assert doc["runs"][0]["results"] == []
+
+    def test_sarif_audit_summary(self) -> None:
+        summary = AuditSummary(
+            total_entries=5,
+            unique_passwords=4,
+            compromised_entries=2,
+            findings=[
+                AuditFinding(name="GitHub", username="alice", pwn_count=42),
+                AuditFinding(name="Email", username="bob", pwn_count=7),
+            ],
+        )
+        raw = format_output(summary, fmt="sarif")
+        doc = self._assert_valid_sarif_envelope(raw)
+        results = doc["runs"][0]["results"]
+        assert len(results) == 2
+        assert results[0]["ruleId"] == "HIBP002"
+        assert results[0]["level"] == "error"
+        assert "GitHub" in results[0]["message"]["text"]
+        assert "alice" in results[0]["message"]["text"]
+        assert "42" in results[0]["message"]["text"]
+        assert results[1]["ruleId"] == "HIBP002"
+        assert "Email" in results[1]["message"]["text"]
+
+    def test_sarif_audit_summary_empty_findings(self) -> None:
+        summary = AuditSummary(
+            total_entries=3,
+            unique_passwords=3,
+            compromised_entries=0,
+            findings=[],
+        )
+        doc = self._assert_valid_sarif_envelope(format_output(summary, fmt="sarif"))
+        assert doc["runs"][0]["results"] == []
+
+    def test_sarif_search_result_full(self) -> None:
+        sr = SearchResult(
+            breaches=[Breach(Name="Adobe", Domain="adobe.com", PwnCount=152445165)],
+            pastes=[Paste(Source="Pastebin", Id="abc123")],
+            stealer_logs=["evil.example"],
+        )
+        doc = self._assert_valid_sarif_envelope(format_output(sr, fmt="sarif"))
+        results = doc["runs"][0]["results"]
+        assert len(results) == 3
+        assert all(r["ruleId"] == "HIBP001" for r in results)
+        assert all(r["level"] == "error" for r in results)
+        assert "Adobe" in results[0]["message"]["text"]
+        assert "Pastebin" in results[1]["message"]["text"]
+        assert "abc123" in results[1]["message"]["text"]
+        assert "evil.example" in results[2]["message"]["text"]
+
+    def test_sarif_search_result_partial_without_pastes(self) -> None:
+        sr = SearchResult(breaches=[Breach(Name="Adobe", Domain="adobe.com", PwnCount=10)])
+        doc = self._assert_valid_sarif_envelope(format_output(sr, fmt="sarif"))
+        results = doc["runs"][0]["results"]
+        assert len(results) == 1
+        assert results[0]["ruleId"] == "HIBP001"
+        assert "Adobe" in results[0]["message"]["text"]
+
+    def test_sarif_account_batch_items(self) -> None:
+        items = [
+            AccountBatchItem(account="a@example.com", breaches=["Adobe", "Gawker"], status="pwned"),
+            AccountBatchItem(account="b@example.com", breaches=[], status="clean"),
+            AccountBatchItem(account="c@example.com", breaches=[], status="error", error="boom"),
+        ]
+        doc = self._assert_valid_sarif_envelope(format_output(items, fmt="sarif"))
+        results = doc["runs"][0]["results"]
+        assert len(results) == 1
+        assert results[0]["ruleId"] == "HIBP001"
+        assert results[0]["level"] == "error"
+        assert "a@example.com" in results[0]["message"]["text"]
+        assert "Adobe" in results[0]["message"]["text"]
+        assert "Gawker" in results[0]["message"]["text"]
+
+    def test_sarif_password_batch_items(self) -> None:
+        items = [
+            PasswordBatchItem(index=0, pwn_count=99, status="pwned"),
+            PasswordBatchItem(index=1, pwn_count=0, status="clean"),
+            PasswordBatchItem(index=2, pwn_count=0, status="error", error="fail"),
+        ]
+        doc = self._assert_valid_sarif_envelope(format_output(items, fmt="sarif"))
+        results = doc["runs"][0]["results"]
+        assert len(results) == 1
+        assert results[0]["ruleId"] == "HIBP002"
+        assert results[0]["level"] == "error"
+        assert "#0" in results[0]["message"]["text"]
+        assert "99" in results[0]["message"]["text"]
+
+    def test_sarif_list_of_breaches(self) -> None:
+        breaches = [
+            Breach(Name="Adobe", Domain="adobe.com", PwnCount=152445165),
+            Breach(Name="Gawker", Domain="gawker.com", PwnCount=1300000),
+        ]
+        doc = self._assert_valid_sarif_envelope(format_output(breaches, fmt="sarif"))
+        results = doc["runs"][0]["results"]
+        assert len(results) == 2
+        assert all(r["ruleId"] == "HIBP004" for r in results)
+        assert all(r["level"] == "warning" for r in results)
+        assert "Adobe" in results[0]["message"]["text"]
+        assert "adobe.com" in results[0]["message"]["text"]
+        assert "152445165" in results[0]["message"]["text"]
+        assert "Gawker" in results[1]["message"]["text"]
+
+    def test_sarif_single_breach(self) -> None:
+        breach = Breach(Name="Adobe", Domain="adobe.com", PwnCount=152445165)
+        doc = self._assert_valid_sarif_envelope(format_output(breach, fmt="sarif"))
+        results = doc["runs"][0]["results"]
+        assert len(results) == 1
+        assert results[0]["ruleId"] == "HIBP004"
+        assert results[0]["level"] == "warning"
+        assert "Adobe" in results[0]["message"]["text"]
+        assert "adobe.com" in results[0]["message"]["text"]
+        assert "152445165" in results[0]["message"]["text"]
+
+    def test_sarif_domain_breaches_mapping(self) -> None:
+        data = {"alice": ["Adobe", "LinkedIn"], "bob": ["Gawker"]}
+        doc = self._assert_valid_sarif_envelope(format_output(data, fmt="sarif"))
+        results = doc["runs"][0]["results"]
+        assert len(results) == 2
+        assert all(r["ruleId"] == "HIBP003" for r in results)
+        assert all(r["level"] == "warning" for r in results)
+        assert "alice" in results[0]["message"]["text"]
+        assert "Adobe" in results[0]["message"]["text"]
+        assert "LinkedIn" in results[0]["message"]["text"]
+        assert "bob" in results[1]["message"]["text"]
+        assert "Gawker" in results[1]["message"]["text"]
 
 
 class TestFormatErrors:
