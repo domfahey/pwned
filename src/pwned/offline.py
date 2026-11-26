@@ -49,6 +49,8 @@ class OfflinePasswordsClient:
     def __init__(self, path: str | os.PathLike[str], *, ntlm: bool = False) -> None:
         self._path = Path(path)
         self._ntlm = ntlm
+        if self._path.is_dir():
+            raise IsADirectoryError(f"Path is a directory: {self._path}")
         self._file: BinaryIO = self._path.open("rb")
 
     @property
