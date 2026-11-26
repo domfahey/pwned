@@ -1,114 +1,39 @@
 from __future__ import annotations
 
-import json
 import sys
-from collections.abc import Callable
-from functools import wraps
-from html.parser import HTMLParser
-from typing import Any
+from pathlib import Path
 
 import click
-from pydantic import BaseModel, ValidationError
 
 from pwned import __version__
-from pwned.client import HIBPClient, HIBPError, NotFoundError, UnauthorizedError
+from pwned.batch import (
+    batch_check_accounts,
+    batch_check_passwords,
+    load_input_file,
+    parse_input_lines,
+)
+from pwned.cli_commands import register_extra_commands
+from pwned.cli_helpers import (
+    get_cache,
+    get_output_format,
+    render_output,
+    require_api_key,
+)
+from pwned.cli_helpers import (
+    handle_errors as handle_errors,
+)
+from pwned.client import HIBPClient, NotFoundError
 from pwned.config import load_settings
+from pwned.formatting import OUTPUT_FORMATS, OutputFormat
+from pwned.models import DataClassDescription
 from pwned.passwords import PwnedPasswordsClient
 
 
-class _HTMLStripper(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self._parts: list[str] = []
-
-    def handle_data(self, data: str) -> None:
-        self._parts.append(data)
-
-    def get_text(self) -> str:
-        return "".join(self._parts)
-
-
-def _strip_html(text: str) -> str:
-    stripper = _HTMLStripper()
-    stripper.feed(text)
-    stripper.close()
-    return stripper.get_text()
-
-
-def handle_errors[**P, R](f: Callable[P, R]) -> Callable[P, R]:
-    @wraps(f)
-    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-        try:
-            return f(*args, **kwargs)
-        except NotFoundError:
-            click.echo("Not found.", err=True)
-            sys.exit(1)
-        except UnauthorizedError:
-            click.echo("Error: Invalid or missing API key.", err=True)
-            sys.exit(1)
-        except HIBPError as e:
-            click.echo(f"Error: {e}", err=True)
-            sys.exit(1)
-        except ValidationError as e:
-            click.echo(f"Error: API response did not match expected schema: {e}", err=True)
-            sys.exit(1)
-
-    return wrapper
-
-
-def _require_api_key(ctx: click.Context) -> str:
-    api_key: str | None = ctx.obj["settings"].get_api_key()
-    if not api_key:
-        raise UnauthorizedError("Invalid or missing API key")
-    return api_key
-
-
-def _serialize(data: Any) -> Any:
-    """Convert Pydantic models to JSON-safe dicts, using field aliases as keys."""
-    if isinstance(data, BaseModel):
-        return data.model_dump(by_alias=True, exclude_unset=True, mode="json")
-    if isinstance(data, list):
-        return [_serialize(item) for item in data]
-    return data
-
-
-def _output(data: BaseModel | list[Any] | dict[str, Any], *, use_json: bool) -> None:
-    serialized = _serialize(data)
-    if use_json:
-        click.echo(json.dumps(serialized, indent=2))
-    elif isinstance(serialized, list):
-        if not serialized:
-            click.echo("No results found.")
-            return
-        for i, item in enumerate(serialized):
-            if isinstance(item, dict):
-                if i > 0:
-                    click.echo()
-                _print_dict(item)
-            else:
-                click.echo(item)
-    else:
-        if not serialized:
-            click.echo("No results found.")
-            return
-        _print_dict(serialized)
-
-
-def _print_dict(d: dict[str, Any]) -> None:
-    for key, value in d.items():
-        if isinstance(value, list):
-            click.echo(f"  {key}: {', '.join(str(v) for v in value)}")
-        elif key == "Description" and isinstance(value, str):
-            click.echo(f"  {key}: {_strip_html(value)}")
-        else:
-            click.echo(f"  {key}: {value}")
-
-
 class _GlobalOptionGroup(click.Group):
-    """Allow global options (--api-key, --user-agent, --json) to appear after subcommands."""
+    """Allow global options to appear after subcommands."""
 
-    _VALUE_OPTIONS = ("--api-key", "--user-agent")
-    _FLAG_OPTIONS = ("--json",)
+    _VALUE_OPTIONS = ("--api-key", "--user-agent", "--format")
+    _FLAG_OPTIONS = ("--json", "--cache", "--no-cache")
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         reordered: list[str] = []
@@ -147,14 +72,44 @@ class _GlobalOptionGroup(click.Group):
     default=None,
     help="User-Agent string [env: HIBP_USER_AGENT].",
 )
-@click.option("--json", "use_json", is_flag=True, help="Output raw JSON.")
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(OUTPUT_FORMATS),
+    default=None,
+    help="Output format: text, json, jsonl, csv, or table.",
+)
+@click.option(
+    "--json",
+    "use_json",
+    is_flag=True,
+    help="Output raw JSON (shorthand for --format json).",
+)
+@click.option(
+    "--cache/--no-cache",
+    "use_cache",
+    default=False,
+    help="Cache public endpoint responses locally.",
+)
 @click.pass_context
-def cli(ctx: click.Context, api_key: str | None, user_agent: str | None, use_json: bool) -> None:
+def cli(
+    ctx: click.Context,
+    api_key: str | None,
+    user_agent: str | None,
+    output_format: OutputFormat | None,
+    use_json: bool,
+    use_cache: bool,
+) -> None:
     """CLI for the Have I Been Pwned API v3."""
+    if output_format is not None and use_json and output_format != "json":
+        raise click.UsageError("Cannot combine --json with a non-json --format.")
+    fmt: OutputFormat = "json" if use_json else (output_format or "text")
     settings = load_settings(api_key=api_key, user_agent=user_agent)
     ctx.ensure_object(dict)
     ctx.obj["settings"] = settings
-    ctx.obj["use_json"] = use_json
+    ctx.obj["fmt"] = fmt
+    ctx.obj["use_json"] = fmt == "json"
+    ctx.obj["use_cache"] = use_cache
 
 
 # --- Breach commands ---
@@ -169,7 +124,7 @@ def breach(ctx: click.Context, name: str) -> None:
     s = ctx.obj["settings"]
     with HIBPClient(user_agent=s.user_agent) as client:
         data = client.get_breach(name)
-    _output(data, use_json=ctx.obj["use_json"])
+    render_output(ctx, data)
 
 
 @cli.command()
@@ -184,9 +139,9 @@ def breach(ctx: click.Context, name: str) -> None:
 def breaches(ctx: click.Context, domain: str | None, spam_list: bool | None) -> None:
     """Get all breaches in the system."""
     s = ctx.obj["settings"]
-    with HIBPClient(user_agent=s.user_agent) as client:
+    with HIBPClient(user_agent=s.user_agent, cache=get_cache(ctx)) as client:
         data = client.get_breaches(domain=domain, is_spam_list=spam_list)
-    _output(data, use_json=ctx.obj["use_json"])
+    render_output(ctx, data)
 
 
 @cli.command("latest-breach")
@@ -197,48 +152,137 @@ def latest_breach(ctx: click.Context) -> None:
     s = ctx.obj["settings"]
     with HIBPClient(user_agent=s.user_agent) as client:
         data = client.get_latest_breach()
-    _output(data, use_json=ctx.obj["use_json"])
+    render_output(ctx, data)
 
 
 @cli.command()
+@click.option("--descriptions", is_flag=True, help="Include data class descriptions.")
 @click.pass_context
 @handle_errors
-def dataclasses(ctx: click.Context) -> None:
+def dataclasses(ctx: click.Context, descriptions: bool) -> None:
     """Get all data classes in the system."""
     s = ctx.obj["settings"]
-    with HIBPClient(user_agent=s.user_agent) as client:
-        data = client.get_data_classes()
-    _output(data, use_json=ctx.obj["use_json"])
+    with HIBPClient(user_agent=s.user_agent, cache=get_cache(ctx)) as client:
+        data: list[str] | list[DataClassDescription] = (
+            client.get_data_class_descriptions() if descriptions else client.get_data_classes()
+        )
+    render_output(ctx, data)
 
 
 # --- Account commands ---
 
 
+def _run_account_single(
+    ctx: click.Context,
+    account: str,
+    *,
+    no_truncate: bool,
+    domain: str | None,
+    no_include_unverified: bool,
+    fail_if_pwned: bool,
+) -> None:
+    s = ctx.obj["settings"]
+    api_key = require_api_key(ctx)
+    with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
+        try:
+            data = client.get_account_breaches(
+                account,
+                truncate=not no_truncate,
+                domain=domain,
+                include_unverified=not no_include_unverified,
+            )
+        except NotFoundError:
+            if not fail_if_pwned:
+                raise
+            if get_output_format(ctx) == "text":
+                click.echo("Clean (not found in any breaches).")
+            else:
+                render_output(ctx, [])
+            return
+    render_output(ctx, data)
+    if fail_if_pwned and data:
+        sys.exit(1)
+
+
 @cli.command()
-@click.argument("account")
+@click.argument("account", required=False)
 @click.option("--no-truncate", is_flag=True, help="Return full breach model.")
 @click.option("--domain", default=None, help="Filter by domain.")
 @click.option("--no-include-unverified", is_flag=True, help="Exclude unverified breaches.")
+@click.option(
+    "--file",
+    "input_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Read accounts (one per line) from a file.",
+)
+@click.option(
+    "--stdin",
+    "from_stdin",
+    is_flag=True,
+    help="Read accounts (one per line) from stdin.",
+)
+@click.option(
+    "--rpm",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Rate limit in requests per minute for batch mode.",
+)
+@click.option(
+    "--fail-if-pwned",
+    is_flag=True,
+    help="Exit with code 1 if any account is found in breaches.",
+)
 @click.pass_context
 @handle_errors
 def account(
     ctx: click.Context,
-    account: str,
+    account: str | None,
     no_truncate: bool,
     domain: str | None,
     no_include_unverified: bool,
+    input_file: Path | None,
+    from_stdin: bool,
+    rpm: int | None,
+    fail_if_pwned: bool,
 ) -> None:
     """Get breaches for an account (email or username). Requires API key."""
-    s = ctx.obj["settings"]
-    api_key = _require_api_key(ctx)
-    with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
-        data = client.get_account_breaches(
+    sources = sum([account is not None, input_file is not None, from_stdin])
+    if sources == 0:
+        raise click.UsageError("Must provide ACCOUNT, --file, or --stdin.")
+    if sources > 1:
+        raise click.UsageError("Cannot combine ACCOUNT, --file, and --stdin.")
+
+    if account is not None:
+        _run_account_single(
+            ctx,
             account,
-            truncate=not no_truncate,
+            no_truncate=no_truncate,
+            domain=domain,
+            no_include_unverified=no_include_unverified,
+            fail_if_pwned=fail_if_pwned,
+        )
+        return
+
+    accounts = (
+        load_input_file(input_file) if input_file is not None else parse_input_lines(sys.stdin)
+    )
+    if not accounts:
+        raise click.UsageError("No accounts provided.")
+
+    s = ctx.obj["settings"]
+    api_key = require_api_key(ctx)
+    with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
+        results = batch_check_accounts(
+            accounts,
+            client,
+            rpm=rpm,
             domain=domain,
             include_unverified=not no_include_unverified,
         )
-    _output(data, use_json=ctx.obj["use_json"])
+    render_output(ctx, results)
+    if fail_if_pwned and any(r.status == "pwned" for r in results):
+        sys.exit(1)
 
 
 @cli.command("domain")
@@ -248,10 +292,10 @@ def account(
 def domain_cmd(ctx: click.Context, domain: str) -> None:
     """Get breached email addresses for a domain. Requires API key."""
     s = ctx.obj["settings"]
-    api_key = _require_api_key(ctx)
+    api_key = require_api_key(ctx)
     with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
         data = client.get_domain_breaches(domain)
-    _output(data, use_json=ctx.obj["use_json"])
+    render_output(ctx, data)
 
 
 @cli.command("subscribed-domains")
@@ -260,10 +304,10 @@ def domain_cmd(ctx: click.Context, domain: str) -> None:
 def subscribed_domains(ctx: click.Context) -> None:
     """List subscribed domains. Requires API key."""
     s = ctx.obj["settings"]
-    api_key = _require_api_key(ctx)
+    api_key = require_api_key(ctx)
     with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
         data = client.get_subscribed_domains()
-    _output(data, use_json=ctx.obj["use_json"])
+    render_output(ctx, data)
 
 
 @cli.command()
@@ -273,10 +317,10 @@ def subscribed_domains(ctx: click.Context) -> None:
 def pastes(ctx: click.Context, email: str) -> None:
     """Get pastes for an email address. Requires API key."""
     s = ctx.obj["settings"]
-    api_key = _require_api_key(ctx)
+    api_key = require_api_key(ctx)
     with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
         data = client.get_pastes(email)
-    _output(data, use_json=ctx.obj["use_json"])
+    render_output(ctx, data)
 
 
 # --- Stealer log commands ---
@@ -294,10 +338,10 @@ def stealer() -> None:
 def stealer_email(ctx: click.Context, email: str) -> None:
     """Get stealer log domains for an email address."""
     s = ctx.obj["settings"]
-    api_key = _require_api_key(ctx)
+    api_key = require_api_key(ctx)
     with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
         data = client.get_stealer_logs_by_email(email)
-    _output(data, use_json=ctx.obj["use_json"])
+    render_output(ctx, data)
 
 
 @stealer.command("website")
@@ -307,10 +351,10 @@ def stealer_email(ctx: click.Context, email: str) -> None:
 def stealer_website(ctx: click.Context, domain: str) -> None:
     """Get stealer log email addresses for a website domain."""
     s = ctx.obj["settings"]
-    api_key = _require_api_key(ctx)
+    api_key = require_api_key(ctx)
     with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
         data = client.get_stealer_logs_by_website_domain(domain)
-    _output(data, use_json=ctx.obj["use_json"])
+    render_output(ctx, data)
 
 
 @stealer.command("domain")
@@ -320,52 +364,154 @@ def stealer_website(ctx: click.Context, domain: str) -> None:
 def stealer_domain(ctx: click.Context, domain: str) -> None:
     """Get stealer log email aliases for an email domain."""
     s = ctx.obj["settings"]
-    api_key = _require_api_key(ctx)
+    api_key = require_api_key(ctx)
     with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
         data = client.get_stealer_logs_by_email_domain(domain)
-    _output(data, use_json=ctx.obj["use_json"])
+    render_output(ctx, data)
 
 
 # --- Password command ---
 
 
+def _check_single_password(
+    ctx: click.Context,
+    single_password: str,
+    *,
+    ntlm: bool,
+    pad: bool,
+    threshold: int,
+    fail_if_pwned: bool,
+) -> None:
+    s = ctx.obj["settings"]
+    with PwnedPasswordsClient(user_agent=s.user_agent) as client:
+        count = client.check_password(single_password, ntlm=ntlm, pad=pad)
+    if get_output_format(ctx) == "text":
+        if count > 0:
+            click.echo(f"Password found {count:,} times in data breaches!")
+        else:
+            click.echo("Password not found in any data breaches.")
+    else:
+        render_output(ctx, {"count": count})
+    if fail_if_pwned and count >= threshold:
+        sys.exit(1)
+
+
+def _check_batch_passwords(
+    ctx: click.Context,
+    passwords: list[str],
+    *,
+    ntlm: bool,
+    pad: bool,
+    threshold: int,
+    fail_if_pwned: bool,
+) -> None:
+    s = ctx.obj["settings"]
+    with PwnedPasswordsClient(user_agent=s.user_agent) as client:
+        results = batch_check_passwords(
+            passwords,
+            client,
+            threshold=threshold,
+            ntlm=ntlm,
+            pad=pad,
+        )
+    render_output(ctx, results)
+    if fail_if_pwned and any(r.status == "pwned" for r in results):
+        sys.exit(1)
+
+
 @cli.command()
 @click.argument("password", required=False)
 @click.option("--stdin", "from_stdin", is_flag=True, help="Read password from stdin.")
+@click.option(
+    "--file",
+    "input_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Check passwords (one per line) from a file.",
+)
 @click.option("--ntlm", is_flag=True, help="Use NTLM hash instead of SHA-1.")
 @click.option("--pad", is_flag=True, help="Request padded responses.")
+@click.option(
+    "--threshold",
+    type=click.IntRange(min=1),
+    default=1,
+    help="Minimum breach count to treat a password as pwned.",
+)
+@click.option(
+    "--fail-if-pwned",
+    is_flag=True,
+    help="Exit with code 1 if password count meets threshold.",
+)
 @click.pass_context
 @handle_errors
 def password(
     ctx: click.Context,
     password: str | None,
     from_stdin: bool,
+    input_file: Path | None,
     ntlm: bool,
     pad: bool,
+    threshold: int,
+    fail_if_pwned: bool,
 ) -> None:
     """Check if a password has been exposed in data breaches.
 
-    Accepts PASSWORD as an argument, via --stdin, or prompts interactively.
-    Using --stdin or the interactive prompt avoids exposing the password in the
+    Accepts PASSWORD as an argument, via --stdin, via --file, or prompts interactively.
+    Using --stdin, --file, or the interactive prompt avoids exposing the password in the
     process table.
     """
-    if from_stdin and password is not None:
-        raise click.UsageError("Cannot specify both PASSWORD argument and --stdin.")
+    sources: list[str] = []
+    if password is not None:
+        sources.append("PASSWORD argument")
     if from_stdin:
-        password = sys.stdin.readline().removesuffix("\n").removesuffix("\r")
-        if not password:
+        sources.append("--stdin")
+    if input_file is not None:
+        sources.append("--file")
+    if len(sources) > 1:
+        raise click.UsageError(f"Cannot specify both {' and '.join(sources)}.")
+
+    if input_file is not None:
+        passwords = load_input_file(input_file, strip=False, ignore_comments=False)
+        if not passwords:
+            raise click.UsageError("No passwords provided.")
+        _check_batch_passwords(
+            ctx,
+            passwords,
+            ntlm=ntlm,
+            pad=pad,
+            threshold=threshold,
+            fail_if_pwned=fail_if_pwned,
+        )
+        return
+
+    if from_stdin:
+        lines = parse_input_lines(sys.stdin, strip=False, ignore_comments=False)
+        if not lines:
             raise click.UsageError("No password provided on stdin.")
+        if len(lines) > 1:
+            _check_batch_passwords(
+                ctx,
+                lines,
+                ntlm=ntlm,
+                pad=pad,
+                threshold=threshold,
+                fail_if_pwned=fail_if_pwned,
+            )
+            return
+        single_password = lines[0]
     elif password is None:
-        password = click.prompt("Password", hide_input=True)
-    s = ctx.obj["settings"]
-    with PwnedPasswordsClient(user_agent=s.user_agent) as client:
-        count = client.check_password(password, ntlm=ntlm, pad=pad)
-    if ctx.obj["use_json"]:
-        click.echo(json.dumps({"count": count}, indent=2))
-    elif count > 0:
-        click.echo(f"Password found {count:,} times in data breaches!")
+        single_password = click.prompt("Password", hide_input=True)
     else:
-        click.echo("Password not found in any data breaches.")
+        single_password = password
+
+    _check_single_password(
+        ctx,
+        single_password,
+        ntlm=ntlm,
+        pad=pad,
+        threshold=threshold,
+        fail_if_pwned=fail_if_pwned,
+    )
 
 
 # --- Subscription command ---
@@ -377,7 +523,10 @@ def password(
 def subscription(ctx: click.Context) -> None:
     """Get current subscription status. Requires API key."""
     s = ctx.obj["settings"]
-    api_key = _require_api_key(ctx)
+    api_key = require_api_key(ctx)
     with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
         data = client.get_subscription_status()
-    _output(data, use_json=ctx.obj["use_json"])
+    render_output(ctx, data)
+
+
+register_extra_commands(cli)

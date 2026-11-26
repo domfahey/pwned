@@ -27,15 +27,24 @@ All commands run through `uv run` (e.g., `uv run pytest`, `uv run mypy`). Python
 
 ```
 src/pwned/
-├── cli.py          # Click commands and output formatting
-├── client.py       # HIBP API client (haveibeenpwned.com/api/v3)
-├── passwords.py    # Pwned Passwords client (api.pwnedpasswords.com) — separate API, no auth
-├── config.py       # pydantic-settings configuration with HIBP_ env prefix
-└── models.py       # Pydantic models for API responses
+├── __init__.py         # Public library API exports
+├── async_client.py     # Async HIBP API client (`AsyncHIBPClient`)
+├── audit.py            # Password manager vault auditing (`Bitwarden`, `KeePass`, CSV)
+├── batch.py            # Batch account/password checks with RPM rate limiting
+├── cache.py            # SQLite response caching for public endpoints
+├── cli.py              # Click command groups and global option parser
+├── cli_commands.py     # Additional commands (`auth`, `search`, `account-range`, `domain-verify`, `audit`, `cache`)
+├── cli_helpers.py      # CLI output rendering, error handling, and API key validation
+├── client.py           # Sync HIBP API client (`HIBPClient`)
+├── config.py           # pydantic-settings configuration with XDG fallback (`~/.config/pwned/.env`)
+├── formatting.py       # Output formatters (`text`, `json`, `jsonl`, `csv`, `table`)
+├── models.py           # Pydantic v2 models for API responses
+├── passwords.py        # Sync & async Pwned Passwords clients (`PwnedPasswordsClient`, `AsyncPwnedPasswordsClient`)
+└── py.typed            # PEP 561 type marker
 ```
 
-Two separate HTTP clients: `HIBPClient` (main API, auth required for most endpoints) and
-`PwnedPasswordsClient` (password range API, no auth, uses k-anonymity).
+Two main HTTP client families: `HIBPClient` / `AsyncHIBPClient` (main API, auth required for most endpoints) and
+`PwnedPasswordsClient` / `AsyncPwnedPasswordsClient` (password range API, no auth, uses k-anonymity).
 
 ## Code Conventions
 
@@ -55,7 +64,7 @@ Two separate HTTP clients: `HIBPClient` (main API, auth required for most endpoi
 
 ## Configuration
 
-Settings are loaded via pydantic-settings with env prefix `HIBP_`:
+Settings are loaded via pydantic-settings with env prefix `HIBP_` and XDG fallback (`~/.config/pwned/.env`):
 - `HIBP_API_KEY` — required for authenticated endpoints
 - `HIBP_USER_AGENT` — custom User-Agent (default: `pwned-cli`)
-- `.env` file is auto-loaded (copy `.env.sample` to `.env`)
+- Precedence: `--api-key` > `HIBP_API_KEY` > CWD `.env` > `~/.config/pwned/.env`

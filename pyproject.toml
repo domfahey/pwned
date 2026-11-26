@@ -1,6 +1,6 @@
 [project]
 name = "pwned"
-version = "0.1.1"
+version = "0.2.0"
 description = "CLI tool and Python client for the Have I Been Pwned API v3"
 readme = "README.md"
 license = "MIT"
@@ -29,6 +29,9 @@ dependencies = [
     "pydantic-settings>=2.0",
 ]
 
+[project.optional-dependencies]
+keepass = ["pykeepass>=4.0"]
+
 [project.urls]
 Homepage = "https://github.com/domfahey/pwned"
 Repository = "https://github.com/domfahey/pwned"
@@ -47,12 +50,16 @@ packages = ["src/pwned"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [
+    "/.claude",
+    "/.clusterfuzzlite",
     "/.github",
     "/.env.sample",
     "/.python-version",
     "/AGENTS.md",
     "/CLAUDE.md",
+    "/Formula",
     "/Makefile",
+    "/todos.md",
 ]
 
 [dependency-groups]

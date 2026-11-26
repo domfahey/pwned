@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import re
 import time
 from typing import Any
 from urllib.parse import quote
@@ -7,19 +9,34 @@ from urllib.parse import quote
 import httpx
 from pydantic import TypeAdapter
 
+from pwned.cache import ResponseCache
 from pwned.config import DEFAULT_USER_AGENT
-from pwned.models import Breach, Paste, SubscribedDomain, Subscription
+from pwned.models import (
+    Breach,
+    BreachedAccountRangeResult,
+    DataClassDescription,
+    DnsToken,
+    EmailAlias,
+    Paste,
+    SearchResult,
+    SubscribedDomain,
+    Subscription,
+)
 
 BASE_URL = "https://haveibeenpwned.com/api/v3"
 MAX_RETRIES = 3
 MAX_RETRY_AFTER = 30
 REQUEST_TIMEOUT = 10.0
 MAX_ERROR_MESSAGE_LEN = 200
+_EMAIL_RE = re.compile(r"^.+@.+$")
+_RANGE_PREFIX_RE = re.compile(r"[0-9A-Fa-f]{6}")
 
 # Module-level adapters avoid rebuilding the validator schema on every API call.
 _breaches_adapter = TypeAdapter(list[Breach])
 _pastes_adapter = TypeAdapter(list[Paste])
 _subscribed_domains_adapter = TypeAdapter(list[SubscribedDomain])
+_data_class_descriptions_adapter = TypeAdapter(list[DataClassDescription])
+_account_range_adapter = TypeAdapter(list[BreachedAccountRangeResult])
 _str_list_adapter = TypeAdapter(list[str])
 _str_list_dict_adapter = TypeAdapter(dict[str, list[str]])
 
@@ -41,7 +58,9 @@ class ForbiddenError(HIBPError):
 
 
 class RateLimitError(HIBPError):
-    pass
+    def __init__(self, message: str, *, retry_after: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 def _extract_error_message(resp: httpx.Response) -> str | None:
@@ -64,15 +83,133 @@ def _extract_error_message(resp: httpx.Response) -> str | None:
     return cleaned
 
 
+def _parse_retry_after(resp: httpx.Response) -> int:
+    """Parse and clamp Retry-After seconds to 0..MAX_RETRY_AFTER, defaulting to 2."""
+    try:
+        return max(0, min(int(resp.headers.get("retry-after", "2")), MAX_RETRY_AFTER))
+    except ValueError:
+        return 2
+
+
+def _parse_raw_retry_after(resp: httpx.Response) -> int | None:
+    """Return parsed non-negative Retry-After seconds if present and valid, else None."""
+    raw = resp.headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+def _build_headers(api_key: str | None, user_agent: str) -> dict[str, str]:
+    headers: dict[str, str] = {"User-Agent": user_agent}
+    if api_key:
+        headers["hibp-api-key"] = api_key
+    return headers
+
+
+def _raise_for_error_response(resp: httpx.Response) -> None:
+    """Raise the appropriate HIBPError subclass for an HTTP error response."""
+    if resp.status_code == 401:
+        raise UnauthorizedError("Invalid or missing API key")
+    if resp.status_code == 403:
+        detail = _extract_error_message(resp)
+        raise ForbiddenError(detail or "Forbidden")
+    if resp.status_code == 404:
+        raise NotFoundError("Not found")
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        detail = _extract_error_message(resp)
+        msg = f"HTTP {resp.status_code}: {detail}" if detail else f"HTTP {resp.status_code}"
+        raise HIBPError(msg) from exc
+
+
+def _validate_range_prefix(prefix: str) -> str:
+    if not _RANGE_PREFIX_RE.fullmatch(prefix):
+        raise ValueError("prefix must be exactly 6 hexadecimal characters")
+    return prefix.upper()
+
+
+def _hash_email(email: str) -> tuple[str, str]:
+    digest = hashlib.sha1(email.strip().lower().encode("utf-8")).hexdigest().upper()  # noqa: S324
+    return digest[:6], digest[6:]
+
+
+def _match_range_suffix(results: list[BreachedAccountRangeResult], suffix: str) -> list[str]:
+    for entry in results:
+        if entry.hash_suffix.upper() == suffix:
+            return list(entry.websites)
+    return []
+
+
+def _is_email(account: str) -> bool:
+    return bool(_EMAIL_RE.match(account.strip()))
+
+
+def _build_breaches_params(domain: str | None, is_spam_list: bool | None) -> dict[str, str]:
+    params: dict[str, str] = {}
+    if domain:
+        params["domain"] = domain
+    if is_spam_list is not None:
+        params["isSpamList"] = str(is_spam_list).lower()
+    return params
+
+
+def _build_account_breaches_params(
+    truncate: bool, domain: str | None, include_unverified: bool
+) -> dict[str, str]:
+    params: dict[str, str] = {}
+    if not truncate:
+        params["truncateResponse"] = "false"
+    if domain:
+        params["domain"] = domain
+    if not include_unverified:
+        params["includeUnverified"] = "false"
+    return params
+
+
+def _cache_key(path: str, params: dict[str, str] | None = None) -> str:
+    if not params:
+        return path
+    query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    return f"{path}?{query}"
+
+
 class HIBPClient:
-    def __init__(self, api_key: str | None = None, user_agent: str = DEFAULT_USER_AGENT) -> None:
-        headers: dict[str, str] = {"User-Agent": user_agent}
-        if api_key:
-            headers["hibp-api-key"] = api_key
-        self._client = httpx.Client(base_url=BASE_URL, headers=headers, timeout=REQUEST_TIMEOUT)
+    def __init__(
+        self,
+        api_key: str | None = None,
+        user_agent: str = DEFAULT_USER_AGENT,
+        *,
+        base_url: str = BASE_URL,
+        timeout: float = REQUEST_TIMEOUT,
+        max_retries: int = MAX_RETRIES,
+        proxy: str | None = None,
+        client: httpx.Client | None = None,
+        cache: ResponseCache | None = None,
+    ) -> None:
+        if max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+        self._max_retries = max_retries
+        self._cache = cache
+        if client is not None:
+            self._client = client
+            self._owns_client = False
+        else:
+            self._client = httpx.Client(
+                base_url=base_url,
+                headers=_build_headers(api_key, user_agent),
+                timeout=timeout,
+                proxy=proxy,
+            )
+            self._owns_client = True
 
     def close(self) -> None:
-        self._client.close()
+        if self._owns_client:
+            self._client.close()
 
     def __enter__(self) -> HIBPClient:
         return self
@@ -81,38 +218,34 @@ class HIBPClient:
         self.close()
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        for attempt in range(MAX_RETRIES + 1):
+        for attempt in range(self._max_retries + 1):
             try:
                 resp = self._client.request(method, path, **kwargs)
             except httpx.RequestError as exc:
                 raise HIBPError(f"Request failed: {exc}") from exc
             if resp.status_code == 429:
-                if attempt == MAX_RETRIES:
-                    raise RateLimitError("Rate limit exceeded after retries")
-                try:
-                    retry_after = max(
-                        0, min(int(resp.headers.get("retry-after", "2")), MAX_RETRY_AFTER)
+                if attempt == self._max_retries:
+                    raise RateLimitError(
+                        "Rate limit exceeded after retries",
+                        retry_after=_parse_raw_retry_after(resp),
                     )
-                except ValueError:
-                    retry_after = 2
-                time.sleep(retry_after)
+                time.sleep(_parse_retry_after(resp))
                 continue
-            if resp.status_code == 401:
-                raise UnauthorizedError("Invalid or missing API key")
-            if resp.status_code == 403:
-                detail = _extract_error_message(resp)
-                raise ForbiddenError(detail or "Forbidden")
-            if resp.status_code == 404:
-                raise NotFoundError("Not found")
-            try:
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                detail = _extract_error_message(resp)
-                msg = f"HTTP {resp.status_code}: {detail}" if detail else f"HTTP {resp.status_code}"
-                raise HIBPError(msg) from exc
+            _raise_for_error_response(resp)
             return resp
         # Unreachable: 429 on final attempt raises, all other status codes return or raise.
         raise RateLimitError("Rate limit exceeded after retries")  # pragma: no cover
+
+    def _get_cached_or_fetch(self, path: str, params: dict[str, str] | None = None) -> bytes:
+        key = _cache_key(path, params)
+        if self._cache is not None:
+            cached = self._cache.get(key)
+            if cached is not None:
+                return cached
+        resp = self._request("GET", path, params=params or {})
+        if self._cache is not None:
+            self._cache.set(key, resp.content)
+        return resp.content
 
     def get_breaches(
         self,
@@ -120,13 +253,9 @@ class HIBPClient:
         domain: str | None = None,
         is_spam_list: bool | None = None,
     ) -> list[Breach]:
-        params: dict[str, str] = {}
-        if domain:
-            params["domain"] = domain
-        if is_spam_list is not None:
-            params["isSpamList"] = str(is_spam_list).lower()
-        resp = self._request("GET", "/breaches", params=params)
-        return _breaches_adapter.validate_json(resp.content)
+        params = _build_breaches_params(domain, is_spam_list)
+        content = self._get_cached_or_fetch("/breaches", params=params)
+        return _breaches_adapter.validate_json(content)
 
     def get_breach(self, name: str) -> Breach:
         resp = self._request("GET", f"/breach/{quote(name, safe='')}")
@@ -137,8 +266,12 @@ class HIBPClient:
         return Breach.model_validate_json(resp.content)
 
     def get_data_classes(self) -> list[str]:
-        resp = self._request("GET", "/dataclasses")
-        return _str_list_adapter.validate_json(resp.content)
+        content = self._get_cached_or_fetch("/dataclasses")
+        return _str_list_adapter.validate_json(content)
+
+    def get_data_class_descriptions(self) -> list[DataClassDescription]:
+        content = self._get_cached_or_fetch("/dataclasses/descriptions")
+        return _data_class_descriptions_adapter.validate_json(content)
 
     def get_account_breaches(
         self,
@@ -148,15 +281,25 @@ class HIBPClient:
         domain: str | None = None,
         include_unverified: bool = True,
     ) -> list[Breach]:
-        params: dict[str, str] = {}
-        if not truncate:
-            params["truncateResponse"] = "false"
-        if domain:
-            params["domain"] = domain
-        if not include_unverified:
-            params["includeUnverified"] = "false"
-        resp = self._request("GET", f"/breachedaccount/{quote(account, safe='')}", params=params)
+        resp = self._request(
+            "GET",
+            f"/breachedaccount/{quote(account, safe='')}",
+            params=_build_account_breaches_params(truncate, domain, include_unverified),
+        )
         return _breaches_adapter.validate_json(resp.content)
+
+    def get_account_range(self, prefix: str) -> list[BreachedAccountRangeResult]:
+        validated_prefix = _validate_range_prefix(prefix)
+        resp = self._request("GET", f"/breachedaccount/range/{validated_prefix}")
+        return _account_range_adapter.validate_json(resp.content)
+
+    def check_account_range(self, email: str) -> list[str]:
+        prefix, suffix = _hash_email(email)
+        try:
+            results = self.get_account_range(prefix)
+        except NotFoundError:
+            return []
+        return _match_range_suffix(results, suffix)
 
     def get_domain_breaches(self, domain: str) -> dict[str, list[str]]:
         resp = self._request("GET", f"/breacheddomain/{quote(domain, safe='')}")
@@ -165,6 +308,28 @@ class HIBPClient:
     def get_subscribed_domains(self) -> list[SubscribedDomain]:
         resp = self._request("GET", "/subscribeddomains")
         return _subscribed_domains_adapter.validate_json(resp.content)
+
+    def generate_dns_token(self, domain: str) -> DnsToken:
+        resp = self._request(
+            "POST",
+            "/domainVerification/generateDnsToken",
+            json={"DomainName": domain},
+        )
+        return DnsToken.model_validate_json(resp.content)
+
+    def verify_dns_token(self, domain: str) -> None:
+        self._request(
+            "POST",
+            "/domainVerification/verifyDnsToken",
+            json={"DomainName": domain},
+        )
+
+    def send_verification_email(self, domain: str, email_alias: EmailAlias) -> None:
+        self._request(
+            "POST",
+            "/domainVerification/sendEmail",
+            json={"DomainName": domain, "EmailAlias": email_alias},
+        )
 
     def get_pastes(self, email: str) -> list[Paste]:
         resp = self._request("GET", f"/pasteaccount/{quote(email, safe='')}")
@@ -185,3 +350,39 @@ class HIBPClient:
     def get_subscription_status(self) -> Subscription:
         resp = self._request("GET", "/subscription/status")
         return Subscription.model_validate_json(resp.content)
+
+    def search_account(
+        self,
+        account: str,
+        *,
+        truncate: bool = True,
+        domain: str | None = None,
+        include_unverified: bool = True,
+        include_stealer_logs: bool = False,
+    ) -> SearchResult:
+        try:
+            breaches = self.get_account_breaches(
+                account,
+                truncate=truncate,
+                domain=domain,
+                include_unverified=include_unverified,
+            )
+        except NotFoundError:
+            breaches = []
+
+        is_email = _is_email(account)
+        pastes: list[Paste] = []
+        if is_email:
+            try:
+                pastes = self.get_pastes(account)
+            except NotFoundError:
+                pastes = []
+
+        stealer_logs: list[str] | None = None
+        if include_stealer_logs and is_email:
+            try:
+                stealer_logs = self.get_stealer_logs_by_email(account)
+            except NotFoundError:
+                stealer_logs = []
+
+        return SearchResult(breaches=breaches, pastes=pastes, stealer_logs=stealer_logs)

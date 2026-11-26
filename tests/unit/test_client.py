@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterator
 from datetime import date, datetime
 from unittest.mock import call, patch
@@ -9,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 from pytest_httpx import HTTPXMock
 
+from pwned.cache import ResponseCache
 from pwned.client import (
     MAX_ERROR_MESSAGE_LEN,
     MAX_RETRY_AFTER,
@@ -18,9 +20,18 @@ from pwned.client import (
     NotFoundError,
     RateLimitError,
     UnauthorizedError,
+    _parse_raw_retry_after,
+    _parse_retry_after,
 )
 from pwned.config import DEFAULT_USER_AGENT
-from pwned.models import Breach, Paste, SubscribedDomain, Subscription
+from pwned.models import (
+    Breach,
+    DataClassDescription,
+    Paste,
+    SearchResult,
+    SubscribedDomain,
+    Subscription,
+)
 
 BASE = "https://haveibeenpwned.com/api/v3"
 
@@ -618,3 +629,288 @@ class TestValidation:
             SubscribedDomain.model_validate(
                 {"DomainName": "example.com", "PwnCountExcludingSpamLists": -1}
             )
+
+
+class TestRetryAfterHelpers:
+    def test_parse_retry_after_valid_clamped_and_invalid(self) -> None:
+        assert _parse_retry_after(httpx.Response(429, headers={"retry-after": "5"})) == 5
+        assert _parse_retry_after(httpx.Response(429, headers={"retry-after": "0"})) == 0
+        assert (
+            _parse_retry_after(httpx.Response(429, headers={"retry-after": "999"}))
+            == MAX_RETRY_AFTER
+        )
+        assert _parse_retry_after(httpx.Response(429, headers={"retry-after": "-3"})) == 0
+        assert _parse_retry_after(httpx.Response(429, headers={"retry-after": "abc"})) == 2
+        assert _parse_retry_after(httpx.Response(429)) == 2
+
+    def test_parse_raw_retry_after(self) -> None:
+        assert _parse_raw_retry_after(httpx.Response(429, headers={"retry-after": "120"})) == 120
+        assert _parse_raw_retry_after(httpx.Response(429, headers={"retry-after": "0"})) == 0
+        assert _parse_raw_retry_after(httpx.Response(429, headers={"retry-after": "-1"})) is None
+        assert _parse_raw_retry_after(httpx.Response(429, headers={"retry-after": "bad"})) is None
+        assert _parse_raw_retry_after(httpx.Response(429)) is None
+
+
+class TestClientConfig:
+    def test_negative_max_retries_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="max_retries"):
+            HIBPClient(max_retries=-1)
+
+    def test_max_retries_zero_raises_immediately_with_retry_after(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=429,
+            headers={"retry-after": "45"},
+        )
+        with (
+            patch("pwned.client.time.sleep") as mock_sleep,
+            HIBPClient(max_retries=0) as client,
+            pytest.raises(RateLimitError) as exc_info,
+        ):
+            client.get_breaches()
+        mock_sleep.assert_not_called()
+        assert exc_info.value.retry_after == 45
+
+    def test_429_exhausted_sets_none_retry_after_when_header_missing(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(url=f"{BASE}/breaches", status_code=429)
+        with (
+            HIBPClient(max_retries=0) as client,
+            pytest.raises(RateLimitError) as exc_info,
+        ):
+            client.get_breaches()
+        assert exc_info.value.retry_after is None
+
+    def test_custom_base_url_and_timeout(self, httpx_mock: HTTPXMock) -> None:
+        custom_base = "https://proxy.example.test/api/v3"
+        httpx_mock.add_response(url=f"{custom_base}/breaches", json=[])
+        with HIBPClient(base_url=custom_base, timeout=5.0) as client:
+            assert client.get_breaches() == []
+            assert client._client.timeout.read == 5.0
+
+    def test_proxy_passed_to_httpx_client(self) -> None:
+        with patch("pwned.client.httpx.Client") as mock_http_client:
+            HIBPClient(proxy="http://127.0.0.1:8080")
+        assert mock_http_client.call_args.kwargs["proxy"] == "http://127.0.0.1:8080"
+
+    def test_injected_client_is_used_and_not_closed(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[])
+        external = httpx.Client(base_url=BASE)
+        with HIBPClient(client=external) as hibp:
+            assert hibp.get_breaches() == []
+        assert not external.is_closed
+        external.close()
+
+
+class TestDataClassDescriptions:
+    def test_get_data_class_descriptions(
+        self, noauth_client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/dataclasses/descriptions",
+            json=[
+                {"name": "Email addresses", "description": "User email addresses."},
+                {"name": "Passwords", "description": "Account passwords."},
+            ],
+        )
+        result = noauth_client.get_data_class_descriptions()
+        assert result == [
+            DataClassDescription(name="Email addresses", description="User email addresses."),
+            DataClassDescription(name="Passwords", description="Account passwords."),
+        ]
+
+
+class TestAccountRange:
+    def test_get_account_range_uppercases_prefix(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/range/ABCDEF",
+            json=[{"hashSuffix": "0" * 34, "websites": ["Adobe", "Dropbox"]}],
+        )
+        result = client.get_account_range("abcdef")
+        assert len(result) == 1
+        assert result[0].hash_suffix == "0" * 34
+        assert result[0].websites == ["Adobe", "Dropbox"]
+
+    @pytest.mark.parametrize("bad_prefix", ["", "abc", "abcdef0", "ghijkl", "12345\n", "12 345"])
+    def test_get_account_range_invalid_prefix_raises(
+        self, client: HIBPClient, bad_prefix: str
+    ) -> None:
+        with pytest.raises(ValueError, match="6 hexadecimal"):
+            client.get_account_range(bad_prefix)
+
+    def test_check_account_range_match_normalizes_email(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        digest = hashlib.sha1(b"user@example.com").hexdigest().upper()
+        prefix, suffix = digest[:6], digest[6:]
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/range/{prefix}",
+            json=[
+                {"hashSuffix": "F" * 34, "websites": ["Unrelated"]},
+                {"hashSuffix": suffix.lower(), "websites": ["Adobe", "LinkedIn"]},
+            ],
+        )
+        result = client.check_account_range("  User@Example.COM ")
+        assert result == ["Adobe", "LinkedIn"]
+
+    def test_check_account_range_no_match_returns_empty(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        digest = hashlib.sha1(b"clean@example.com").hexdigest().upper()
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/range/{digest[:6]}",
+            json=[{"hashSuffix": "0" * 34, "websites": ["Adobe"]}],
+        )
+        assert client.check_account_range("clean@example.com") == []
+
+    def test_check_account_range_404_returns_empty(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        digest = hashlib.sha1(b"clean@example.com").hexdigest().upper()
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/range/{digest[:6]}",
+            status_code=404,
+        )
+        assert client.check_account_range("clean@example.com") == []
+
+
+class TestDomainVerification:
+    def test_generate_dns_token(self, client: HIBPClient, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{BASE}/domainVerification/generateDnsToken",
+            json={"txtRecordValue": "hibp-verify=abc123"},
+        )
+        result = client.generate_dns_token("example.com")
+        assert result.txt_record_value == "hibp-verify=abc123"
+        req = httpx_mock.get_request()
+        assert req is not None
+        assert req.read() == b'{"DomainName":"example.com"}'
+
+    def test_verify_dns_token(self, client: HIBPClient, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{BASE}/domainVerification/verifyDnsToken",
+            status_code=204,
+        )
+        client.verify_dns_token("example.com")
+        req = httpx_mock.get_request()
+        assert req is not None
+        assert req.read() == b'{"DomainName":"example.com"}'
+
+    def test_send_verification_email(self, client: HIBPClient, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{BASE}/domainVerification/sendEmail",
+            status_code=204,
+        )
+        client.send_verification_email("example.com", "security")
+        req = httpx_mock.get_request()
+        assert req is not None
+        assert req.read() == b'{"DomainName":"example.com","EmailAlias":"security"}'
+
+
+class TestSearchAccount:
+    def test_search_account_email_with_breaches_and_pastes(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/user%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/pasteaccount/user%40example.com",
+            json=[{"Source": "Pastebin", "Id": "p1", "EmailCount": 5}],
+        )
+        result = client.search_account("user@example.com")
+        assert isinstance(result, SearchResult)
+        assert [b.name for b in result.breaches] == ["Adobe"]
+        assert [p.id for p in result.pastes] == ["p1"]
+        assert result.stealer_logs is None
+
+    def test_search_account_with_stealer_logs_and_options(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=(
+                f"{BASE}/breachedaccount/user%40example.com"
+                "?truncateResponse=false&domain=adobe.com&includeUnverified=false"
+            ),
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/pasteaccount/user%40example.com",
+            status_code=404,
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/stealerlogsbyemail/user%40example.com",
+            json=["netflix.com"],
+        )
+        result = client.search_account(
+            "user@example.com",
+            truncate=False,
+            domain="adobe.com",
+            include_unverified=False,
+            include_stealer_logs=True,
+        )
+        assert [b.name for b in result.breaches] == ["Adobe"]
+        assert result.pastes == []
+        assert result.stealer_logs == ["netflix.com"]
+
+    def test_search_account_all_404_returns_empty_lists(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/user%40example.com",
+            status_code=404,
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/pasteaccount/user%40example.com",
+            status_code=404,
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/stealerlogsbyemail/user%40example.com",
+            status_code=404,
+        )
+        result = client.search_account("user@example.com", include_stealer_logs=True)
+        assert result == SearchResult(breaches=[], pastes=[], stealer_logs=[])
+
+    def test_search_account_username_skips_pastes_and_stealer_logs(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/someuser",
+            json=[{"Name": "Adobe"}],
+        )
+        result = client.search_account("someuser", include_stealer_logs=True)
+        assert [b.name for b in result.breaches] == ["Adobe"]
+        assert result.pastes == []
+        assert result.stealer_logs is None
+        assert len(httpx_mock.get_requests()) == 1
+
+
+class TestPublicResponseCache:
+    def test_public_endpoints_use_response_cache(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches?domain=adobe.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/dataclasses",
+            json=["Passwords"],
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/dataclasses/descriptions",
+            json=[{"name": "Passwords", "description": "Compromised passwords."}],
+        )
+        cache = ResponseCache()
+        with HIBPClient(user_agent="test", cache=cache) as c:
+            assert c.get_breaches(domain="adobe.com") == c.get_breaches(domain="adobe.com")
+            assert c.get_data_classes() == c.get_data_classes()
+            assert c.get_data_class_descriptions() == c.get_data_class_descriptions()
+        assert len(httpx_mock.get_requests()) == 3

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 NonNegativeInt = Annotated[int, Field(ge=0)]
+EmailAlias = Literal["admin", "hostmaster", "info", "security", "webmaster"]
 
 
 class _HIBPBase(BaseModel):
@@ -68,6 +69,9 @@ class Breach(_HIBPBase):
     attribution: str | None = Field(
         default=None, alias="Attribution", description="Who the breach is attributed to."
     )
+    disclosure_url: str | None = Field(
+        default=None, alias="DisclosureUrl", description="URL to breach disclosure details."
+    )
 
 
 class Paste(_HIBPBase):
@@ -96,9 +100,34 @@ class Subscription(_HIBPBase):
         alias="DomainSearchMaxBreachedAccounts",
         description="Max breached accounts in domain search (None if unlimited).",
     )
+    max_breached_domains: NonNegativeInt | None = Field(
+        default=None,
+        alias="MaxBreachedDomains",
+        description="Max verified domains searchable under the subscription.",
+    )
     includes_stealer_logs: bool = Field(
         alias="IncludesStealerLogs",
         description="Whether the subscription includes stealer log access.",
+    )
+    includes_bulk_domain_add: bool = Field(
+        default=False,
+        alias="IncludesBulkDomainAdd",
+        description="Whether the subscription supports bulk domain addition.",
+    )
+    includes_auto_subdomain_verification: bool = Field(
+        default=False,
+        alias="IncludesAutoSubdomainVerification",
+        description="Whether subdomains are automatically verified.",
+    )
+    includes_customer_domains: bool = Field(
+        default=False,
+        alias="IncludesCustomerDomains",
+        description="Whether customer domains are supported.",
+    )
+    includes_k_anon: bool = Field(
+        default=False,
+        alias="IncludesKAnon",
+        description="Whether k-anonymity account range searches are included.",
     )
 
 
@@ -121,4 +150,42 @@ class SubscribedDomain(_HIBPBase):
         default=None,
         alias="NextSubscriptionRenewal",
         description="When the domain subscription renews.",
+    )
+
+
+class DataClassDescription(_HIBPBase):
+    name: str = Field(description="Name of the data class.")
+    description: str = Field(description="Description of the compromised data class.")
+
+
+class BreachedAccountRangeResult(_HIBPBase):
+    hash_suffix: str = Field(
+        alias="hashSuffix",
+        description="Remaining 34 hex characters of the SHA-1 email hash.",
+    )
+    websites: list[str] = Field(
+        default_factory=list,
+        description="Breach names associated with this hash suffix.",
+    )
+
+
+class DnsToken(_HIBPBase):
+    txt_record_value: str = Field(
+        alias="txtRecordValue",
+        description="Complete DNS TXT record value to publish for domain verification.",
+    )
+
+
+class SearchResult(_HIBPBase):
+    breaches: list[Breach] = Field(
+        default_factory=list,
+        description="Breaches associated with the account.",
+    )
+    pastes: list[Paste] = Field(
+        default_factory=list,
+        description="Pastes associated with the account.",
+    )
+    stealer_logs: list[str] | None = Field(
+        default=None,
+        description="Stealer log domains associated with the account, if queried.",
     )

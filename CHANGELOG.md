@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-26
+
+### Added
+- **Async HIBP & Pwned Passwords Clients**: `AsyncHIBPClient` and `AsyncPwnedPasswordsClient` built on `httpx.AsyncClient` for async applications.
+- **New HIBP API Endpoints & Features**:
+  - Data class descriptions (`dataclasses --descriptions` / `client.get_data_class_descriptions()`).
+  - k-Anonymity email breach check (`account-range <email>`).
+  - Domain verification management (`domain-verify dns-token|dns-check|email`).
+  - Composite search command (`search <account>` querying breaches, pastes, and stealer logs).
+- **Batch Operations & Scripting Controls**:
+  - Batch account and password audits via `--file` or multi-line `--stdin` with RPM rate limiting (`--rpm`).
+  - Scripting exit codes and thresholds (`--fail-if-pwned`, `--threshold N`, `PwnedPasswordsClient.is_pwned()`).
+- **Flexible Output Formats & Local Caching**:
+  - Structured output formats (`--format text|json|jsonl|csv|table`).
+  - SQLite response caching for public endpoints (`--cache`).
+- **Vault Auditing**:
+  - Password manager export auditing (`pwned audit --source bitwarden-json|bitwarden-csv|csv|keepass`).
+- **Global Configuration & XDG Credential Management**:
+  - XDG config fallback (`~/.config/pwned/.env`) and `pwned auth set|show|clear` command with secure `0600` permissions.
+- **Zero-Install & Packaging Improvements**:
+  - `uvx` zero-install guidance and optional KeePass extras (`pwned[keepass]`).
+
 ## [0.1.1] - 2026-11-26
 
 ### Added
@@ -29,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured error hierarchy (`HIBPError`, `NotFoundError`, `UnauthorizedError`, `ForbiddenError`, `RateLimitError`) and automatic 429 retry with capped `Retry-After`
 - Strict `mypy`, `ruff` (including Bandit `S` rules), GitHub Actions CI, and unit + integration test suites
 
-[Unreleased]: https://github.com/domfahey/pwned/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/domfahey/pwned/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/domfahey/pwned/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/domfahey/pwned/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/domfahey/pwned/releases/tag/v0.1.0
