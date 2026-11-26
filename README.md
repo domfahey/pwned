@@ -1,19 +1,31 @@
 # pwned
 
-A command-line tool for the [Have I Been Pwned](https://haveibeenpwned.com/) API v3.
+[![CI](https://github.com/domfahey/pwned/actions/workflows/ci.yml/badge.svg)](https://github.com/domfahey/pwned/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/domfahey/pwned)](https://github.com/domfahey/pwned/releases)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Check email addresses against data breaches, search for compromised passwords, query stealer logs, and more — all from the terminal.
+A command-line tool and typed Python client for the [Have I Been Pwned](https://haveibeenpwned.com/) API v3.
+
+Check email addresses against data breaches, search for compromised passwords, query stealer logs, and more — all from the terminal or Python.
 
 ## Installation
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
+# Install globally as a CLI tool
+uv tool install git+https://github.com/domfahey/pwned.git
+```
+
+Or install from a local clone for development:
+
+```bash
 git clone https://github.com/domfahey/pwned.git && cd pwned
 make install
 ```
 
-Run commands via `uv run pwned ...` (or activate `.venv/bin/activate`, or install globally with `uv tool install .`). Examples below assume `pwned` is on your `PATH`.
+When running from a local clone, prefix commands with `uv run pwned ...` (or activate `.venv/bin/activate`). Examples below assume `pwned` is on your `PATH`.
 
 ## Configuration
 
@@ -140,6 +152,20 @@ Global flags can appear before or after the subcommand:
 ```bash
 pwned --json breach Adobe
 pwned breach Adobe --json
+```
+
+## Python Library Usage
+
+`pwned` also exports a typed Python client (`py.typed` / PEP 561 compliant):
+
+```python
+from pwned import HIBPClient, PwnedPasswordsClient
+
+with PwnedPasswordsClient() as pw:
+    count = pw.check_password("hunter2", pad=True)
+
+with HIBPClient(api_key="your_api_key", user_agent="my-app") as client:
+    breaches = client.get_account_breaches("user@example.com", truncate=False)
 ```
 
 ## Official HIBP MCP Server
