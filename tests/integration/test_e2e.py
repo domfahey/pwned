@@ -110,6 +110,12 @@ class TestBreachesCommand:
         assert isinstance(data, list)
         assert all(b["IsSpamList"] is True for b in data)
 
+    def test_exclude_unverified_filter(self) -> None:
+        data = _run_json("breaches", "--no-include-unverified")
+        assert isinstance(data, list)
+        assert len(data) > 0
+        assert all(b["IsVerified"] is True for b in data)
+
 
 class TestLatestBreachCommand:
     def test_latest(self) -> None:
@@ -221,6 +227,14 @@ class TestAccountCommand:
 
     def test_opt_out_not_found(self) -> None:
         out = _run_fail("--api-key", TEST_KEY, "account", f"opt-out@{DOMAIN}")
+        assert "Not found" in out
+
+    def test_opt_out_breach_not_found(self) -> None:
+        out = _run_fail("--api-key", TEST_KEY, "account", f"opt-out-breach@{DOMAIN}")
+        assert "Not found" in out
+
+    def test_paste_sensitive_breach_not_found(self) -> None:
+        out = _run_fail("--api-key", TEST_KEY, "account", f"paste-sensitive-breach@{DOMAIN}")
         assert "Not found" in out
 
     def test_permanent_opt_out_not_found(self) -> None:

@@ -66,7 +66,7 @@ Configuration is resolved in the following order (highest precedence first):
 - `password` — Check password exposure (supports `--stdin`, `--file`, `--hashed`, `--offline-db`, `--concurrency`, `--stats`, `--ntlm`, `--pad`, `--threshold`, `--fail-if-pwned`)
 - `audit` — Audit local password manager or browser exports (Bitwarden JSON/Encrypted-JSON/CSV, 1Password CSV/1PUX, Chrome/Firefox/Apple CSV, generic CSV, KeePass via `--source keepass`, `--check-reuse`, `--concurrency`, `--offline-db`, `--fail-if-pwned`)
 - `breach` — Get details for a specific breach
-- `breaches` — List all known breaches (supports `--domain`, `--spam-list`, `--no-spam-list`, `--since`, `--data-class`, `--verified-only`, `--exclude-retired`, `--sort pwn-count|date|name`)
+- `breaches` — List all known breaches (supports `--domain`, `--spam-list`, `--no-spam-list`, `--no-include-unverified`, `--since`, `--data-class`, `--verified-only`, `--exclude-retired`, `--sort pwn-count|date|name`)
 - `latest-breach` — Get the most recently added breach
 - `dataclasses` — List tracked data classes (supports `--descriptions`)
 - `cache clear` — Clear local response cache
@@ -79,7 +79,7 @@ Configuration is resolved in the following order (highest precedence first):
 - `pastes` — Get pastes for an email address
 - `subscription` — View HIBP subscription status and rate limits
 - `domain` — Get breached email addresses for a domain (supports `--baseline`, `--save-baseline`, `--fail-if-pwned`)
-- `subscribed-domains` — List subscribed domains
+- `subscribed-domains` / `subscribed-domains list` — List subscribed domains
 
 ### Pro / High RPM
 - `account-range <email>` — Query breach status via 6-character SHA-1 email prefix (*k*-anonymity)
@@ -87,6 +87,7 @@ Configuration is resolved in the following order (highest precedence first):
 ### Pro
 - `stealer email|website|domain` — Query stealer log records by email address, website domain, or email domain
 - `domain-verify dns-token|dns-check|meta-tag|meta-check|email` — Manage domain ownership verification via DNS TXT records, HTML meta tags, or email aliases
+- `subscribed-domains remove <domain>` — Remove a subscribed domain from your account
 
 ### Short Command Aliases
 For convenience, ergonomic short aliases are available:
@@ -282,4 +283,6 @@ Direct Have I Been Pwned CLIs in other ecosystems:
 
 ## License
 
-MIT
+Code is licensed under the [MIT License](LICENSE).
+
+Breach and paste data returned by the Have I Been Pwned API is sourced from [Have I Been Pwned](https://haveibeenpwned.com/) and licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Applications displaying HIBP breach or paste data must clearly attribute Have I Been Pwned with a link to `https://haveibeenpwned.com/`.

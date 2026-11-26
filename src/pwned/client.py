@@ -64,24 +64,42 @@ class RateLimitError(HIBPError):
         self.retry_after = retry_after
 
 
-def _extract_error_message(resp: httpx.Response) -> str | None:
-    """Extract a sanitized error message from an HIBP JSON error body, if present."""
-    try:
-        body = resp.json()
-    except ValueError:
-        return None
-    if not isinstance(body, dict):
-        return None
-    message = body.get("message")
-    if not isinstance(message, str):
-        return None
-    printable = "".join(ch for ch in message if ch.isprintable() or ch.isspace())
+_NON_TEXT_ERROR_MEDIA_TYPES = frozenset(
+    {"text/html", "application/xhtml+xml", "application/xml", "text/xml"}
+)
+
+
+def _sanitize_error_text(raw: str) -> str | None:
+    printable = "".join(ch for ch in raw if ch.isprintable() or ch.isspace())
     cleaned = " ".join(printable.split())
     if not cleaned:
         return None
     if len(cleaned) > MAX_ERROR_MESSAGE_LEN:
         return f"{cleaned[: MAX_ERROR_MESSAGE_LEN - 1]}…"
     return cleaned
+
+
+def _extract_error_message(resp: httpx.Response) -> str | None:
+    """Extract a sanitized error message from an HIBP JSON or plain-text error body."""
+    content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type in _NON_TEXT_ERROR_MEDIA_TYPES:
+        return None
+    try:
+        body = resp.json()
+    except ValueError:
+        if content_type not in ("", "text/plain"):
+            return None
+        text = resp.text.strip()
+        if not text or text.startswith("<"):
+            return None
+        return _sanitize_error_text(text)
+    if isinstance(body, str):
+        return _sanitize_error_text(body)
+    if isinstance(body, dict):
+        message = body.get("message")
+        if isinstance(message, str):
+            return _sanitize_error_text(message)
+    return None
 
 
 def _parse_retry_after(resp: httpx.Response) -> int:
@@ -114,12 +132,14 @@ def _build_headers(api_key: str | None, user_agent: str) -> dict[str, str]:
 def _raise_for_error_response(resp: httpx.Response) -> None:
     """Raise the appropriate HIBPError subclass for an HTTP error response."""
     if resp.status_code == 401:
-        raise UnauthorizedError("Invalid or missing API key")
+        detail = _extract_error_message(resp)
+        raise UnauthorizedError(detail or "Invalid or missing API key")
     if resp.status_code == 403:
         detail = _extract_error_message(resp)
         raise ForbiddenError(detail or "Forbidden")
     if resp.status_code == 404:
-        raise NotFoundError("Not found")
+        detail = _extract_error_message(resp)
+        raise NotFoundError(detail or "Not found")
     try:
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
@@ -150,12 +170,18 @@ def _is_email(account: str) -> bool:
     return bool(_EMAIL_RE.match(account.strip()))
 
 
-def _build_breaches_params(domain: str | None, is_spam_list: bool | None) -> dict[str, str]:
+def _build_breaches_params(
+    domain: str | None,
+    is_spam_list: bool | None,
+    include_unverified: bool = True,
+) -> dict[str, str]:
     params: dict[str, str] = {}
     if domain:
         params["domain"] = domain
     if is_spam_list is not None:
         params["isSpamList"] = str(is_spam_list).lower()
+    if not include_unverified:
+        params["includeUnverified"] = "false"
     return params
 
 
@@ -253,8 +279,9 @@ class HIBPClient:
         *,
         domain: str | None = None,
         is_spam_list: bool | None = None,
+        include_unverified: bool = True,
     ) -> list[Breach]:
-        params = _build_breaches_params(domain, is_spam_list)
+        params = _build_breaches_params(domain, is_spam_list, include_unverified)
         content = self._get_cached_or_fetch("/breaches", params=params)
         return _breaches_adapter.validate_json(content)
 
@@ -309,6 +336,9 @@ class HIBPClient:
     def get_subscribed_domains(self) -> list[SubscribedDomain]:
         resp = self._request("GET", "/subscribeddomains")
         return _subscribed_domains_adapter.validate_json(resp.content)
+
+    def remove_subscribed_domain(self, domain: str) -> None:
+        self._request("DELETE", f"/subscribeddomains/{quote(domain, safe='')}")
 
     def generate_dns_token(self, domain: str) -> DnsToken:
         resp = self._request(

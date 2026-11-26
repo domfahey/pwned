@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Full HIBP API v3 Parity**:
+  - `DELETE /subscribedDomains/{domain}` via `HIBPClient.remove_subscribed_domain()`, `AsyncHIBPClient.remove_subscribed_domain()`, and `pwned subscribed-domains remove <domain>` (retaining backwards-compatible `pwned subscribed-domains` / `pwned sd` listing alongside `subscribed-domains list`).
+  - `includeUnverified=false` server-side filtering on `GET /breaches` via `get_breaches(include_unverified=False)` and `pwned breaches --no-include-unverified`.
+- Live integration test coverage for `breaches --no-include-unverified`, `opt-out-breach`, and `paste-sensitive-breach` test accounts, plus CC BY 4.0 HIBP data attribution in `README.md`.
+
+### Fixed
+- Parsed JSON-string and `text/plain` HIBP error bodies (while still ignoring HTML/binary error pages) and surfaced endpoint-specific `401` and `404` details (such as `verifyMetaTag` diagnostics) in `UnauthorizedError`, `NotFoundError`, and CLI error output.
+
 ## [0.3.0] - 2026-11-26
 
 ### Added

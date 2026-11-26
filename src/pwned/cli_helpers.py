@@ -18,11 +18,15 @@ def handle_errors[**P, R](f: Callable[P, R]) -> Callable[P, R]:
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         try:
             return f(*args, **kwargs)
-        except NotFoundError:
-            click.echo("Not found.", err=True)
+        except NotFoundError as e:
+            detail = str(e)
+            msg = "Not found." if detail in ("", "Not found") else f"Not found: {detail}"
+            click.echo(msg, err=True)
             sys.exit(1)
-        except UnauthorizedError:
-            click.echo("Error: Invalid or missing API key.", err=True)
+        except UnauthorizedError as e:
+            detail = str(e) or "Invalid or missing API key"
+            suffix = "" if detail.endswith(".") else "."
+            click.echo(f"Error: {detail}{suffix}", err=True)
             sys.exit(1)
         except HIBPError as e:
             click.echo(f"Error: {e}", err=True)

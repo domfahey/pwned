@@ -345,13 +345,17 @@ class TestAsyncCache:
 class TestAsyncEndpoints:
     def test_get_breaches_filters(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
-            url=f"{BASE}/breaches?domain=adobe.com&isSpamList=false",
+            url=f"{BASE}/breaches?domain=adobe.com&isSpamList=false&includeUnverified=false",
             json=[{"Name": "Adobe"}],
         )
 
         async def _run() -> None:
             async with AsyncHIBPClient(user_agent="test") as client:
-                result = await client.get_breaches(domain="adobe.com", is_spam_list=False)
+                result = await client.get_breaches(
+                    domain="adobe.com",
+                    is_spam_list=False,
+                    include_unverified=False,
+                )
             assert [b.name for b in result] == ["Adobe"]
 
         asyncio.run(_run())
@@ -443,6 +447,11 @@ class TestAsyncEndpoints:
             json=[{"DomainName": "example.com", "PwnCount": 100}],
         )
         httpx_mock.add_response(
+            method="DELETE",
+            url=f"{BASE}/subscribeddomains/example.com",
+            status_code=200,
+        )
+        httpx_mock.add_response(
             method="POST",
             url=f"{BASE}/domainVerification/generateDnsToken",
             json={"txtRecordValue": "hibp-verify=abc123"},
@@ -463,6 +472,7 @@ class TestAsyncEndpoints:
                 assert await client.get_domain_breaches("example.com") == {"alias1": ["Adobe"]}
                 domains = await client.get_subscribed_domains()
                 assert domains[0].domain_name == "example.com"
+                await client.remove_subscribed_domain("example.com")
                 token = await client.generate_dns_token("example.com")
                 assert token.txt_record_value == "hibp-verify=abc123"
                 await client.verify_dns_token("example.com")
@@ -470,9 +480,10 @@ class TestAsyncEndpoints:
 
         asyncio.run(_run())
         requests = httpx_mock.get_requests()
-        assert requests[2].read() == b'{"DomainName":"example.com"}'
+        assert requests[2].method == "DELETE"
         assert requests[3].read() == b'{"DomainName":"example.com"}'
-        assert requests[4].read() == b'{"DomainName":"example.com","EmailAlias":"security"}'
+        assert requests[4].read() == b'{"DomainName":"example.com"}'
+        assert requests[5].read() == b'{"DomainName":"example.com","EmailAlias":"security"}'
 
     def test_generate_and_verify_meta_tag(self, httpx_mock: HTTPXMock) -> None:
         tag_html = '<meta name="hibp-verify" content="xyz789" />'

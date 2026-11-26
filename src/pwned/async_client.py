@@ -133,8 +133,9 @@ class AsyncHIBPClient:
         *,
         domain: str | None = None,
         is_spam_list: bool | None = None,
+        include_unverified: bool = True,
     ) -> list[Breach]:
-        params = _build_breaches_params(domain, is_spam_list)
+        params = _build_breaches_params(domain, is_spam_list, include_unverified)
         content = await self._get_cached_or_fetch("/breaches", params=params)
         return _breaches_adapter.validate_json(content)
 
@@ -189,6 +190,9 @@ class AsyncHIBPClient:
     async def get_subscribed_domains(self) -> list[SubscribedDomain]:
         resp = await self._request("GET", "/subscribeddomains")
         return _subscribed_domains_adapter.validate_json(resp.content)
+
+    async def remove_subscribed_domain(self, domain: str) -> None:
+        await self._request("DELETE", f"/subscribeddomains/{quote(domain, safe='')}")
 
     async def generate_dns_token(self, domain: str) -> DnsToken:
         resp = await self._request(

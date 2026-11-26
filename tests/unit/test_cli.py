@@ -124,6 +124,17 @@ class TestBreachCommands:
         assert request is not None
         assert "isSpamList=true" in str(request.url)
 
+    def test_breaches_no_include_unverified(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(json=[{"Name": "Adobe"}])
+        result = cli_runner.invoke(cli, ["breaches", "--no-include-unverified"])
+        assert result.exit_code == 0
+        assert "Adobe" in result.output
+        request = httpx_mock.get_request()
+        assert request is not None
+        assert "includeUnverified=false" in str(request.url)
+
     def test_latest_breach(self, httpx_mock: HTTPXMock, cli_runner: CliRunner) -> None:
         httpx_mock.add_response(
             url=f"{BASE}/latestbreach",
@@ -200,6 +211,8 @@ class TestAccountCommands:
             ["account", "test@example.com"],
             ["domain", "example.com"],
             ["subscribed-domains"],
+            ["subscribed-domains", "list"],
+            ["subscribed-domains", "remove", "example.com"],
             ["pastes", "test@example.com"],
             ["stealer", "email", "t@e.com"],
             ["stealer", "website", "netflix.com"],
@@ -256,6 +269,48 @@ class TestDomainCommands:
         )
         assert result.exit_code == 0
         assert "example.com" in result.output
+
+    def test_subscribed_domains_list_subcommand(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/subscribeddomains",
+            json=[{"DomainName": "example.com", "PwnCount": 100}],
+        )
+        result = cli_runner.invoke(
+            cli,
+            ["--api-key", TEST_KEY, "subscribed-domains", "list"],
+        )
+        assert result.exit_code == 0
+        assert "example.com" in result.output
+
+    def test_subscribed_domains_remove_and_alias(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(
+            method="DELETE",
+            url=f"{BASE}/subscribeddomains/example.com",
+            status_code=200,
+        )
+        result = cli_runner.invoke(
+            cli,
+            ["--api-key", TEST_KEY, "--json", "subscribed-domains", "remove", "example.com"],
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.output) == {"domain": "example.com", "removed": True}
+
+        httpx_mock.add_response(
+            method="DELETE",
+            url=f"{BASE}/subscribeddomains/other.com",
+            status_code=200,
+        )
+        alias_result = cli_runner.invoke(
+            cli,
+            ["sd", "remove", "other.com", "--api-key", TEST_KEY],
+        )
+        assert alias_result.exit_code == 0
+        assert "other.com" in alias_result.output
+        assert "True" in alias_result.output
 
 
 class TestPastesCommand:
@@ -495,6 +550,34 @@ class TestErrorHandling:
         result = cli_runner.invoke(cli, ["--api-key", TEST_KEY, "domain", "unverified.com"])
         assert result.exit_code == 1
         assert "Error: Domain not verified." in result.output
+
+    def test_not_found_and_unauthorized_details_through_cli(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        detail = "The expected verification meta tag was not found in the home page head."
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{BASE}/domainVerification/verifyMetaTag",
+            status_code=404,
+            json={"message": detail},
+        )
+        res_404 = cli_runner.invoke(
+            cli, ["--api-key", TEST_KEY, "domain-verify", "meta-check", "example.com"]
+        )
+        assert res_404.exit_code == 1
+        assert res_404.output.strip() == f"Not found: {detail}"
+
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=401,
+            text="Access denied due to improperly formed hibp-api-key.",
+            headers={"content-type": "text/plain"},
+        )
+        res_401 = cli_runner.invoke(cli, ["breaches"])
+        assert res_401.exit_code == 1
+        assert (
+            res_401.output.strip() == "Error: Access denied due to improperly formed hibp-api-key."
+        )
 
     def test_validation_error_handled_gracefully(
         self, httpx_mock: HTTPXMock, cli_runner: CliRunner

@@ -202,6 +202,7 @@ def breach(ctx: click.Context, name: str) -> None:
     default=None,
     help="Filter to only spam lists (--spam-list) or exclude them (--no-spam-list).",
 )
+@click.option("--no-include-unverified", is_flag=True, help="Exclude unverified breaches.")
 @click.option("--since", default=None, help="Filter breaches on or after YYYY-MM-DD.")
 @click.option(
     "--data-class",
@@ -223,6 +224,7 @@ def breaches(
     ctx: click.Context,
     domain: str | None,
     spam_list: bool | None,
+    no_include_unverified: bool,
     since: str | None,
     data_class: str | None,
     verified_only: bool,
@@ -232,7 +234,11 @@ def breaches(
     """Get all breaches in the system."""
     s = ctx.obj["settings"]
     with HIBPClient(user_agent=s.user_agent, cache=get_cache(ctx)) as client:
-        data = client.get_breaches(domain=domain, is_spam_list=spam_list)
+        data = client.get_breaches(
+            domain=domain,
+            is_spam_list=spam_list,
+            include_unverified=not no_include_unverified,
+        )
     data = _apply_breach_filters(
         data,
         since=since,
@@ -547,16 +553,42 @@ def domain_cmd(
         sys.exit(1)
 
 
-@cli.command("subscribed-domains")
-@click.pass_context
-@handle_errors
-def subscribed_domains(ctx: click.Context) -> None:
-    """List subscribed domains. Requires API key."""
+def _list_subscribed_domains(ctx: click.Context) -> None:
     s = ctx.obj["settings"]
     api_key = require_api_key(ctx)
     with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
         data = client.get_subscribed_domains()
     render_output(ctx, data)
+
+
+@cli.group("subscribed-domains", invoke_without_command=True)
+@click.pass_context
+@handle_errors
+def subscribed_domains(ctx: click.Context) -> None:
+    """List or manage subscribed domains. Requires API key."""
+    if ctx.invoked_subcommand is None:
+        _list_subscribed_domains(ctx)
+
+
+@subscribed_domains.command("list")
+@click.pass_context
+@handle_errors
+def subscribed_domains_list(ctx: click.Context) -> None:
+    """List all subscribed domains."""
+    _list_subscribed_domains(ctx)
+
+
+@subscribed_domains.command("remove")
+@click.argument("domain")
+@click.pass_context
+@handle_errors
+def subscribed_domains_remove(ctx: click.Context, domain: str) -> None:
+    """Remove a subscribed domain from your account (Pro tier)."""
+    s = ctx.obj["settings"]
+    api_key = require_api_key(ctx)
+    with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
+        client.remove_subscribed_domain(domain)
+    render_output(ctx, {"domain": domain, "removed": True})
 
 
 @cli.command()

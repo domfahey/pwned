@@ -52,7 +52,32 @@ def noauth_client() -> Iterator[HIBPClient]:
 class TestRequestErrors:
     def test_401_raises_unauthorized(self, client: HIBPClient, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(url=f"{BASE}/breaches", status_code=401)
-        with pytest.raises(UnauthorizedError):
+        with pytest.raises(UnauthorizedError, match="^Invalid or missing API key$"):
+            client.get_breaches()
+
+    def test_401_preserves_plain_text_and_json_string_detail(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=401,
+            text="Access denied due to missing hibp-api-key.",
+            headers={"content-type": "text/plain; charset=utf-8"},
+        )
+        with pytest.raises(
+            UnauthorizedError, match="^Access denied due to missing hibp-api-key\\.$"
+        ):
+            client.get_breaches()
+
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=401,
+            json="Access denied due to improperly formed hibp-api-key.",
+        )
+        with pytest.raises(
+            UnauthorizedError,
+            match="^Access denied due to improperly formed hibp-api-key\\.$",
+        ):
             client.get_breaches()
 
     def test_404_raises_not_found(self, client: HIBPClient, httpx_mock: HTTPXMock) -> None:
@@ -60,8 +85,63 @@ class TestRequestErrors:
             url=f"{BASE}/breachedaccount/nobody%40example.com",
             status_code=404,
         )
-        with pytest.raises(NotFoundError):
+        with pytest.raises(NotFoundError, match="^Not found$"):
             client.get_account_breaches("nobody@example.com")
+
+    def test_404_preserves_json_detail_on_verify_meta_tag(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        detail = "The expected verification meta tag was not found in the home page head."
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{BASE}/domainVerification/verifyMetaTag",
+            status_code=404,
+            json={"message": detail},
+        )
+        with pytest.raises(NotFoundError, match=f"^{detail}$"):
+            client.verify_meta_tag("example.com")
+
+    def test_error_ignores_html_and_binary_content_types(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=503,
+            text="Cloudflare outage",
+            headers={"content-type": "text/html; charset=utf-8"},
+        )
+        with pytest.raises(HIBPError, match="^HTTP 503$"):
+            client.get_breaches()
+
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=500,
+            content=b"raw binary error",
+            headers={"content-type": "application/octet-stream"},
+        )
+        with pytest.raises(HIBPError, match="^HTTP 500$"):
+            client.get_breaches()
+
+    def test_error_handles_plain_text_and_blank_text_bodies(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=400,
+            text="Invalid query parameter.",
+            headers={"content-type": "text/plain"},
+        )
+        with pytest.raises(HIBPError, match="^HTTP 400: Invalid query parameter\\.$"):
+            client.get_breaches()
+
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=400,
+            text="   ",
+            headers={"content-type": "text/plain"},
+        )
+        with pytest.raises(HIBPError, match="^HTTP 400$"):
+            client.get_breaches()
 
     def test_403_raises_forbidden_with_json_message(
         self, client: HIBPClient, httpx_mock: HTTPXMock
@@ -337,6 +417,16 @@ class TestBreaches:
         assert request is not None
         assert "isSpamList=false" in str(request.url)
 
+    def test_get_breaches_exclude_unverified(
+        self, noauth_client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(json=[{"Name": "Adobe"}])
+        result = noauth_client.get_breaches(include_unverified=False)
+        assert [b.name for b in result] == ["Adobe"]
+        request = httpx_mock.get_request()
+        assert request is not None
+        assert "includeUnverified=false" in str(request.url)
+
     def test_get_breach(self, noauth_client: HIBPClient, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
             url=f"{BASE}/breach/Adobe",
@@ -413,6 +503,38 @@ class TestDomainSearch:
         )
         result = client.get_subscribed_domains()
         assert result[0].domain_name == "example.com"
+
+    def test_remove_subscribed_domain(self, client: HIBPClient, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            method="DELETE",
+            url=f"{BASE}/subscribeddomains/sub.example.com",
+            status_code=200,
+        )
+        client.remove_subscribed_domain("sub.example.com")
+        request = httpx_mock.get_request()
+        assert request is not None
+        assert request.method == "DELETE"
+
+    def test_remove_subscribed_domain_percent_encoded_and_errors(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            method="DELETE",
+            url=f"{BASE}/subscribeddomains/bad%2Fdomain",
+            status_code=400,
+            json={"message": "Invalid domain."},
+        )
+        with pytest.raises(HIBPError, match="HTTP 400: Invalid domain\\."):
+            client.remove_subscribed_domain("bad/domain")
+
+        httpx_mock.add_response(
+            method="DELETE",
+            url=f"{BASE}/subscribeddomains/example.com",
+            status_code=403,
+            json={"message": "Pro subscription required."},
+        )
+        with pytest.raises(ForbiddenError, match="Pro subscription required\\."):
+            client.remove_subscribed_domain("example.com")
 
 
 class TestPastes:
@@ -940,3 +1062,16 @@ class TestPublicResponseCache:
             assert c.get_data_classes() == c.get_data_classes()
             assert c.get_data_class_descriptions() == c.get_data_class_descriptions()
         assert len(httpx_mock.get_requests()) == 3
+
+    def test_breaches_cache_differentiates_include_unverified(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[{"Name": "All"}])
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches?includeUnverified=false",
+            json=[{"Name": "VerifiedOnly"}],
+        )
+        cache = ResponseCache()
+        with HIBPClient(user_agent="test", cache=cache) as c:
+            assert [b.name for b in c.get_breaches()] == ["All"]
+            assert [b.name for b in c.get_breaches(include_unverified=False)] == ["VerifiedOnly"]
+            assert [b.name for b in c.get_breaches(include_unverified=False)] == ["VerifiedOnly"]
+        assert len(httpx_mock.get_requests()) == 2
