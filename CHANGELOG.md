@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Scripting exit codes and thresholds (`--fail-if-pwned`, `--threshold N`, `PwnedPasswordsClient.is_pwned()`).
 - **Flexible Output Formats & Local Caching**:
   - Structured output formats (`--format text|json|jsonl|csv|table`).
-  - SQLite response caching for public endpoints (`--cache`).
+  - File-based XDG TTL response caching for public endpoints (`--cache` / `--no-cache`, `pwned cache clear`).
 - **Vault Auditing**:
   - Password manager export auditing (`pwned audit --source bitwarden-json|bitwarden-csv|csv|keepass`).
 - **Global Configuration & XDG Credential Management**:

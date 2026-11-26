@@ -179,7 +179,7 @@ src/pwned/
 ├── async_client.py     # Async HIBP API client (httpx.AsyncClient)
 ├── audit.py            # Password manager vault auditing logic
 ├── batch.py            # Batch processing & rate limiting for accounts/passwords
-├── cache.py            # SQLite response caching for public endpoints
+├── cache.py            # File-based TTL response caching for public endpoints
 ├── cli.py              # Click command groups and global option parser
 ├── cli_commands.py     # Additional command modules (auth, search, audit, cache, etc.)
 ├── cli_helpers.py      # CLI error handling, output rendering, and validation helpers

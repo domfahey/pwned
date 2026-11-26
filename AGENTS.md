@@ -31,7 +31,7 @@ src/pwned/
 ├── async_client.py     # Async HIBP API client (`AsyncHIBPClient`)
 ├── audit.py            # Password manager vault auditing (`Bitwarden`, `KeePass`, CSV)
 ├── batch.py            # Batch account/password checks with RPM rate limiting
-├── cache.py            # SQLite response caching for public endpoints
+├── cache.py            # File-based TTL response caching for public endpoints
 ├── cli.py              # Click command groups and global option parser
 ├── cli_commands.py     # Additional commands (`auth`, `search`, `account-range`, `domain-verify`, `audit`, `cache`)
 ├── cli_helpers.py      # CLI output rendering, error handling, and API key validation
