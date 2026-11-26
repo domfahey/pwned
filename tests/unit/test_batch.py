@@ -15,7 +15,7 @@ from pwned.batch import (
     parse_input_lines,
 )
 from pwned.client import HIBPError, NotFoundError, RateLimitError
-from pwned.models import Breach
+from pwned.models import Breach, Subscription
 
 
 class TestParseInputLines:
@@ -75,6 +75,11 @@ class TestParseInputLines:
     def test_empty_input(self) -> None:
         assert parse_input_lines([]) == []
 
+    def test_deduplicate_false_preserves_duplicates(self) -> None:
+        lines = ["pw1\n", "pw2\n", "pw1\n"]
+        result = parse_input_lines(lines, strip=False, ignore_comments=False, deduplicate=False)
+        assert result == ["pw1", "pw2", "pw1"]
+
 
 class TestLoadInputFile:
     def test_loads_utf8_file_default_options(self, tmp_path: Path) -> None:
@@ -101,6 +106,16 @@ class TestLoadInputFile:
     def test_missing_file_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
             load_input_file(tmp_path / "missing.txt")
+
+    def test_loads_file_without_deduplicating(self, tmp_path: Path) -> None:
+        path = tmp_path / "dups.txt"
+        path.write_text("pw1\npw2\npw1\n", encoding="utf-8")
+
+        assert load_input_file(path, strip=False, ignore_comments=False, deduplicate=False) == [
+            "pw1",
+            "pw2",
+            "pw1",
+        ]
 
 
 class TestBatchModels:
@@ -233,6 +248,82 @@ class TestBatchCheckAccounts:
         sleep = MagicMock()
 
         batch_check_accounts(["a@example.com", "b@example.com"], client, rpm=None, sleep=sleep)
+
+        sleep.assert_not_called()
+        client.get_subscription_status.assert_not_called()
+
+    def test_auto_rpm_queries_subscription_when_rpm_omitted(self) -> None:
+        client = MagicMock()
+        client.get_subscription_status.return_value = Subscription.model_validate(
+            {
+                "SubscriptionName": "Pwned 1",
+                "Description": "Desc",
+                "SubscribedUntil": "2027-01-01T00:00:00Z",
+                "Rpm": 120,
+                "DomainSearchMaxBreachedAccounts": 0,
+                "IncludesStealerLogs": False,
+            }
+        )
+        client.get_account_breaches.return_value = []
+        sleep = MagicMock()
+
+        batch_check_accounts(
+            ["a@example.com", "b@example.com"],
+            client,
+            auto_rpm=True,
+            sleep=sleep,
+        )
+
+        client.get_subscription_status.assert_called_once()
+        sleep.assert_called_once_with(0.5)
+
+    def test_auto_rpm_skips_subscription_for_single_account(self) -> None:
+        client = MagicMock()
+        client.get_account_breaches.return_value = []
+        sleep = MagicMock()
+
+        batch_check_accounts(["only@example.com"], client, auto_rpm=True, sleep=sleep)
+
+        client.get_subscription_status.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_auto_rpm_falls_back_on_hibp_error(self) -> None:
+        client = MagicMock()
+        client.get_subscription_status.side_effect = HIBPError("HTTP 500")
+        client.get_account_breaches.return_value = []
+        sleep = MagicMock()
+
+        results = batch_check_accounts(
+            ["a@example.com", "b@example.com"],
+            client,
+            auto_rpm=True,
+            sleep=sleep,
+        )
+
+        assert len(results) == 2
+        sleep.assert_not_called()
+
+    def test_auto_rpm_ignores_non_positive_subscription_rpm(self) -> None:
+        client = MagicMock()
+        client.get_subscription_status.return_value = Subscription.model_validate(
+            {
+                "SubscriptionName": "Custom",
+                "Description": "Desc",
+                "SubscribedUntil": "2027-01-01T00:00:00Z",
+                "Rpm": 0,
+                "DomainSearchMaxBreachedAccounts": 0,
+                "IncludesStealerLogs": False,
+            }
+        )
+        client.get_account_breaches.return_value = []
+        sleep = MagicMock()
+
+        batch_check_accounts(
+            ["a@example.com", "b@example.com"],
+            client,
+            auto_rpm=True,
+            sleep=sleep,
+        )
 
         sleep.assert_not_called()
 

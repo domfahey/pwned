@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -811,16 +812,20 @@ class TestAccountExtended:
             client: HIBPClient,
             *,
             rpm: int | None = None,
+            auto_rpm: bool = False,
             domain: str | None = None,
             include_unverified: bool = True,
+            on_progress: Callable[[int, int, AccountBatchItem], None] | None = None,
         ) -> list[AccountBatchItem]:
             return batch_check_accounts(
                 accounts,
                 client,
                 rpm=rpm,
+                auto_rpm=auto_rpm,
                 domain=domain,
                 include_unverified=include_unverified,
                 sleep=sleeps.append,
+                on_progress=on_progress,
             )
 
         monkeypatch.setattr("pwned.cli.batch_check_accounts", spy_batch_check)
@@ -860,8 +865,20 @@ class TestAccountExtended:
         assert "No accounts provided." in result.output
 
     def test_account_batch_stdin_and_fail_if_pwned(
-        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.setattr("pwned.batch.time.sleep", lambda _: None)
+        httpx_mock.add_response(
+            url=f"{BASE}/subscription/status",
+            json={
+                "SubscriptionName": "Pwned 1",
+                "Description": "Desc",
+                "SubscribedUntil": "2027-01-01T00:00:00Z",
+                "Rpm": 120,
+                "DomainSearchMaxBreachedAccounts": 0,
+                "IncludesStealerLogs": False,
+            },
+        )
         httpx_mock.add_response(
             url=f"{BASE}/breachedaccount/a%40example.com",
             json=[{"Name": "Adobe"}],
@@ -888,6 +905,42 @@ class TestAccountExtended:
             input="b@example.com\n",
         )
         assert res_clean.exit_code == 0
+
+    def test_account_batch_rejects_no_truncate(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+        accounts_file = tmp_path / "accounts.txt"
+        accounts_file.write_text("a@example.com\n", encoding="utf-8")
+        result = cli_runner.invoke(
+            cli,
+            ["--api-key", TEST_KEY, "account", "--file", str(accounts_file), "--no-truncate"],
+        )
+        assert result.exit_code == 2
+        assert "Cannot combine --no-truncate" in result.output
+
+    def test_account_batch_tty_progress_emits_to_stderr(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("pwned.batch.time.sleep", lambda _: None)
+        monkeypatch.setattr("pwned.cli._is_stderr_tty", lambda: True)
+        httpx_mock.add_response(
+            url=f"{BASE}/subscription/status",
+            status_code=500,
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/a%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/b%40example.com",
+            status_code=404,
+        )
+        result = cli_runner.invoke(
+            cli,
+            ["--api-key", TEST_KEY, "account", "--stdin"],
+            input="a@example.com\nb@example.com\n",
+        )
+        assert result.exit_code == 0
+        assert "[1/2]" in result.output
+        assert "[2/2]" in result.output
 
     def test_account_batch_stdin_empty_errors(self, cli_runner: CliRunner) -> None:
         result = cli_runner.invoke(
@@ -1034,6 +1087,108 @@ class TestPasswordExtended:
             {"index": 1, "pwn_count": 2, "status": "clean"},
             {"index": 2, "pwn_count": 0, "status": "clean"},
         ]
+
+    def test_password_file_preserves_duplicate_indices_and_caches(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        pw_file = tmp_path / "dups.txt"
+        pw_file.write_text("dup\nunique\ndup\n", encoding="utf-8")
+        p1_prefix, p1_suffix = _sha1_parts("dup")
+        p2_prefix, _ = _sha1_parts("unique")
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p1_prefix}",
+            text=f"{p1_suffix}:7\n",
+        )
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p2_prefix}",
+            text="",
+        )
+        result = cli_runner.invoke(
+            cli,
+            ["--format", "json", "password", "--file", str(pw_file)],
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.output) == [
+            {"index": 1, "pwn_count": 7, "status": "pwned"},
+            {"index": 2, "pwn_count": 0, "status": "clean"},
+            {"index": 3, "pwn_count": 7, "status": "pwned"},
+        ]
+        assert len(httpx_mock.get_requests()) == 2
+
+    def test_password_stdin_duplicate_lines_enter_batch_mode(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        p1_prefix, p1_suffix = _sha1_parts("dup")
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p1_prefix}",
+            text=f"{p1_suffix}:3\n",
+        )
+        result = cli_runner.invoke(
+            cli,
+            ["--format", "json", "password", "--stdin"],
+            input="dup\ndup\n",
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.output) == [
+            {"index": 1, "pwn_count": 3, "status": "pwned"},
+            {"index": 2, "pwn_count": 3, "status": "pwned"},
+        ]
+        assert len(httpx_mock.get_requests()) == 1
+
+    def test_password_batch_tty_progress_omits_plaintext(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("pwned.cli._is_stderr_tty", lambda: True)
+        p1_prefix, p1_suffix = _sha1_parts("secretA")
+        p2_prefix, _ = _sha1_parts("secretB")
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p1_prefix}",
+            text=f"{p1_suffix}:9\n",
+        )
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p2_prefix}",
+            text="",
+        )
+        result = cli_runner.invoke(
+            cli,
+            ["password", "--stdin"],
+            input="secretA\nsecretB\n",
+        )
+        assert result.exit_code == 0
+        assert "[1/2]" in result.output
+        assert "[2/2]" in result.output
+        assert "secretA" not in result.output
+        assert "secretB" not in result.output
+
+    def test_password_single_tty_color_and_no_color(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("pwned.cli._is_stdout_tty", lambda: True)
+        p1_prefix, p1_suffix = _sha1_parts("password")
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p1_prefix}",
+            text=f"{p1_suffix}:42\n",
+        )
+        res_color = cli_runner.invoke(cli, ["password", "password"], color=True)
+        assert res_color.exit_code == 0
+        assert "\x1b[" in res_color.output
+
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p1_prefix}",
+            text="",
+        )
+        res_clean_color = cli_runner.invoke(cli, ["password", "password"], color=True)
+        assert res_clean_color.exit_code == 0
+        assert "\x1b[" in res_clean_color.output
+
+        monkeypatch.setenv("NO_COLOR", "1")
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p1_prefix}",
+            text=f"{p1_suffix}:42\n",
+        )
+        res_no_color = cli_runner.invoke(cli, ["password", "password"], color=True)
+        assert res_no_color.exit_code == 0
+        assert "\x1b[" not in res_no_color.output
 
     def test_extra_commands_registered_on_cli(self) -> None:
         for cmd in ("auth", "search", "account-range", "domain-verify", "audit", "cache"):

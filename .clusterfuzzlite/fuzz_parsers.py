@@ -6,20 +6,24 @@ import sys
 import atheris
 
 with atheris.instrument_imports():
-    from pwned.batch import parse_input_lines
-    from pwned.formatting import strip_html
-    from pwned.passwords import _md4, _parse_range_response
+    import _parsers
 
 
 def test_one_input(data: bytes) -> None:
     fdp = atheris.FuzzedDataProvider(data)
     text = fdp.ConsumeUnicodeNoSurrogates(fdp.ConsumeIntInRange(0, 1024))
-    strip_html(text)
-    parse_input_lines(text.splitlines())
-    _parse_range_response(text)
+    _parsers.strip_html(text)
+    _parsers.parse_input_lines(text.splitlines())
+    _parsers.parse_input_lines(
+        text.splitlines(),
+        strip=False,
+        ignore_comments=False,
+        deduplicate=False,
+    )
+    _parsers._parse_range_response(text)
 
     raw = fdp.ConsumeBytes(fdp.ConsumeIntInRange(0, 512))
-    _md4(raw)
+    _parsers._md4(raw)
 
 
 def main() -> None:

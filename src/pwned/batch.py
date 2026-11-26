@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
 
+from pwned._parsers import parse_input_lines as parse_input_lines
 from pwned.client import HIBPClient, HIBPError, NotFoundError
 from pwned.models import NonNegativeInt, _HIBPBase
 from pwned.passwords import PwnedPasswordsClient
@@ -30,38 +31,21 @@ class PasswordBatchItem(_HIBPBase):
     error: str | None = None
 
 
-def parse_input_lines(
-    lines: Iterable[str],
-    *,
-    strip: bool = True,
-    ignore_comments: bool = True,
-) -> list[str]:
-    """Normalize, filter, and deduplicate input lines while preserving order."""
-    seen: set[str] = set()
-    result: list[str] = []
-    for raw in lines:
-        value = raw.rstrip("\r\n")
-        if strip:
-            value = value.strip()
-        if not value:
-            continue
-        if ignore_comments and value.lstrip().startswith("#"):
-            continue
-        if value not in seen:
-            seen.add(value)
-            result.append(value)
-    return result
-
-
 def load_input_file(
     path: Path,
     *,
     strip: bool = True,
     ignore_comments: bool = True,
+    deduplicate: bool = True,
 ) -> list[str]:
     """Load and parse a UTF-8 newline-delimited input file."""
     with path.open("r", encoding="utf-8") as handle:
-        return parse_input_lines(handle, strip=strip, ignore_comments=ignore_comments)
+        return parse_input_lines(
+            handle,
+            strip=strip,
+            ignore_comments=ignore_comments,
+            deduplicate=deduplicate,
+        )
 
 
 def _check_single_account(
@@ -90,23 +74,42 @@ def _check_single_account(
     )
 
 
+def _resolve_rpm(
+    client: HIBPClient,
+    rpm: int | None,
+    *,
+    auto_rpm: bool,
+    total: int,
+) -> int | None:
+    if rpm is not None:
+        if rpm <= 0:
+            raise ValueError("rpm must be greater than 0")
+        return rpm
+    if not auto_rpm or total <= 1:
+        return None
+    try:
+        detected = client.get_subscription_status().rpm
+    except HIBPError:
+        return None
+    return detected if detected > 0 else None
+
+
 def batch_check_accounts(
     accounts: Sequence[str],
     client: HIBPClient,
     *,
     rpm: int | None = None,
+    auto_rpm: bool = False,
     domain: str | None = None,
     include_unverified: bool = True,
     sleep: Callable[[float], None] = time.sleep,
     on_progress: Callable[[int, int, AccountBatchItem], None] | None = None,
 ) -> list[AccountBatchItem]:
     """Check a sequence of accounts for breaches with optional RPM pacing."""
-    if rpm is not None and rpm <= 0:
-        raise ValueError("rpm must be greater than 0")
-
-    delay = 60.0 / rpm if rpm is not None else 0.0
-    results: list[AccountBatchItem] = []
     total = len(accounts)
+    effective_rpm = _resolve_rpm(client, rpm, auto_rpm=auto_rpm, total=total)
+    delay = 60.0 / effective_rpm if effective_rpm is not None else 0.0
+    results: list[AccountBatchItem] = []
     for idx, account in enumerate(accounts, start=1):
         if idx > 1 and delay > 0.0:
             sleep(delay)

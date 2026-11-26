@@ -46,12 +46,16 @@ def auth_set(api_key: str | None) -> None:
 def auth_show(ctx: click.Context) -> None:
     """Show the currently configured API key status."""
     key: str | None = ctx.obj["settings"].get_api_key()
-    path = get_config_file()
+    config_file: str | None
+    try:
+        config_file = str(get_config_file())
+    except RuntimeError:
+        config_file = None
     render_output(
         ctx,
         {
             "api_key": mask_api_key(key),
-            "config_file": str(path),
+            "config_file": config_file,
             "configured": bool(key),
         },
     )

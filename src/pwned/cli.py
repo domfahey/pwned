@@ -7,6 +7,8 @@ import click
 
 from pwned import __version__
 from pwned.batch import (
+    AccountBatchItem,
+    PasswordBatchItem,
     batch_check_accounts,
     batch_check_passwords,
     load_input_file,
@@ -24,7 +26,7 @@ from pwned.cli_helpers import (
 )
 from pwned.client import HIBPClient, NotFoundError
 from pwned.config import load_settings
-from pwned.formatting import OUTPUT_FORMATS, OutputFormat
+from pwned.formatting import OUTPUT_FORMATS, OutputFormat, should_use_color
 from pwned.models import DataClassDescription
 from pwned.passwords import PwnedPasswordsClient
 
@@ -172,6 +174,29 @@ def dataclasses(ctx: click.Context, descriptions: bool) -> None:
 # --- Account commands ---
 
 
+def _is_stdout_tty() -> bool:
+    return sys.stdout.isatty()
+
+
+def _is_stderr_tty() -> bool:
+    return sys.stderr.isatty()
+
+
+def _echo_status(message: str, *, fg: str) -> None:
+    if should_use_color(is_tty=_is_stdout_tty()):
+        click.echo(click.style(message, fg=fg))
+    else:
+        click.echo(message)
+
+
+def _account_progress(idx: int, total: int, item: AccountBatchItem) -> None:
+    click.echo(f"[{idx}/{total}] {item.account}: {item.status}", err=True)
+
+
+def _password_progress(idx: int, total: int, item: PasswordBatchItem) -> None:
+    click.echo(f"[{idx}/{total}] #{item.index}: {item.status}", err=True)
+
+
 def _run_account_single(
     ctx: click.Context,
     account: str,
@@ -195,7 +220,7 @@ def _run_account_single(
             if not fail_if_pwned:
                 raise
             if get_output_format(ctx) == "text":
-                click.echo("Clean (not found in any breaches).")
+                _echo_status("Clean (not found in any breaches).", fg="green")
             else:
                 render_output(ctx, [])
             return
@@ -264,6 +289,9 @@ def account(
         )
         return
 
+    if no_truncate:
+        raise click.UsageError("Cannot combine --no-truncate with --file or --stdin.")
+
     accounts = (
         load_input_file(input_file) if input_file is not None else parse_input_lines(sys.stdin)
     )
@@ -277,8 +305,10 @@ def account(
             accounts,
             client,
             rpm=rpm,
+            auto_rpm=rpm is None,
             domain=domain,
             include_unverified=not no_include_unverified,
+            on_progress=_account_progress if _is_stderr_tty() else None,
         )
     render_output(ctx, results)
     if fail_if_pwned and any(r.status == "pwned" for r in results):
@@ -387,9 +417,9 @@ def _check_single_password(
         count = client.check_password(single_password, ntlm=ntlm, pad=pad)
     if get_output_format(ctx) == "text":
         if count > 0:
-            click.echo(f"Password found {count:,} times in data breaches!")
+            _echo_status(f"Password found {count:,} times in data breaches!", fg="red")
         else:
-            click.echo("Password not found in any data breaches.")
+            _echo_status("Password not found in any data breaches.", fg="green")
     else:
         render_output(ctx, {"count": count})
     if fail_if_pwned and count >= threshold:
@@ -413,6 +443,7 @@ def _check_batch_passwords(
             threshold=threshold,
             ntlm=ntlm,
             pad=pad,
+            on_progress=_password_progress if _is_stderr_tty() else None,
         )
     render_output(ctx, results)
     if fail_if_pwned and any(r.status == "pwned" for r in results):
@@ -471,7 +502,9 @@ def password(
         raise click.UsageError(f"Cannot specify both {' and '.join(sources)}.")
 
     if input_file is not None:
-        passwords = load_input_file(input_file, strip=False, ignore_comments=False)
+        passwords = load_input_file(
+            input_file, strip=False, ignore_comments=False, deduplicate=False
+        )
         if not passwords:
             raise click.UsageError("No passwords provided.")
         _check_batch_passwords(
@@ -485,7 +518,7 @@ def password(
         return
 
     if from_stdin:
-        lines = parse_input_lines(sys.stdin, strip=False, ignore_comments=False)
+        lines = parse_input_lines(sys.stdin, strip=False, ignore_comments=False, deduplicate=False)
         if not lines:
             raise click.UsageError("No password provided on stdin.")
         if len(lines) > 1:

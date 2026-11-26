@@ -111,6 +111,23 @@ class TestAuthCommands:
         assert "(not set)" in result.output
         assert "configured: False" in result.output
 
+    def test_auth_show_handles_missing_home_dir(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        def _raise_no_home() -> Path:
+            raise RuntimeError("Could not determine home directory.")
+
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr(Path, "home", _raise_no_home)
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["--json", "auth", "show"])
+        assert result.exit_code == 0
+        assert json.loads(result.output) == {
+            "api_key": "(not set)",
+            "config_file": None,
+            "configured": False,
+        }
+
     def test_auth_clear_removes_existing_key(
         self, isolated_env: Path, cli_runner: CliRunner
     ) -> None:

@@ -4,35 +4,16 @@ import csv
 import io
 import json
 import os
-from html.parser import HTMLParser
 from typing import Any, Literal
 
 from pydantic import BaseModel
+
+from pwned._parsers import strip_html as strip_html
 
 OutputFormat = Literal["text", "json", "jsonl", "csv", "table"]
 OUTPUT_FORMATS: tuple[OutputFormat, ...] = ("text", "json", "jsonl", "csv", "table")
 
 _TABLE_MAX_CELL = 60
-
-
-class _HTMLStripper(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self._parts: list[str] = []
-
-    def handle_data(self, data: str) -> None:
-        self._parts.append(data)
-
-    def get_text(self) -> str:
-        return "".join(self._parts)
-
-
-def strip_html(text: str) -> str:
-    """Strip HTML tags and decode character references."""
-    stripper = _HTMLStripper()
-    stripper.feed(text)
-    stripper.close()
-    return stripper.get_text()
 
 
 def serialize(data: Any) -> Any:

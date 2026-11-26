@@ -107,12 +107,12 @@ pwned breach Adobe --format table
 from pwned import HIBPClient, PwnedPasswordsClient, ResponseCache
 
 # Password checks with k-anonymity
-with PwnedPasswordsClient(cache=ResponseCache()) as pw:
+with PwnedPasswordsClient() as pw:
     is_compromised = pw.is_pwned("hunter2", threshold=1)
     suffix_map = pw.get_password_range("5BAA6")
 
-# HIBP API requests
-with HIBPClient(api_key="your_api_key", user_agent="my-app") as client:
+# HIBP API requests (with optional public-endpoint caching)
+with HIBPClient(api_key="your_api_key", user_agent="my-app", cache=ResponseCache()) as client:
     breaches = client.get_account_breaches("user@example.com", truncate=False)
     search_res = client.search_account("user@example.com", include_stealer_logs=True)
 ```
