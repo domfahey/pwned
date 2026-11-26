@@ -203,6 +203,13 @@ Integration tests use the [HIBP test API key](https://haveibeenpwned.com/API/v3#
 make test-integration
 ```
 
+## See Also
+
+Direct Have I Been Pwned CLIs in other ecosystems:
+
+- [`wKovacs64/pwned`](https://github.com/wKovacs64/pwned) — Node.js/TypeScript
+- [`brycx/checkpwn`](https://github.com/brycx/checkpwn) — Rust
+
 ## License
 
 MIT
