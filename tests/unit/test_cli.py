@@ -11,6 +11,7 @@ from pytest_httpx import HTTPXMock
 
 import pwned
 from pwned.cli import cli
+from pwned.passwords import _ntlm_hash
 
 BASE = "https://haveibeenpwned.com/api/v3"
 TEST_KEY = "00000000000000000000000000000000"
@@ -56,6 +57,17 @@ class TestBreachCommands:
         assert "Encrypted & details." in result.output
         assert "<em>" not in result.output
         assert "<a " not in result.output
+
+    def test_breach_tag_only_description_in_text_output(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breach/Adobe",
+            json={"Name": "Adobe", "Description": "<br/>"},
+        )
+        result = cli_runner.invoke(cli, ["breach", "Adobe"])
+        assert result.exit_code == 0
+        assert "  Description: \n" in result.output
 
     def test_breach_preserves_html_in_json_output(
         self, httpx_mock: HTTPXMock, cli_runner: CliRunner
@@ -221,6 +233,15 @@ class TestDomainCommands:
         assert result.exit_code == 0
         assert result.output == "No results found.\n"
 
+    def test_domain_joins_multiple_breaches_and_empty_list(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(json={"a": ["Adobe", "LinkedIn"], "b": []})
+        result = cli_runner.invoke(cli, ["--api-key", TEST_KEY, "domain", "example.com"])
+        assert result.exit_code == 0
+        assert "  a: Adobe, LinkedIn\n" in result.output
+        assert "  b: \n" in result.output
+
     def test_subscribed_domains(self, httpx_mock: HTTPXMock, cli_runner: CliRunner) -> None:
         httpx_mock.add_response(
             json=[{"DomainName": "example.com", "PwnCount": 100}],
@@ -279,6 +300,12 @@ class TestStealerCommands:
         )
         assert result.exit_code == 0
         assert "andy" in result.output
+
+    def test_stealer_group_without_subcommand_shows_help(self, cli_runner: CliRunner) -> None:
+        result = cli_runner.invoke(cli, ["stealer"])
+        assert "email" in result.output
+        assert "website" in result.output
+        assert "domain" in result.output
 
 
 class TestPasswordCommand:
@@ -340,11 +367,63 @@ class TestPasswordCommand:
         assert result.exit_code == 2
         assert "Cannot specify both" in result.output
 
-    @pytest.mark.parametrize("stdin_data", ["", "\n", "\r\n"])
+    @pytest.mark.parametrize("stdin_data", ["", "\n", "\r", "\r\n"])
     def test_password_from_stdin_empty_errors(self, cli_runner: CliRunner, stdin_data: str) -> None:
         result = cli_runner.invoke(cli, ["password", "--stdin"], input=stdin_data)
         assert result.exit_code == 2
         assert "No password provided on stdin" in result.output
+
+    def test_password_from_stdin_without_trailing_newline(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        prefix, suffix = _sha1_parts("password")
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{prefix}",
+            text=f"{suffix}:50\n",
+        )
+        result = cli_runner.invoke(cli, ["password", "--stdin"], input="password")
+        assert result.exit_code == 0
+        assert "50" in result.output
+
+    def test_password_ntlm_and_pad_flags(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        digest = _ntlm_hash("password")
+        httpx_mock.add_response(
+            url=httpx.URL(
+                f"https://api.pwnedpasswords.com/range/{digest[:5]}",
+                params={"mode": "ntlm"},
+            ),
+            text=f"{digest[5:]}:42\n",
+        )
+        result = cli_runner.invoke(cli, ["password", "--ntlm", "--pad", "password"])
+        assert result.exit_code == 0
+        assert "42" in result.output
+        request = httpx_mock.get_request()
+        assert request is not None
+        assert request.headers["add-padding"] == "true"
+
+    def test_password_json_not_found(self, httpx_mock: HTTPXMock, cli_runner: CliRunner) -> None:
+        prefix, _ = _sha1_parts("unique-pw")
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{prefix}",
+            text="",
+        )
+        result = cli_runner.invoke(cli, ["--json", "password", "unique-pw"])
+        assert result.exit_code == 0
+        assert json.loads(result.output) == {"count": 0}
+
+    def test_password_http_error_through_cli(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        prefix, _ = _sha1_parts("password")
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{prefix}",
+            status_code=500,
+        )
+        result = cli_runner.invoke(cli, ["password", "password"])
+        assert result.exit_code == 1
+        assert "Error: HTTP 500" in result.output
 
     def test_password_interactive_prompt(
         self, httpx_mock: HTTPXMock, cli_runner: CliRunner
@@ -467,6 +546,20 @@ class TestGlobalOptionGroup:
         assert result.exit_code == 0
         assert "found 7 times" in result.output
 
+    def test_user_agent_space_separated_and_empty_equals_key(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[])
+        result = cli_runner.invoke(cli, ["breaches", "--user-agent", "my-agent", "--"])
+        assert result.exit_code == 0
+        request = httpx_mock.get_request()
+        assert request is not None
+        assert request.headers["user-agent"] == "my-agent"
+
+        res_empty = cli_runner.invoke(cli, ["subscription", "--api-key="])
+        assert res_empty.exit_code == 1
+        assert "API key" in res_empty.output
+
     def test_json_flag_after_subcommand(self, httpx_mock: HTTPXMock, cli_runner: CliRunner) -> None:
         httpx_mock.add_response(
             url=f"{BASE}/breach/Adobe",
@@ -508,19 +601,5 @@ class TestPackageExports:
     def test_public_api_exported(self) -> None:
         assert isinstance(pwned.__version__, str)
         assert pwned.__version__
-        for name in (
-            "HIBPClient",
-            "PwnedPasswordsClient",
-            "HIBPError",
-            "NotFoundError",
-            "UnauthorizedError",
-            "ForbiddenError",
-            "RateLimitError",
-            "Settings",
-            "load_settings",
-            "Breach",
-            "Paste",
-            "Subscription",
-            "SubscribedDomain",
-        ):
+        for name in pwned.__all__:
             assert hasattr(pwned, name), f"Missing export {name}"

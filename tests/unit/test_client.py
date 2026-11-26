@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from pytest_httpx import HTTPXMock
 
 from pwned.client import (
+    MAX_ERROR_MESSAGE_LEN,
     MAX_RETRY_AFTER,
     ForbiddenError,
     HIBPClient,
@@ -18,6 +19,8 @@ from pwned.client import (
     RateLimitError,
     UnauthorizedError,
 )
+from pwned.config import DEFAULT_USER_AGENT
+from pwned.models import Breach, Paste, SubscribedDomain, Subscription
 
 BASE = "https://haveibeenpwned.com/api/v3"
 
@@ -70,13 +73,78 @@ class TestRequestErrors:
         with pytest.raises(ForbiddenError, match="^Forbidden$"):
             client.get_domain_breaches("unverified.com")
 
-    @pytest.mark.parametrize("body", [[], {"message": 123}, {"message": "   "}])
+    @pytest.mark.parametrize(
+        "body",
+        [[], None, {"error": "no message"}, {"message": 123}, {"message": ""}, {"message": "   "}],
+    )
     def test_error_ignores_non_string_or_blank_json_message(
         self, client: HIBPClient, httpx_mock: HTTPXMock, body: object
     ) -> None:
         httpx_mock.add_response(url=f"{BASE}/breaches", status_code=400, json=body)
         with pytest.raises(HIBPError, match="^HTTP 400$"):
             client.get_breaches()
+
+    def test_error_strips_non_printable_control_chars(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=400,
+            json={"message": "Bad\x00\x1b[31m request\x07"},
+        )
+        with pytest.raises(HIBPError, match=r"^HTTP 400: Bad\[31m request$"):
+            client.get_breaches()
+
+    def test_error_control_chars_only_treated_as_empty(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=400,
+            json={"message": "\x00\x07\x1b"},
+        )
+        with pytest.raises(HIBPError, match="^HTTP 400$"):
+            client.get_breaches()
+
+    def test_error_message_truncation_boundary(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        exact = "a" * MAX_ERROR_MESSAGE_LEN
+        httpx_mock.add_response(url=f"{BASE}/breaches", status_code=400, json={"message": exact})
+        with pytest.raises(HIBPError) as exc_exact:
+            client.get_breaches()
+        assert str(exc_exact.value) == f"HTTP 400: {exact}"
+
+        over = "a" * (MAX_ERROR_MESSAGE_LEN + 1)
+        httpx_mock.add_response(url=f"{BASE}/breaches", status_code=400, json={"message": over})
+        with pytest.raises(HIBPError) as exc_over:
+            client.get_breaches()
+        detail = str(exc_over.value).removeprefix("HTTP 400: ")
+        assert len(detail) == MAX_ERROR_MESSAGE_LEN
+        assert detail.endswith("…")
+
+    def test_429_missing_retry_after_defaults_to_two(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(url=f"{BASE}/breaches", status_code=429)
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[])
+        with patch("pwned.client.time.sleep") as mock_sleep:
+            assert client.get_breaches() == []
+        mock_sleep.assert_called_once_with(2)
+
+    def test_429_succeeds_on_final_retry_attempt(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        for _ in range(3):
+            httpx_mock.add_response(
+                url=f"{BASE}/breaches",
+                status_code=429,
+                headers={"retry-after": "1"},
+            )
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[])
+        with patch("pwned.client.time.sleep") as mock_sleep:
+            assert client.get_breaches() == []
+        assert mock_sleep.call_args_list == [call(1), call(1), call(1)]
 
     def test_400_includes_sanitized_json_message(
         self, client: HIBPClient, httpx_mock: HTTPXMock
@@ -209,6 +277,15 @@ class TestHeaders:
         assert request is not None
         assert "hibp-api-key" not in request.headers
         assert request.headers["user-agent"] == "test"
+
+    def test_default_user_agent_and_empty_api_key(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[])
+        with HIBPClient(api_key="") as c:
+            c.get_breaches()
+        request = httpx_mock.get_request()
+        assert request is not None
+        assert "hibp-api-key" not in request.headers
+        assert request.headers["user-agent"] == DEFAULT_USER_AGENT
 
 
 class TestBreaches:
@@ -359,6 +436,12 @@ class TestContextManager:
             pass
         assert client._client.is_closed
 
+    def test_close_called_on_exception(self) -> None:
+        client = HIBPClient(user_agent="test")
+        with pytest.raises(RuntimeError, match="boom"), client:
+            raise RuntimeError("boom")
+        assert client._client.is_closed
+
 
 class TestSubscription:
     def test_get_subscription_status(self, client: HIBPClient, httpx_mock: HTTPXMock) -> None:
@@ -484,3 +567,54 @@ class TestValidation:
         )
         assert client.get_pastes("user@example.com")[0].id == "1"
         assert client.get_stealer_logs_by_email("user@example.com") == ["netflix.com"]
+
+    def test_breach_name_percent_encoded(
+        self, noauth_client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(url=f"{BASE}/breach/Foo%2FBar", json={"Name": "Foo/Bar"})
+        assert noauth_client.get_breach("Foo/Bar").name == "Foo/Bar"
+
+    def test_models_frozen_populate_by_name_and_constraints(self) -> None:
+        b = Breach(name="Adobe")
+        assert b.model_dump(by_alias=True, exclude_unset=True) == {"Name": "Adobe"}
+        with pytest.raises(ValidationError):
+            b.name = "Other"
+
+        p = Paste.model_validate({"Source": "Pastebin", "Id": "p1"})
+        assert p.title is None
+        assert p.date is None
+        assert p.email_count == 0
+        with pytest.raises(ValidationError):
+            Paste.model_validate({"Source": "Pastebin", "Id": "p1", "EmailCount": -1})
+
+        sub = Subscription.model_validate(
+            {
+                "SubscriptionName": "Pwned 5",
+                "Description": "Full",
+                "SubscribedUntil": "2026-12-31T00:00:00Z",
+                "Rpm": 0,
+                "IncludesStealerLogs": True,
+            }
+        )
+        assert sub.domain_search_max_breached_accounts is None
+        assert sub.includes_stealer_logs is True
+        with pytest.raises(ValidationError):
+            Subscription.model_validate(
+                {
+                    "SubscriptionName": "Bad",
+                    "Description": "Bad",
+                    "SubscribedUntil": "2026-12-31T00:00:00Z",
+                    "Rpm": -1,
+                    "IncludesStealerLogs": False,
+                }
+            )
+
+        sd = SubscribedDomain.model_validate({"DomainName": "example.com"})
+        assert sd.pwn_count is None
+        assert sd.pwn_count_excluding_spam_lists is None
+        assert sd.pwn_count_excluding_spam_lists_at_last_subscription_renewal is None
+        assert sd.next_subscription_renewal is None
+        with pytest.raises(ValidationError):
+            SubscribedDomain.model_validate(
+                {"DomainName": "example.com", "PwnCountExcludingSpamLists": -1}
+            )

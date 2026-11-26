@@ -87,7 +87,7 @@ def _output(data: BaseModel | list[Any] | dict[str, Any], *, use_json: bool) -> 
                 _print_dict(item)
             else:
                 click.echo(item)
-    elif isinstance(serialized, dict):
+    else:
         if not serialized:
             click.echo("No results found.")
             return

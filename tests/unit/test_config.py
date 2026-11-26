@@ -92,3 +92,22 @@ class TestLoadSettings:
         monkeypatch.setenv("HIBP_API_KEY", "")
         s = load_settings()
         assert s.api_key is None
+        assert s.get_api_key() is None
+
+    def test_get_api_key_returns_none_when_unset(self) -> None:
+        s = Settings()
+        assert s.get_api_key() is None
+
+    @pytest.mark.parametrize("bad_ua", [None, 123])
+    def test_non_string_user_agent_rejected(self, bad_ua: object) -> None:
+        with pytest.raises(ValidationError):
+            Settings.model_validate({"user_agent": bad_ua})
+
+    def test_non_string_api_key_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            Settings.model_validate({"api_key": 123})
+
+    def test_empty_user_agent_override_clears_env(self) -> None:
+        with patch.dict(os.environ, {"HIBP_USER_AGENT": "envua"}, clear=True):
+            s = load_settings(user_agent="")
+            assert s.user_agent == DEFAULT_USER_AGENT

@@ -1,6 +1,6 @@
 [project]
 name = "pwned"
-version = "0.1.0"
+version = "0.1.1"
 description = "CLI tool and Python client for the Have I Been Pwned API v3"
 readme = "README.md"
 license = "MIT"
@@ -17,6 +17,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Security",
     "Typing :: Typed",
 ]
@@ -43,6 +44,16 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pwned"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.github",
+    "/.env.sample",
+    "/.python-version",
+    "/AGENTS.md",
+    "/CLAUDE.md",
+    "/Makefile",
+]
 
 [dependency-groups]
 dev = [

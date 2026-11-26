@@ -7,11 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-26
+
 ### Added
-- Official HIBP MCP server reference and See Also section in `README.md`
-- PEP 561 `py.typed` marker and package metadata in `pyproject.toml`
-- Open-source community files (`SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, issue/PR templates, Dependabot config)
-- Python 3.12 and 3.13 CI matrix with `uv build` verification
+- Official HIBP MCP server reference, Python library usage snippet, badges, and See Also section in `README.md`
+- PEP 561 `py.typed` marker and full package metadata (including Python 3.14 classifier and `sdist` exclusions) in `pyproject.toml`
+- Open-source community files (`SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, issue forms, PR template)
+- Automated release workflow (`.github/workflows/release.yml`) with wheel/sdist uploads and SLSA build provenance attestations
+- Grouped Dependabot configuration for `uv` and `github-actions`
+
+### Changed
+- Hardened CI with SHA-pinned actions (`persist-credentials: false`), Python 3.12–3.14 + Linux/macOS/Windows matrix, and 95% coverage floor
+- Upgraded runtime and development dependencies (`pydantic` 2.14.4, `pydantic-settings` 2.16.3, `click` 8.5.1, `pytest` 9.2.0, `mypy` 2.4.1, `ruff` 0.17.6)
 
 ## [0.1.0] - 2026-11-26
 
@@ -22,5 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured error hierarchy (`HIBPError`, `NotFoundError`, `UnauthorizedError`, `ForbiddenError`, `RateLimitError`) and automatic 429 retry with capped `Retry-After`
 - Strict `mypy`, `ruff` (including Bandit `S` rules), GitHub Actions CI, and unit + integration test suites
 
-[Unreleased]: https://github.com/domfahey/pwned/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/domfahey/pwned/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/domfahey/pwned/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/domfahey/pwned/releases/tag/v0.1.0

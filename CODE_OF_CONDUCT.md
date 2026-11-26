@@ -51,9 +51,8 @@ an individual is officially representing the community in public spaces.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the project maintainers via GitHub issues or directly to the
-repository owner. All complaints will be reviewed and investigated promptly and
-fairly.
+reported privately to the project maintainer at `domfahey@gmail.com`. All
+complaints will be reviewed and investigated promptly and fairly.
 
 ## Attribution
 

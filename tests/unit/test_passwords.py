@@ -8,6 +8,7 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from pwned.client import HIBPError
+from pwned.config import DEFAULT_USER_AGENT
 from pwned.passwords import PwnedPasswordsClient, _md4, _ntlm_hash
 
 SHA1_PASSWORD = hashlib.sha1(b"password").hexdigest().upper()
@@ -97,6 +98,56 @@ class TestCheckPassword:
         with pytest.raises(HIBPError, match="Request failed"):
             client.check_password("password")
 
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            ("", 0),
+            (f"\n   \nNO_COLON_LINE\n{SUFFIX}:5\n", 5),
+            (f"{SUFFIX}:5:extra\n", 0),
+            (f"{SUFFIX.lower()}:123\n", 123),
+            (f"  {SUFFIX}:7  \r\n", 7),
+            (f"{SUFFIX}:0\n{SUFFIX}:15\n", 15),
+        ],
+    )
+    def test_response_parsing_edge_cases(
+        self,
+        client: PwnedPasswordsClient,
+        httpx_mock: HTTPXMock,
+        body: str,
+        expected: int,
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{PREFIX}",
+            text=body,
+        )
+        assert client.check_password("password") == expected
+
+    def test_ntlm_and_pad_combined_and_default_omits_both(
+        self, client: PwnedPasswordsClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(text="")
+        client.check_password("password")
+        req1 = httpx_mock.get_request()
+        assert req1 is not None
+        assert "Add-Padding" not in req1.headers
+        assert "mode" not in req1.url.params
+
+        httpx_mock.add_response(text="")
+        client.check_password("password", ntlm=True, pad=True)
+        req2 = httpx_mock.get_requests()[-1]
+        assert req2.headers["Add-Padding"] == "true"
+        assert req2.url.params["mode"] == "ntlm"
+
+    def test_default_user_agent_and_explicit_close(self, httpx_mock: HTTPXMock) -> None:
+        c = PwnedPasswordsClient()
+        httpx_mock.add_response(text="")
+        c.check_password("password")
+        req = httpx_mock.get_request()
+        assert req is not None
+        assert req.headers["User-Agent"] == DEFAULT_USER_AGENT
+        c.close()
+        assert c._client.is_closed
+
 
 class TestContextManager:
     def test_close_called_on_exit(self) -> None:
@@ -143,3 +194,14 @@ class TestMd4Rfc1320:
             )
             == "e33b4ddc9c38f2199c3e7b164fcc0536"
         )
+
+    def test_padding_block_boundaries(self) -> None:
+        # 55 bytes -> 56 bytes after 0x80 (0 padding zero bytes); 56 bytes wraps to 2nd block.
+        d55 = _md4(b"a" * 55)
+        d56 = _md4(b"a" * 56)
+        assert len(d55) == 32
+        assert len(d56) == 32
+        assert d55 != d56
+
+    def test_ntlm_unicode_password(self) -> None:
+        assert _ntlm_hash("päss") == _md4("päss".encode("utf-16-le")).upper()
