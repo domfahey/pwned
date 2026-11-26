@@ -1,23 +1,19 @@
-.PHONY: install doctor test test-unit test-integration lint format type check
+.PHONY: install doctor test test-integration coverage lint format type check
 
 install:
-	uv sync --all-extras
+	uv sync
 
 doctor:
-	uv run python --version
-	uv run python -c "from importlib.metadata import version; print(f'click {version(\"click\")}')"
-	uv run python -c "from importlib.metadata import version; print(f'httpx {version(\"httpx\")}')"
-	uv run python -c "from importlib.metadata import version; print(f'pydantic {version(\"pydantic\")}')"
-	uv run python -c "from importlib.metadata import version; print(f'pydantic-settings {version(\"pydantic-settings\")}')"
+	uv run python -c "import sys; from importlib.metadata import version; print(f'Python {sys.version.split()[0]}'); print('\n'.join(f'{p} {version(p)}' for p in ('click', 'httpx', 'pydantic', 'pydantic-settings')))"
 
 test:
 	uv run pytest
 
-test-unit:
-	uv run pytest tests/unit
-
 test-integration:
-	uv run pytest -m integration -o "addopts=" tests/integration
+	uv run pytest -m integration tests/integration
+
+coverage:
+	uv run pytest --cov=pwned --cov-report=term-missing
 
 lint:
 	uv run ruff check src tests
@@ -30,4 +26,4 @@ format:
 type:
 	uv run mypy
 
-check: format lint type test
+check: lint type test

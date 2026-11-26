@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 ## Commands
 
@@ -6,12 +6,12 @@
 make install          # Set up venv and install deps
 make doctor           # Verify environment and dependencies
 make test             # Run unit tests (integration excluded by default)
-make test-unit        # Run unit tests only
 make test-integration # Run integration tests (hits live API)
+make coverage         # Run unit tests with coverage report
 make lint             # Check code with ruff
 make format           # Auto-fix lint issues and format
 make type             # Run mypy strict type checking
-make check            # Run format + lint + type + test (all-in-one)
+make check            # Run lint + type + test (non-mutating, CI-safe)
 ```
 
 ## Dependencies

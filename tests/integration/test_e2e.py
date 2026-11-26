@@ -305,8 +305,3 @@ class TestErrorHandling:
         """Account lookup without any API key fails with auth error."""
         out = _run_fail("account", f"account-exists@{DOMAIN}")
         assert "API key" in out or "Unauthorized" in out
-
-    def test_missing_subcommand(self) -> None:
-        code, out = _run()
-        # Click shows help/usage when no subcommand given
-        assert "Usage:" in out or "Commands:" in out

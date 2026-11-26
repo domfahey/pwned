@@ -5,14 +5,14 @@ import struct
 
 import httpx
 
-from pwned.client import HIBPError
+from pwned.client import REQUEST_TIMEOUT, HIBPError
+from pwned.config import DEFAULT_USER_AGENT
 
 BASE_URL = "https://api.pwnedpasswords.com"
-REQUEST_TIMEOUT = 10.0
 
 
 class PwnedPasswordsClient:
-    def __init__(self, user_agent: str = "pwned-cli") -> None:
+    def __init__(self, user_agent: str = DEFAULT_USER_AGENT) -> None:
         self._client = httpx.Client(
             base_url=BASE_URL,
             headers={"User-Agent": user_agent},
@@ -51,11 +51,13 @@ class PwnedPasswordsClient:
         if ntlm:
             params["mode"] = "ntlm"
 
-        resp = self._client.get(f"/range/{prefix}", headers=headers, params=params)
         try:
+            resp = self._client.get(f"/range/{prefix}", headers=headers, params=params)
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise HIBPError(f"HTTP {resp.status_code}") from exc
+        except httpx.RequestError as exc:
+            raise HIBPError(f"Request failed: {exc}") from exc
 
         for line in resp.text.splitlines():
             parts = line.strip().split(":")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterator
 
 import httpx
 import pytest
@@ -20,8 +21,9 @@ RANGE_RESPONSE = f"""{SUFFIX}:3861493
 
 
 @pytest.fixture
-def client() -> PwnedPasswordsClient:
-    return PwnedPasswordsClient(user_agent="test-agent")
+def client() -> Iterator[PwnedPasswordsClient]:
+    with PwnedPasswordsClient(user_agent="test-agent") as c:
+        yield c
 
 
 class TestCheckPassword:
@@ -84,6 +86,24 @@ class TestCheckPassword:
         )
         with pytest.raises(HIBPError, match="HTTP 500"):
             client.check_password("password")
+
+    def test_network_error_wrapped(
+        self, client: PwnedPasswordsClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_exception(
+            httpx.ReadTimeout("timed out"),
+            url=f"https://api.pwnedpasswords.com/range/{PREFIX}",
+        )
+        with pytest.raises(HIBPError, match="Request failed"):
+            client.check_password("password")
+
+
+class TestContextManager:
+    def test_close_called_on_exit(self) -> None:
+        client = PwnedPasswordsClient(user_agent="test-agent")
+        with client:
+            pass
+        assert client._client.is_closed
 
 
 class TestNtlmHash:

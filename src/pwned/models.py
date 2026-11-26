@@ -90,10 +90,11 @@ class Subscription(_HIBPBase):
     subscribed_until: datetime = Field(
         alias="SubscribedUntil", description="Subscription expiry date."
     )
-    rpm: int = Field(alias="Rpm", description="Requests per minute allowed.")
-    domain_search_max_breached_accounts: int = Field(
+    rpm: NonNegativeInt = Field(alias="Rpm", description="Requests per minute allowed.")
+    domain_search_max_breached_accounts: NonNegativeInt | None = Field(
+        default=None,
         alias="DomainSearchMaxBreachedAccounts",
-        description="Max breached accounts in domain search.",
+        description="Max breached accounts in domain search (None if unlimited).",
     )
     includes_stealer_logs: bool = Field(
         alias="IncludesStealerLogs",
@@ -103,15 +104,15 @@ class Subscription(_HIBPBase):
 
 class SubscribedDomain(_HIBPBase):
     domain_name: str = Field(alias="DomainName", description="The subscribed domain name.")
-    pwn_count: int | None = Field(
+    pwn_count: NonNegativeInt | None = Field(
         default=None, alias="PwnCount", description="Total breached accounts for this domain."
     )
-    pwn_count_excluding_spam_lists: int | None = Field(
+    pwn_count_excluding_spam_lists: NonNegativeInt | None = Field(
         default=None,
         alias="PwnCountExcludingSpamLists",
         description="Breached accounts excluding spam lists.",
     )
-    pwn_count_excluding_spam_lists_at_last_subscription_renewal: int | None = Field(
+    pwn_count_excluding_spam_lists_at_last_subscription_renewal: NonNegativeInt | None = Field(
         default=None,
         alias="PwnCountExcludingSpamListsAtLastSubscriptionRenewal",
         description="Breach count at last subscription renewal.",

@@ -9,9 +9,11 @@ Check email addresses against data breaches, search for compromised passwords, q
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone <repo-url> && cd pwned
+git clone https://github.com/domfahey/pwned.git && cd pwned
 make install
 ```
+
+Run commands via `uv run pwned ...` (or activate `.venv/bin/activate`, or install globally with `uv tool install .`). Examples below assume `pwned` is on your `PATH`.
 
 ## Configuration
 
@@ -61,6 +63,10 @@ pwned breaches
 
 # Filter breaches by domain
 pwned breaches --domain adobe.com
+
+# Only spam list breaches (or exclude them with --no-spam-list)
+pwned breaches --spam-list
+pwned breaches --no-spam-list
 
 # Get the most recently added breach
 pwned latest-breach
@@ -124,9 +130,10 @@ pwned subscription
 
 | Flag | Description |
 |---|---|
-| `--api-key TEXT` | HIBP API key (overrides env/`.env`) |
-| `--user-agent TEXT` | Custom User-Agent string |
+| `--api-key TEXT` | HIBP API key (overrides `HIBP_API_KEY` / `.env`) |
+| `--user-agent TEXT` | Custom User-Agent string (overrides `HIBP_USER_AGENT` / `.env`, default `pwned-cli`) |
 | `--json` | Output raw JSON instead of formatted text |
+| `--version` | Show CLI version and exit |
 
 Global flags can appear before or after the subcommand:
 
@@ -140,13 +147,13 @@ pwned breach Adobe --json
 ```bash
 make install          # Set up venv and install deps
 make test             # Run unit tests (default; integration excluded)
-make test-unit        # Run unit tests only
 make test-integration # Run integration tests (hits live API)
+make coverage         # Run unit tests with coverage report
 make lint             # Check code style
 make format           # Auto-fix lint/formatting
 make type             # Run mypy strict type checking
 make doctor           # Verify environment and dependencies
-make check            # Run format + lint + type + test (all-in-one)
+make check            # Run lint + type + test (non-mutating, CI-safe)
 ```
 
 ### Project structure

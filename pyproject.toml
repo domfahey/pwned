@@ -40,8 +40,9 @@ markers = [
 
 [tool.mypy]
 strict = true
-packages = ["pwned"]
+files = ["src/pwned", "tests"]
 mypy_path = "src"
+explicit_package_bases = true
 
 [tool.ruff]
 src = ["src"]
