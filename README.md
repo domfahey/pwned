@@ -142,6 +142,30 @@ pwned --json breach Adobe
 pwned breach Adobe --json
 ```
 
+## Official HIBP MCP Server
+
+If you want to query Have I Been Pwned directly from an MCP-capable AI client, HIBP also provides an official remote [Model Context Protocol (MCP) server](https://haveibeenpwned.com/mcp):
+
+- **Endpoint & docs:** `https://haveibeenpwned.com/mcp`
+- **Public tools (no auth):** breach metadata, latest breach, data classes, and Pwned Passwords (*k*-anonymity range lookup)
+- **Authenticated tools (HIBP subscription required):** account breaches, pastes, verified domain lookups/management, and stealer logs (via OAuth with `hibp.mcp` scope or an `hibp-api-key` header)
+
+Example HTTP MCP client configuration:
+
+```json
+{
+  "HIBP": {
+    "type": "http",
+    "url": "https://haveibeenpwned.com/mcp",
+    "headers": {
+      "hibp-api-key": "YOUR_HIBP_API_KEY"
+    }
+  }
+}
+```
+
+> **Note:** For checking passwords, prefer the local CLI (`pwned password` or `pwned password --stdin`) so the plaintext password is hashed locally and never enters an AI chat prompt.
+
 ## Development
 
 ```bash
