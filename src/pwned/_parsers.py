@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import html
+import re
 import struct
 from collections.abc import Iterable
 from html.parser import HTMLParser
+
+_TAG_RE = re.compile(r"<[^>]*>")
 
 
 class _HTMLStripper(HTMLParser):
@@ -20,8 +24,11 @@ class _HTMLStripper(HTMLParser):
 def strip_html(text: str) -> str:
     """Strip HTML tags and decode character references."""
     stripper = _HTMLStripper()
-    stripper.feed(text)
-    stripper.close()
+    try:
+        stripper.feed(text)
+        stripper.close()
+    except AssertionError:
+        return html.unescape(_TAG_RE.sub("", text))
     return stripper.get_text()
 
 

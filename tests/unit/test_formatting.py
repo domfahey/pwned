@@ -33,6 +33,18 @@ class TestStripHtml:
     def test_plain_text_unchanged(self) -> None:
         assert strip_html("plain text") == "plain text"
 
+    def test_malformed_marked_section_does_not_raise(self) -> None:
+        assert isinstance(strip_html("<![*\x175~:"), str)
+
+    def test_falls_back_on_htmlparser_assertion_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(self: object, data: str) -> None:
+            raise AssertionError("expected name token")
+
+        monkeypatch.setattr("pwned._parsers._HTMLStripper.feed", _boom)
+        assert strip_html("<b>Hello</b> &amp; <![*bad") == "Hello & <![*bad"
+
 
 class TestSerialize:
     def test_single_model_uses_aliases_and_excludes_unset(self) -> None:
