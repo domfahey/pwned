@@ -35,15 +35,37 @@ jobs:
       - run: uv run mypy
       - run: uv run pytest --cov=pwned --cov-branch --cov-fail-under=95 --cov-report=term-missing
       - run: uv build
+      - name: Generate SHA256 checksums
+        run: |
+          (cd dist && sha256sum pwned-* > SHA256SUMS.txt)
       - name: Generate build provenance attestations
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: "dist/*"
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          uv run --no-sync python - <<'PY'
+          import os, pathlib, re
+
+          version = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          pattern = rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|^\[|\Z)"
+          match = re.search(pattern, text, flags=re.M | re.S)
+          notes = match.group(1).strip() if match else ""
+          pathlib.Path("release-notes.md").write_text(notes, encoding="utf-8")
+          PY
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/* \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            --verify-tag
+          if [ -s release-notes.md ]; then
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --title "${GITHUB_REF_NAME}" \
+              --notes-file release-notes.md \
+              --verify-tag
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --verify-tag
+          fi
