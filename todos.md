@@ -33,9 +33,9 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 - [x] **Homebrew formula template (`Formula/pwned.rb`)** — valid template pointing to the GitHub Release tarball for publishing via a `homebrew-tap` repo.
 - [x] **ClusterFuzzLite fuzzing (`.github/workflows/cifuzz.yml`)** — Atheris fuzz target covering `_md4`, `_parse_range_response`, `strip_html`, and `parse_input_lines`.
 
-## Completed (v0.3.0 — Ready on `main`, Pending Release Tag)
+## Completed (v0.3.0)
 
-- [x] **Update `CHANGELOG.md` and architecture doc trees** — rolled post-`v0.2.0` fixes (`ea44a3c`, `c835bec`) and `_parsers.py` doc updates into `0.3.0` on `main`.
+- [x] **Update `CHANGELOG.md` and architecture doc trees** — rolled post-`v0.2.0` fixes (`ea44a3c`, `c835bec`) and `_parsers.py` doc updates into `v0.3.0`.
 - [x] **Integration tests for `v0.2.0` features** — expand `tests/integration/` to cover `AsyncHIBPClient`, `AsyncPwnedPasswordsClient`, `dataclasses --descriptions`, `get_password_range`, `is_pwned`, and `check_hash`.
 
 ### Password & Vault Auditing
@@ -52,7 +52,7 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 - [x] **Optional short command aliases** — ergonomic shortcuts inspired by `wKovacs64/pwned` (`pw`, `ba`, `bar`, `pa`, `bd`, `sd`, `lb`, `dc`).
 - [x] **Framework password-validator recipes/helpers** — thin validators/docs for Pydantic (`AfterValidator`), FastAPI, and Django built on `is_pwned()` / `AsyncPwnedPasswordsClient.is_pwned()`.
 
-## Completed (v0.4.0 — Offline Lookups, Monitoring & CI Integrations)
+## Completed (v0.3.0 — Offline Lookups, Monitoring & CI Integrations)
 
 - [x] **Offline sorted hash file lookup (`--offline-db <path>` / `OfflinePasswordsClient`)** — `O(log N)` binary search via `seek`/`mmap` (stdlib only) over official `PwnedPasswordsDownloader` SHA-1/NTLM dumps for air-gapped and high-scale checks.
 - [x] **Baseline diffing (`--baseline` / `--save-baseline`)** — snapshot known breaches/pastes/stealer logs to JSON and report/exit non-zero only on newly discovered exposures for cron/CI monitoring.
