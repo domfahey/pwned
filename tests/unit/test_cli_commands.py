@@ -4,6 +4,7 @@ import hashlib
 import json
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import click
 import pytest
@@ -13,7 +14,9 @@ from pytest_httpx import HTTPXMock
 from pwned.audit import AuditEntry
 from pwned.cache import ResponseCache
 from pwned.cli_commands import register_extra_commands
+from pwned.client import HIBPError
 from pwned.config import get_config_file, load_settings, save_api_key
+from pwned.offline_download import DownloadStats
 from pwned.passwords import _ntlm_hash
 
 BASE = "https://haveibeenpwned.com/api/v3"
@@ -511,6 +514,83 @@ class TestSearchCommand:
         )
         assert result.exit_code == 1
         assert "Baseline search result must be a JSON object" in result.output
+
+    def test_search_notify_webhook_posts_before_fail_if_pwned(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/user%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/user%40example.com", status_code=404)
+        httpx_mock.add_response(
+            method="POST",
+            url="https://hooks.slack.com/services/T00/B00/XXX",
+            status_code=200,
+        )
+        app = _make_cli()
+        result = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "--json",
+                "search",
+                "user@example.com",
+                "--notify-webhook",
+                "https://hooks.slack.com/services/T00/B00/XXX",
+                "--webhook-format",
+                "slack",
+                "--fail-if-pwned",
+            ],
+        )
+        assert result.exit_code == 1
+        assert json.loads(result.output)["breaches"] == [{"Name": "Adobe"}]
+        webhook_reqs = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+        assert len(webhook_reqs) == 1
+        payload = json.loads(webhook_reqs[0].content)
+        assert "pwned Search Alert: user@example.com" in payload["text"]
+        assert "blocks" in payload
+
+    def test_search_notify_webhook_clean_skips_post(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(url=f"{BASE}/breachedaccount/clean%40example.com", status_code=404)
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/clean%40example.com", status_code=404)
+        app = _make_cli()
+        result = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "search",
+                "clean@example.com",
+                "--notify-webhook",
+                "https://example.com/webhook",
+            ],
+        )
+        assert result.exit_code == 0
+        assert [r for r in httpx_mock.get_requests() if r.method == "POST"] == []
+
+    def test_search_notify_webhook_invalid_url_raises_usage_error(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(url=f"{BASE}/breachedaccount/user%40example.com", status_code=404)
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/user%40example.com", status_code=404)
+        app = _make_cli()
+        result = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "search",
+                "user@example.com",
+                "--notify-webhook",
+                "http://insecure.example/hook",
+            ],
+        )
+        assert result.exit_code == 2
+        assert "https scheme" in result.output
 
 
 class TestAccountRangeCommand:
@@ -1114,6 +1194,235 @@ class TestAuditCommand:
         assert data_ntlm["compromised_entries"] == 1
         assert data_ntlm["findings"] == [{"name": "SiteC", "username": "c@x.com", "pwn_count": 42}]
 
+    def test_audit_missing_path_for_file_source_raises_usage_error(
+        self, isolated_env: Path, cli_runner: CliRunner
+    ) -> None:
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["audit", "--source", "csv"])
+        assert result.exit_code == 2
+        assert "PATH is required for --source csv." in result.output
+
+    def test_audit_directory_path_for_file_source_raises_usage_error(
+        self, isolated_env: Path, cli_runner: CliRunner
+    ) -> None:
+        subdir = isolated_env / "vault_dir"
+        subdir.mkdir()
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["audit", str(subdir), "--source", "bitwarden-json"])
+        assert result.exit_code == 2
+        assert "PATH must be a file for --source bitwarden-json." in result.output
+
+    @pytest.mark.parametrize(
+        ("source", "filename", "content"),
+        [
+            (
+                "lastpass-csv",
+                "lastpass.csv",
+                "url,username,password,name\nhttps://bank.test,u1,pw1,Bank\n",
+            ),
+            (
+                "dashlane-csv",
+                "dashlane.csv",
+                "username,title,password\nu1,Bank,pw1\n",
+            ),
+            (
+                "protonpass-csv",
+                "protonpass.csv",
+                "name,url,username,password\nBank,https://bank.test,u1,pw1\n",
+            ),
+        ],
+    )
+    def test_audit_v04_csv_sources(
+        self,
+        isolated_env: Path,
+        httpx_mock: HTTPXMock,
+        cli_runner: CliRunner,
+        source: str,
+        filename: str,
+        content: str,
+    ) -> None:
+        export_file = isolated_env / filename
+        export_file.write_text(content, encoding="utf-8")
+        prefix, suffix = _sha1_parts("pw1")
+        httpx_mock.add_response(url=f"{PASSWORDS_BASE}/range/{prefix}", text=f"{suffix}:4\n")
+
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["--json", "audit", str(export_file), "--source", source])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["total_entries"] == 1
+        assert data["compromised_entries"] == 1
+
+    def test_audit_pwdump_auto_enables_ntlm(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        nt_hash = _ntlm_hash("summer2024")
+        pwdump_file = isolated_env / "hashes.pwdump"
+        pwdump_file.write_text(
+            f"CORP\\alice:1001:aad3b435b51404eeaad3b435b51404ee:{nt_hash}:::\n",
+            encoding="utf-8",
+        )
+        httpx_mock.add_response(
+            url=f"{PASSWORDS_BASE}/range/{nt_hash[:5]}?mode=ntlm",
+            text=f"{nt_hash[5:]}:77\n",
+        )
+
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["--json", "audit", str(pwdump_file), "--source", "pwdump"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["compromised_entries"] == 1
+        assert data["findings"] == [{"name": "CORP", "username": "alice", "pwn_count": 77}]
+
+    @pytest.mark.parametrize("source", ["pass", "gopass"])
+    def test_audit_pass_and_gopass_optional_path_and_directory(
+        self,
+        isolated_env: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        httpx_mock: HTTPXMock,
+        cli_runner: CliRunner,
+        source: str,
+    ) -> None:
+        calls: list[tuple[Path | None, str]] = []
+
+        def fake_load_export(
+            path: Path | None, *, source: str, master_password: str | None = None
+        ) -> list[AuditEntry]:
+            calls.append((path, source))
+            return [AuditEntry(name="email", username="u1", password="pw1")]
+
+        monkeypatch.setattr("pwned.cli_commands.load_export", fake_load_export)
+        prefix, suffix = _sha1_parts("pw1")
+        httpx_mock.add_response(url=f"{PASSWORDS_BASE}/range/{prefix}", text=f"{suffix}:2\n")
+        httpx_mock.add_response(url=f"{PASSWORDS_BASE}/range/{prefix}", text=f"{suffix}:2\n")
+
+        store_dir = isolated_env / f"{source}_store"
+        store_dir.mkdir()
+        app = _make_cli()
+
+        res_no_path = cli_runner.invoke(app, ["--json", "audit", "--source", source])
+        assert res_no_path.exit_code == 0
+        assert json.loads(res_no_path.output)["compromised_entries"] == 1
+
+        res_with_dir = cli_runner.invoke(
+            app, ["--json", "audit", str(store_dir), "--source", source]
+        )
+        assert res_with_dir.exit_code == 0
+        assert json.loads(res_with_dir.output)["compromised_entries"] == 1
+        assert calls == [(None, source), (store_dir, source)]
+
+    def test_audit_check_strength_online_and_offline(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        export_file = isolated_env / "strength.csv"
+        export_file.write_text(
+            "name,username,password\nBank,alice,123456\n",
+            encoding="utf-8",
+        )
+        prefix, suffix = _sha1_parts("123456")
+        httpx_mock.add_response(url=f"{PASSWORDS_BASE}/range/{prefix}", text=f"{suffix}:100\n")
+
+        app = _make_cli()
+        res_online = cli_runner.invoke(
+            app,
+            ["--json", "audit", str(export_file), "--source", "csv", "--check-strength"],
+        )
+        assert res_online.exit_code == 0
+        data_online = json.loads(res_online.output)
+        assert data_online["weak_entries"] == 1
+        assert data_online["risk_score"] is not None
+        assert len(data_online["strength_findings"]) == 1
+
+        sha1_db = isolated_env / "offline.txt"
+        sha1_db.write_text(f"{_sha1_hex('123456')}:100\n", encoding="utf-8")
+        res_offline = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "audit",
+                str(export_file),
+                "--source",
+                "csv",
+                "--offline-db",
+                str(sha1_db),
+                "--check-strength",
+            ],
+        )
+        assert res_offline.exit_code == 0
+        data_offline = json.loads(res_offline.output)
+        assert data_offline["weak_entries"] == 1
+        assert data_offline["risk_score"] == data_online["risk_score"]
+
+    def test_audit_with_cache_and_notify_webhook(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        export_file = isolated_env / "notify.csv"
+        export_file.write_text("name,username,password\nSite,u1,password\n", encoding="utf-8")
+        prefix, suffix = _sha1_parts("password")
+        httpx_mock.add_response(url=f"{PASSWORDS_BASE}/range/{prefix}", text=f"{suffix}:55\n")
+        httpx_mock.add_response(
+            method="POST",
+            url="https://example.com/audit-hook",
+            status_code=200,
+        )
+
+        app = _make_cli()
+        result = cli_runner.invoke(
+            app,
+            [
+                "--cache",
+                "--json",
+                "audit",
+                str(export_file),
+                "--source",
+                "csv",
+                "--notify-webhook",
+                "https://example.com/audit-hook",
+                "--webhook-format",
+                "generic",
+                "--fail-if-pwned",
+            ],
+        )
+        assert result.exit_code == 1
+        webhook_reqs = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+        assert len(webhook_reqs) == 1
+        payload = json.loads(webhook_reqs[0].content)
+        assert payload["title"] == "pwned Vault Audit Alert"
+        assert payload["data"]["compromised_entries"] == 1
+
+        # Second run with --cache hits cached range response without another GET
+        res_cached = cli_runner.invoke(
+            app,
+            ["--cache", "--json", "audit", str(export_file), "--source", "csv"],
+        )
+        assert res_cached.exit_code == 0
+        assert json.loads(res_cached.output)["compromised_entries"] == 1
+        get_reqs = [r for r in httpx_mock.get_requests() if r.method == "GET"]
+        assert len(get_reqs) == 1
+
+    def test_audit_notify_webhook_invalid_url_raises_usage_error(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        export_file = isolated_env / "clean.csv"
+        export_file.write_text("name,username,password\nSite,u1,safe!pw99\n", encoding="utf-8")
+        prefix, _ = _sha1_parts("safe!pw99")
+        httpx_mock.add_response(url=f"{PASSWORDS_BASE}/range/{prefix}", text="")
+
+        app = _make_cli()
+        result = cli_runner.invoke(
+            app,
+            [
+                "audit",
+                str(export_file),
+                "--source",
+                "csv",
+                "--notify-webhook",
+                "http://bad.example/hook",
+            ],
+        )
+        assert result.exit_code == 2
+        assert "https scheme" in result.output
+
 
 class TestCompletionCommand:
     @pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
@@ -1148,3 +1457,412 @@ class TestCacheCommands:
         result = cli_runner.invoke(app, ["--json", "cache", "clear"])
         assert result.exit_code == 0
         assert json.loads(result.output) == {"cleared": 1}
+
+
+class TestOfflineCommand:
+    def test_offline_download_defaults_and_options(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        captured: list[dict[str, Any]] = []
+
+        async def fake_download(
+            output_path: Path,
+            *,
+            ntlm: bool = False,
+            concurrency: int = 32,
+            resume: bool = True,
+            etag_cache_path: Path | None = None,
+            user_agent: str = "pwned-cli",
+        ) -> DownloadStats:
+            captured.append(
+                {
+                    "output_path": output_path,
+                    "ntlm": ntlm,
+                    "concurrency": concurrency,
+                    "resume": resume,
+                    "etag_cache_path": etag_cache_path,
+                    "user_agent": user_agent,
+                }
+            )
+            return DownloadStats(
+                prefixes_total=16,
+                prefixes_downloaded=10,
+                prefixes_cached=6,
+                hashes_written=100,
+                elapsed_seconds=1.25,
+                output_path=str(output_path),
+                ntlm=ntlm,
+            )
+
+        monkeypatch.setattr("pwned.cli_commands.download_offline_db", fake_download)
+        out_file = isolated_env / "hashes.txt"
+        etag_file = isolated_env / "etags.json"
+        app = _make_cli()
+
+        res_default = cli_runner.invoke(app, ["--json", "offline", "download", str(out_file)])
+        assert res_default.exit_code == 0
+        assert json.loads(res_default.output)["prefixes_total"] == 16
+
+        res_opts = cli_runner.invoke(
+            app,
+            [
+                "--user-agent",
+                "custom-ua",
+                "--json",
+                "offline",
+                "download",
+                str(out_file),
+                "--ntlm",
+                "--concurrency",
+                "8",
+                "--no-resume",
+                "--etag-cache",
+                str(etag_file),
+            ],
+        )
+        assert res_opts.exit_code == 0
+        assert json.loads(res_opts.output)["ntlm"] is True
+        assert captured == [
+            {
+                "output_path": out_file,
+                "ntlm": False,
+                "concurrency": 32,
+                "resume": True,
+                "etag_cache_path": None,
+                "user_agent": "pwned-cli",
+            },
+            {
+                "output_path": out_file,
+                "ntlm": True,
+                "concurrency": 8,
+                "resume": False,
+                "etag_cache_path": etag_file,
+                "user_agent": "custom-ua",
+            },
+        ]
+
+    def test_offline_download_error_handled(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        async def fake_download(*args: Any, **kwargs: Any) -> DownloadStats:
+            raise HIBPError("HTTP 503 for prefix 00000")
+
+        monkeypatch.setattr("pwned.cli_commands.download_offline_db", fake_download)
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["offline", "download", str(isolated_env / "hashes.txt")])
+        assert result.exit_code == 1
+        assert "HTTP 503 for prefix 00000" in result.output
+
+
+class TestDomainReportCommand:
+    def test_domain_report_basic_and_stealer_logs(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breacheddomain/example.com",
+            json={"alice": ["Adobe"], "bob": ["Adobe", "LinkedIn"]},
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            json=[
+                {
+                    "Name": "Adobe",
+                    "Title": "Adobe",
+                    "BreachDate": "2013-10-04",
+                    "DataClasses": ["Emails", "Passwords"],
+                    "IsVerified": True,
+                },
+                {
+                    "Name": "LinkedIn",
+                    "Title": "LinkedIn",
+                    "BreachDate": "2012-05-05",
+                    "DataClasses": ["Emails"],
+                    "IsVerified": True,
+                },
+            ],
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/stealerlogsbyemaildomain/example.com",
+            json={"alice": ["evil.test"]},
+        )
+
+        app = _make_cli()
+        result = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "--cache",
+                "--json",
+                "domain-report",
+                "example.com",
+                "--include-stealer-logs",
+                "--fail-if-pwned",
+            ],
+        )
+        assert result.exit_code == 1
+        data = json.loads(result.output)
+        assert data["domain"] == "example.com"
+        assert data["total_exposed_aliases"] == 2
+        assert data["unique_breaches"] == 2
+        assert data["stealer_log_aliases"] == 1
+
+    def test_domain_report_fail_if_pwned_stealer_logs_only_and_clean(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(url=f"{BASE}/breacheddomain/stealer.example", status_code=404)
+        httpx_mock.add_response(
+            url=f"{BASE}/stealerlogsbyemaildomain/stealer.example",
+            json={"alice": ["bad.site"]},
+        )
+        app = _make_cli()
+        res_stealer = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "domain-report",
+                "stealer.example",
+                "--include-stealer-logs",
+                "--fail-if-pwned",
+            ],
+        )
+        assert res_stealer.exit_code == 1
+
+        httpx_mock.add_response(url=f"{BASE}/breacheddomain/clean.example", status_code=404)
+        res_clean = cli_runner.invoke(
+            app,
+            ["--api-key", TEST_KEY, "--json", "domain-report", "clean.example", "--fail-if-pwned"],
+        )
+        assert res_clean.exit_code == 0
+        assert json.loads(res_clean.output)["total_exposed_aliases"] == 0
+
+    def test_domain_report_notify_webhook_and_missing_api_key(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        app = _make_cli()
+        res_no_key = cli_runner.invoke(app, ["domain-report", "example.com"])
+        assert res_no_key.exit_code == 1
+        assert "Invalid or missing API key" in res_no_key.output
+
+        httpx_mock.add_response(
+            url=f"{BASE}/breacheddomain/example.com",
+            json={"alice": ["Adobe"]},
+        )
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[])
+        httpx_mock.add_response(
+            method="POST",
+            url="https://example.com/domain-hook",
+            status_code=200,
+        )
+        res_hook = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "domain-report",
+                "example.com",
+                "--notify-webhook",
+                "https://example.com/domain-hook",
+                "--webhook-format",
+                "generic",
+            ],
+        )
+        assert res_hook.exit_code == 0
+        webhook_reqs = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+        assert len(webhook_reqs) == 1
+        assert (
+            json.loads(webhook_reqs[0].content)["title"] == "pwned Domain Report Alert: example.com"
+        )
+
+        httpx_mock.add_response(url=f"{BASE}/breacheddomain/clean.com", status_code=404)
+        res_bad_hook = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "domain-report",
+                "clean.com",
+                "--notify-webhook",
+                "http://insecure.example/hook",
+            ],
+        )
+        assert res_bad_hook.exit_code == 2
+
+
+class TestMonitorCommand:
+    def test_monitor_runs_config_and_renders_report(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        cfg = isolated_env / "pwned.toml"
+        cfg.write_text(
+            '[monitor]\nformat = "json"\n[[accounts]]\nemail = "user@example.com"\n',
+            encoding="utf-8",
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/user%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/user%40example.com", status_code=404)
+
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["--api-key", TEST_KEY, "monitor"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["accounts_checked"] == 1
+        assert data["new_exposures"] == 1
+
+    def test_monitor_cli_format_overrides_config_format(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        cfg = isolated_env / "custom.toml"
+        cfg.write_text(
+            '[monitor]\nformat = "json"\ncache = true\nfail_if_pwned = true\n'
+            '[[accounts]]\nemail = "user@example.com"\n',
+            encoding="utf-8",
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/user%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/user%40example.com", status_code=404)
+
+        app = _make_cli()
+        result = cli_runner.invoke(
+            app,
+            ["--api-key", TEST_KEY, "--format", "table", "monitor", "--config", str(cfg)],
+        )
+        assert result.exit_code == 1
+        assert "Field" in result.output
+        assert "new_exposures" in result.output
+
+    def test_monitor_invalid_config_and_missing_api_key(
+        self, isolated_env: Path, cli_runner: CliRunner
+    ) -> None:
+        bad_cfg = isolated_env / "bad.toml"
+        bad_cfg.write_text("[monitor]\n", encoding="utf-8")
+
+        app = _make_cli()
+        res_bad = cli_runner.invoke(app, ["monitor", "--config", str(bad_cfg)])
+        assert res_bad.exit_code == 1
+        assert "at least one account or domain target" in res_bad.output
+
+        valid_cfg = isolated_env / "valid.toml"
+        valid_cfg.write_text('[[accounts]]\nemail = "a@b.com"\n', encoding="utf-8")
+        res_no_key = cli_runner.invoke(app, ["monitor", "--config", str(valid_cfg)])
+        assert res_no_key.exit_code == 1
+        assert "Invalid or missing API key" in res_no_key.output
+
+    def test_monitor_save_baselines_webhook_override_and_invalid_webhook(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        cfg = isolated_env / "pwned.toml"
+        cfg.write_text(
+            '[monitor]\nbaseline_dir = "baselines"\n[[accounts]]\nemail = "user@example.com"\n',
+            encoding="utf-8",
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/user%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/user%40example.com", status_code=404)
+        httpx_mock.add_response(
+            method="POST",
+            url="https://example.com/monitor-hook",
+            status_code=200,
+        )
+
+        app = _make_cli()
+        res_ok = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "--json",
+                "monitor",
+                "--save-baselines",
+                "--notify-webhook",
+                "https://example.com/monitor-hook",
+                "--webhook-format",
+                "generic",
+                "--fail-if-pwned",
+            ],
+        )
+        assert res_ok.exit_code == 1
+        assert json.loads(res_ok.output)["webhook_sent"] is True
+        assert (isolated_env / "baselines").is_dir()
+
+        # Re-run with saved baseline -> 0 new exposures -> fail-if-pwned exits 0
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/user%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/user%40example.com", status_code=404)
+        res_clean = cli_runner.invoke(
+            app,
+            ["--api-key", TEST_KEY, "monitor", "--fail-if-pwned"],
+        )
+        assert res_clean.exit_code == 0
+
+        # Invalid webhook URL -> UsageError (exit code 2)
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/user%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/user%40example.com", status_code=404)
+        res_bad_hook = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "monitor",
+                "--notify-webhook",
+                "http://bad.example/hook",
+            ],
+        )
+        assert res_bad_hook.exit_code == 2
+        assert "https scheme" in res_bad_hook.output
+
+
+class TestMcpCommand:
+    def test_mcp_defaults_and_options(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        served: list[Any] = []
+        monkeypatch.setattr("pwned.cli_commands.serve_stdio", served.append)
+
+        db_file = isolated_env / "hashes.txt"
+        db_file.write_text(f"{_sha1_hex('password')}:1\n", encoding="utf-8")
+
+        app = _make_cli()
+        res_default = cli_runner.invoke(app, ["mcp"])
+        assert res_default.exit_code == 0
+        assert len(served) == 1
+        s1 = served[0]
+        assert s1._api_key is None
+        assert s1._offline_db is None
+        assert s1._ntlm is False
+        assert s1._cache is None
+
+        res_opts = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "--user-agent",
+                "mcp-ua",
+                "--cache",
+                "mcp",
+                "--offline-db",
+                str(db_file),
+                "--ntlm",
+            ],
+        )
+        assert res_opts.exit_code == 0
+        assert len(served) == 2
+        s2 = served[1]
+        assert s2._api_key == TEST_KEY
+        assert s2._user_agent == "mcp-ua"
+        assert s2._offline_db == db_file
+        assert s2._ntlm is True
+        assert isinstance(s2._cache, ResponseCache)

@@ -21,18 +21,19 @@ from pwned.client import (
     _build_breaches_params,
     _build_headers,
     _cache_key,
+    _compute_retry_delay,
     _data_class_descriptions_adapter,
     _hash_email,
     _is_email,
     _match_range_suffix,
     _parse_raw_retry_after,
-    _parse_retry_after,
     _pastes_adapter,
     _raise_for_error_response,
     _str_list_adapter,
     _str_list_dict_adapter,
     _subscribed_domains_adapter,
     _validate_range_prefix,
+    _validate_retry_jitter,
 )
 from pwned.config import DEFAULT_USER_AGENT
 from pwned.models import (
@@ -68,6 +69,7 @@ class AsyncHIBPClient:
         base_url: str = BASE_URL,
         timeout: float = REQUEST_TIMEOUT,
         max_retries: int = MAX_RETRIES,
+        retry_jitter: float = 0.0,
         proxy: str | None = None,
         client: httpx.AsyncClient | None = None,
         cache: ResponseCache | None = None,
@@ -75,6 +77,7 @@ class AsyncHIBPClient:
         if max_retries < 0:
             raise ValueError("max_retries must be non-negative")
         self._max_retries = max_retries
+        self._retry_jitter = _validate_retry_jitter(retry_jitter)
         self._cache = cache
         if client is not None:
             self._client = client
@@ -110,7 +113,7 @@ class AsyncHIBPClient:
                         "Rate limit exceeded after retries",
                         retry_after=_parse_raw_retry_after(resp),
                     )
-                await asyncio.sleep(_parse_retry_after(resp))
+                await asyncio.sleep(_compute_retry_delay(resp, jitter=self._retry_jitter))
                 continue
             _raise_for_error_response(resp)
             return resp

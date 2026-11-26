@@ -21,6 +21,8 @@ from pwned.audit import (
     AuditSummary,
     ExportSource,
     ReuseGroup,
+    StrengthFinding,
+    _parse_pass_entry_output,
     async_audit_entries,
     audit_entries,
     load_export,
@@ -31,9 +33,15 @@ from pwned.audit import (
     parse_bitwarden_encrypted_json,
     parse_bitwarden_json,
     parse_chrome_csv,
+    parse_dashlane_csv,
     parse_firefox_csv,
     parse_generic_csv,
+    parse_gopass_store,
     parse_keepass,
+    parse_lastpass_csv,
+    parse_pass_store,
+    parse_protonpass_csv,
+    parse_pwdump,
 )
 from pwned.passwords import AsyncPwnedPasswordsClient, PwnedPasswordsClient
 
@@ -45,7 +53,22 @@ class TestAuditModels:
         assert entry.name == "GitHub"
         assert entry.username == "alice"
         assert entry.password == expected
+        assert entry.is_hash is False
+        assert entry.hash_type is None
         assert expected not in repr(entry)
+
+    def test_audit_entry_pre_hashed_fields(self) -> None:
+        ntlm_hash = "8846F7EAEE8FB117AD06BDD830B7586C"
+        entry = AuditEntry(
+            name="CORP",
+            username="alice",
+            password=ntlm_hash,
+            is_hash=True,
+            hash_type="ntlm",
+        )
+        assert entry.is_hash is True
+        assert entry.hash_type == "ntlm"
+        assert ntlm_hash not in repr(entry)
 
     def test_audit_finding_has_no_password_field(self) -> None:
         finding = AuditFinding(name="GitHub", username="alice", pwn_count=42)
@@ -54,6 +77,20 @@ class TestAuditModels:
         assert finding.pwn_count == 42
         assert "password" not in AuditFinding.model_fields
         assert finding.model_dump() == {"name": "GitHub", "username": "alice", "pwn_count": 42}
+
+    def test_strength_finding_fields_and_no_password(self) -> None:
+        finding = StrengthFinding(
+            name="GitHub",
+            username="alice",
+            score=1,
+            reasons=["Shorter than 12 characters"],
+        )
+        assert finding.name == "GitHub"
+        assert finding.username == "alice"
+        assert finding.score == 1
+        assert finding.reasons == ["Shorter than 12 characters"]
+        assert "password" not in StrengthFinding.model_fields
+        assert StrengthFinding(name="A", username="u", score=0).reasons == []
 
     def test_audit_summary_fields(self) -> None:
         finding = AuditFinding(name="GitHub", username="alice", pwn_count=10)
@@ -68,6 +105,15 @@ class TestAuditModels:
         assert summary.compromised_entries == 1
         assert summary.findings == [finding]
         assert summary.reused_groups == []
+        assert summary.weak_entries == 0
+        assert summary.strength_findings == []
+        assert summary.risk_score is None
+        assert summary.model_dump(exclude_unset=True) == {
+            "total_entries": 3,
+            "unique_passwords": 2,
+            "compromised_entries": 1,
+            "findings": [{"name": "GitHub", "username": "alice", "pwn_count": 10}],
+        }
 
     def test_reuse_group_fields_and_no_password_field(self) -> None:
         group = ReuseGroup(entries=["GitHub (alice)", "GitLab (alice)"], count=2, pwn_count=42)
@@ -89,6 +135,12 @@ class TestAuditModels:
             "apple-csv",
             "csv",
             "keepass",
+            "pwdump",
+            "lastpass-csv",
+            "dashlane-csv",
+            "protonpass-csv",
+            "pass",
+            "gopass",
         }
 
 
@@ -452,6 +504,32 @@ def _install_fake_cryptography(
                 dklen=self._length,
             )
 
+    class _FakeArgon2id:
+        def __init__(
+            self,
+            *,
+            salt: bytes,
+            length: int,
+            iterations: int,
+            lanes: int,
+            memory_cost: int,
+        ) -> None:
+            self._salt = salt
+            self._length = length
+            self._iterations = iterations
+            self._lanes = lanes
+            self._memory_cost = memory_cost
+
+        def derive(self, key_material: bytes) -> bytes:
+            tag = f"{self._iterations}:{self._lanes}:{self._memory_cost}".encode("ascii")
+            return hashlib.pbkdf2_hmac(
+                "sha256",
+                key_material,
+                self._salt + tag,
+                1,
+                dklen=self._length,
+            )
+
     class _FakeHKDFExpand:
         def __init__(self, *, algorithm: object, length: int, info: bytes) -> None:
             self._length = length
@@ -544,6 +622,10 @@ def _install_fake_cryptography(
         "cryptography.hazmat.primitives.kdf.pbkdf2",
         PBKDF2HMAC=_FakePBKDF2HMAC,
     )
+    argon2_mod = _mod(
+        "cryptography.hazmat.primitives.kdf.argon2",
+        Argon2id=_FakeArgon2id,
+    )
     hkdf_mod = _mod(
         "cryptography.hazmat.primitives.kdf.hkdf",
         HKDFExpand=_FakeHKDFExpand,
@@ -551,6 +633,7 @@ def _install_fake_cryptography(
     kdf_mod = _mod(
         "cryptography.hazmat.primitives.kdf",
         pbkdf2=pbkdf2_mod,
+        argon2=argon2_mod,
         hkdf=hkdf_mod,
     )
     alg_mod = _mod("cryptography.hazmat.primitives.ciphers.algorithms", AES=_FakeAES)
@@ -581,6 +664,7 @@ def _install_fake_cryptography(
         "cryptography.hazmat.primitives.hmac": hmac_mod,
         "cryptography.hazmat.primitives.kdf": kdf_mod,
         "cryptography.hazmat.primitives.kdf.pbkdf2": pbkdf2_mod,
+        "cryptography.hazmat.primitives.kdf.argon2": argon2_mod,
         "cryptography.hazmat.primitives.kdf.hkdf": hkdf_mod,
         "cryptography.hazmat.primitives.ciphers": ciphers_mod,
         "cryptography.hazmat.primitives.ciphers.algorithms": alg_mod,
@@ -641,6 +725,58 @@ def _make_bw_encrypted_payload(
         "kdfType": 0,
         "salt": salt,
         "kdfIterations": iterations,
+        "encKeyValidation_DO_NOT_EDIT": validation,
+        "data": data,
+    }
+
+
+def _derive_bw_argon2_keys(
+    master_password: str,
+    salt: str,
+    iterations: int,
+    memory_mib: int,
+    parallelism: int,
+) -> tuple[bytes, bytes]:
+    salt_bytes = hashlib.sha256(salt.encode("utf-8")).digest()
+    tag = f"{iterations}:{parallelism}:{memory_mib * 1024}".encode("ascii")
+    master_key = hashlib.pbkdf2_hmac(
+        "sha256",
+        master_password.encode("utf-8"),
+        salt_bytes + tag,
+        1,
+        dklen=32,
+    )
+    enc_key = std_hmac.new(master_key, b"enc\x01", hashlib.sha256).digest()
+    mac_key = std_hmac.new(master_key, b"mac\x01", hashlib.sha256).digest()
+    return enc_key, mac_key
+
+
+def _make_bw_argon2_encrypted_payload(
+    vault_obj: object,
+    *,
+    master_password: str | None = None,
+    salt: str = "alice@example.com",
+    iterations: int = 3,
+    memory_mib: int = 64,
+    parallelism: int = 4,
+) -> dict[str, object]:
+    resolved = "correct-horse" if master_password is None else master_password
+    enc_key, mac_key = _derive_bw_argon2_keys(resolved, salt, iterations, memory_mib, parallelism)
+    validation = _make_bw_cipher_string(b"validation-uuid", enc_key=enc_key, mac_key=mac_key)
+    data = _make_bw_cipher_string(
+        json.dumps(vault_obj).encode("utf-8"),
+        enc_key=enc_key,
+        mac_key=mac_key,
+        iv=b"fedcba9876543210",
+    )
+    return {
+        "encrypted": True,
+        "passwordProtected": True,
+        "kdfType": 1,
+        "salt": salt,
+        "kdfIterations": iterations,
+        "kdfMemory": memory_mib,
+        "kdfParallelism": parallelism,
         "encKeyValidation_DO_NOT_EDIT": validation,
         "data": data,
     }
@@ -907,7 +1043,7 @@ class TestParseBitwardenEncryptedJson:
             lambda d: [],
             lambda d: {**d, "encrypted": False},
             lambda d: {**d, "passwordProtected": False},
-            lambda d: {**d, "kdfType": 1},
+            lambda d: {**d, "kdfType": 2},
             lambda d: {**d, "kdfType": False},
             lambda d: {**d, "salt": ""},
             lambda d: {**d, "kdfIterations": 0},
@@ -927,6 +1063,65 @@ class TestParseBitwardenEncryptedJson:
 
         with pytest.raises(ValueError):
             parse_bitwarden_encrypted_json(export_file, master_password="correct-horse")
+
+    def test_valid_argon2id_encrypted_json_decrypts_and_parses_items(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_fake_cryptography(monkeypatch)
+        payload = _make_bw_argon2_encrypted_payload(
+            {
+                "items": [
+                    {"name": "GitHub", "login": {"username": "alice", "password": "pw1"}},
+                ]
+            },
+            master_password="argon-password",
+            iterations=3,
+            memory_mib=64,
+            parallelism=4,
+        )
+        export_file = tmp_path / "bw_argon2.json"
+        export_file.write_text(json.dumps(payload), encoding="utf-8")
+
+        entries = parse_bitwarden_encrypted_json(export_file, master_password="argon-password")
+        assert entries == [AuditEntry(name="GitHub", username="alice", password="pw1")]
+
+    @pytest.mark.parametrize(
+        "mutator",
+        [
+            lambda d: {**d, "kdfMemory": None},
+            lambda d: {**d, "kdfMemory": 0},
+            lambda d: {**d, "kdfMemory": -16},
+            lambda d: {**d, "kdfMemory": True},
+            lambda d: {**d, "kdfMemory": "64"},
+            lambda d: {**d, "kdfParallelism": None},
+            lambda d: {**d, "kdfParallelism": 0},
+            lambda d: {**d, "kdfParallelism": -1},
+            lambda d: {**d, "kdfParallelism": True},
+            lambda d: {**d, "kdfParallelism": "4"},
+        ],
+    )
+    def test_argon2id_invalid_parameters_raise_value_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutator: object
+    ) -> None:
+        _install_fake_cryptography(monkeypatch)
+        base = _make_bw_argon2_encrypted_payload({"items": []})
+        mutated = mutator(base)  # type: ignore[operator]
+        export_file = tmp_path / "invalid_argon2.json"
+        export_file.write_text(json.dumps(mutated), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="kdfMemory|kdfParallelism"):
+            parse_bitwarden_encrypted_json(export_file, master_password="correct-horse")
+
+    def test_argon2id_wrong_master_password_raises_value_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_fake_cryptography(monkeypatch)
+        payload = _make_bw_argon2_encrypted_payload({"items": []}, master_password="right-pw")
+        export_file = tmp_path / "argon2_wrong_pw.json"
+        export_file.write_text(json.dumps(payload), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="password|corrupt"):
+            parse_bitwarden_encrypted_json(export_file, master_password="wrong-pw")
 
     @pytest.mark.parametrize(
         "bad_cipher",
@@ -1308,3 +1503,546 @@ class TestAsyncAuditEntries:
         assert summary.reused_groups == [
             ReuseGroup(entries=["Site1 (a)", "Site2 (b)"], count=2, pwn_count=321)
         ]
+
+
+class TestParsePwdump:
+    def test_valid_pwdump_file(self, tmp_path: Path) -> None:
+        dump_file = tmp_path / "hashes.txt"
+        dump_file.write_text(
+            "# comment\n"
+            "[*] Dumping Domain Credentials\n"
+            "\n"
+            "CORP\\alice:1001:aad3b435b51404eeaad3b435b51404ee:8846f7eaee8fb117ad06bdd830b7586c:::\n"
+            "Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::\n"
+            "invalid:line\n",
+            encoding="utf-8",
+        )
+        entries = parse_pwdump(dump_file)
+        assert entries == [
+            AuditEntry(
+                name="CORP",
+                username="alice",
+                password="8846F7EAEE8FB117AD06BDD830B7586C",
+                is_hash=True,
+                hash_type="ntlm",
+            ),
+            AuditEntry(
+                name="",
+                username="Administrator",
+                password="31D6CFE0D16AE931B73C59D7E0C089C0",
+                is_hash=True,
+                hash_type="ntlm",
+            ),
+        ]
+
+    def test_empty_pwdump_file(self, tmp_path: Path) -> None:
+        dump_file = tmp_path / "empty.txt"
+        dump_file.write_text("", encoding="utf-8")
+        assert parse_pwdump(dump_file) == []
+
+
+class TestParseLastPassDashlaneProtonPassCsv:
+    def test_lastpass_csv_valid_and_missing_col(self, tmp_path: Path) -> None:
+        lp_file = tmp_path / "lastpass.csv"
+        lp_file.write_text(
+            "url,username,password,extra,name,grouping,fav\n"
+            "https://github.com,alice,pw1,,GitHub,Dev,0\n"
+            "https://gitlab.com,bob,pw2,,,Dev,0\n"
+            "https://empty.test,carol,, ,Empty,Dev,0\n",
+            encoding="utf-8",
+        )
+        assert parse_lastpass_csv(lp_file) == [
+            AuditEntry(name="GitHub", username="alice", password="pw1"),
+            AuditEntry(name="https://gitlab.com", username="bob", password="pw2"),
+        ]
+
+        bad_file = tmp_path / "lp_bad.csv"
+        bad_file.write_text("url,username,name\nhttps://a.test,alice,A\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="LastPass CSV"):
+            parse_lastpass_csv(bad_file)
+
+    def test_dashlane_csv_valid_and_missing_col(self, tmp_path: Path) -> None:
+        dl_file = tmp_path / "dashlane.csv"
+        dl_file.write_text(
+            "username,username2,username3,title,password,note,url,domain\n"
+            "alice,,,GitHub,pw1,,https://github.com,github.com\n"
+            ",bob,, ,pw2,,https://gitlab.com,gitlab.com\n"
+            ",,,GitLab,pw3,,https://b.test,b.test\n",
+            encoding="utf-8",
+        )
+        # Ensure blank title falls back to domain, then url; username falls back to login/username2
+        dl_fallback = tmp_path / "dashlane_fb.csv"
+        dl_fallback.write_text(
+            "title,domain,url,username,login,username2,password\n"
+            ",example.com,https://example.com,,bob_login,,pw1\n"
+            ",,https://onlyurl.test,,,carol2,pw2\n"
+            "Site,site.com,https://site.com,alice,,,pw3\n"
+            "Empty,e.com,https://e.com,dave,,,\n",
+            encoding="utf-8",
+        )
+        assert parse_dashlane_csv(dl_fallback) == [
+            AuditEntry(name="example.com", username="bob_login", password="pw1"),
+            AuditEntry(name="https://onlyurl.test", username="carol2", password="pw2"),
+            AuditEntry(name="Site", username="alice", password="pw3"),
+        ]
+        assert len(parse_dashlane_csv(dl_file)) == 3
+
+        bad_file = tmp_path / "dl_bad.csv"
+        bad_file.write_text("title,username\nSite,alice\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="Dashlane CSV"):
+            parse_dashlane_csv(bad_file)
+
+    def test_protonpass_csv_valid_and_missing_col(self, tmp_path: Path) -> None:
+        pp_file = tmp_path / "protonpass.csv"
+        pp_file.write_text(
+            "type,name,url,email,username,password,note\n"
+            "login,GitHub,https://github.com,alice@example.com,alice,pw1,\n"
+            "login,,https://proton.me,bob@proton.me,,pw2,\n"
+            "login,Empty,https://e.test,c@e.test,carol,,\n",
+            encoding="utf-8",
+        )
+        assert parse_protonpass_csv(pp_file) == [
+            AuditEntry(name="GitHub", username="alice", password="pw1"),
+            AuditEntry(name="https://proton.me", username="bob@proton.me", password="pw2"),
+        ]
+
+        bad_file = tmp_path / "pp_bad.csv"
+        bad_file.write_text("name,url,username\nSite,https://a.test,alice\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="Proton Pass CSV"):
+            parse_protonpass_csv(bad_file)
+
+
+class TestParsePassAndGopass:
+    @pytest.mark.parametrize(
+        ("output", "expected"),
+        [
+            ("", None),
+            ("\r\nusername: alice\r\n", None),
+            ("s3cr3t\n", AuditEntry(name="site", username="", password="s3cr3t")),
+            (
+                "s3cr3t\r\nurl: https://site.test\r\nUsername: alice\r\n",
+                AuditEntry(name="site", username="alice", password="s3cr3t"),
+            ),
+            (
+                "pw2\nlogin: bob\n",
+                AuditEntry(name="site", username="bob", password="pw2"),
+            ),
+            (
+                "pw3\nusername:\n  USER: carol \n",
+                AuditEntry(name="site", username="carol", password="pw3"),
+            ),
+        ],
+    )
+    def test_parse_pass_entry_output(self, output: str, expected: AuditEntry | None) -> None:
+        assert _parse_pass_entry_output("site", output) == expected
+
+    def test_parse_pass_store_missing_cli_raises_runtime_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("pwned.audit.shutil.which", lambda _: None)
+        with pytest.raises(RuntimeError, match="pass"):
+            parse_pass_store()
+
+    def test_parse_pass_store_missing_dir_raises_value_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("pwned.audit.shutil.which", lambda _: "/usr/bin/pass")
+        missing = tmp_path / "does-not-exist"
+        with pytest.raises(ValueError, match="does not exist|directory"):
+            parse_pass_store(missing)
+
+        not_a_dir = tmp_path / "file.txt"
+        not_a_dir.write_text("x", encoding="utf-8")
+        with pytest.raises(ValueError, match="does not exist|directory"):
+            parse_pass_store(not_a_dir)
+
+    def test_parse_pass_store_reads_sorted_entries_and_env_resolution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = tmp_path / "store"
+        (store / "work").mkdir(parents=True)
+        (store / ".git").mkdir()
+        (store / ".gpg-id").write_text("KEYID\n", encoding="utf-8")
+        (store / ".hidden.gpg").write_bytes(b"skip")
+        (store / ".git" / "ignored.gpg").write_bytes(b"skip")
+        (store / "-flag.gpg").write_bytes(b"skip")
+        (store / "work" / "github.gpg").write_bytes(b"gpg1")
+        (store / "empty.gpg").write_bytes(b"gpg2")
+        (store / "alpha.gpg").write_bytes(b"gpg3")
+
+        calls: list[tuple[list[str], str]] = []
+
+        def _fake_run(
+            cmd: list[str],
+            *,
+            capture_output: bool,
+            text: bool,
+            check: bool,
+            env: dict[str, str],
+        ) -> SimpleNamespace:
+            assert capture_output is True
+            assert text is True
+            assert check is False
+            calls.append((cmd, env["PASSWORD_STORE_DIR"]))
+            entry = cmd[2]
+            outputs = {
+                "alpha": "pw-alpha\nuser: a@example.com\n",
+                "empty": "\nusername: ignored\n",
+                "work/github": "pw-gh\nlogin: octocat\n",
+            }
+            return SimpleNamespace(returncode=0, stdout=outputs[entry], stderr="")
+
+        monkeypatch.setattr("pwned.audit.shutil.which", lambda _: "/usr/bin/pass")
+        monkeypatch.setattr("pwned.audit.subprocess.run", _fake_run)
+        monkeypatch.setenv("PASSWORD_STORE_DIR", str(store))
+
+        entries = parse_pass_store()
+        assert entries == [
+            AuditEntry(name="alpha", username="a@example.com", password="pw-alpha"),
+            AuditEntry(name="work/github", username="octocat", password="pw-gh"),
+        ]
+        assert calls == [
+            (["/usr/bin/pass", "show", "alpha"], str(store)),
+            (["/usr/bin/pass", "show", "empty"], str(store)),
+            (["/usr/bin/pass", "show", "work/github"], str(store)),
+        ]
+
+    def test_parse_pass_store_default_home_dir_and_nonzero_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        default_store = tmp_path / ".password-store"
+        default_store.mkdir()
+        (default_store / "a.gpg").write_bytes(b"x")
+        (default_store / "b.gpg").write_bytes(b"y")
+
+        monkeypatch.delenv("PASSWORD_STORE_DIR", raising=False)
+        monkeypatch.setattr("pwned.audit.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("pwned.audit.shutil.which", lambda _: "/usr/bin/pass")
+
+        monkeypatch.setattr(
+            "pwned.audit.subprocess.run",
+            lambda *a, **kw: SimpleNamespace(
+                returncode=2,
+                stdout="",
+                stderr="gpg:\n decryption failed",
+            ),
+        )
+        with pytest.raises(RuntimeError, match="gpg: decryption failed"):
+            parse_pass_store()
+
+        monkeypatch.setattr(
+            "pwned.audit.subprocess.run",
+            lambda *a, **kw: SimpleNamespace(returncode=1, stdout="", stderr=""),
+        )
+        with pytest.raises(RuntimeError, match="exit code 1"):
+            parse_pass_store()
+
+    def test_parse_gopass_store_missing_cli_raises_runtime_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("pwned.audit.shutil.which", lambda _: None)
+        with pytest.raises(RuntimeError, match="gopass"):
+            parse_gopass_store()
+
+    def test_parse_gopass_store_lists_and_shows_entries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[list[str], str | None]] = []
+
+        def _fake_run(
+            cmd: list[str],
+            *,
+            capture_output: bool,
+            text: bool,
+            check: bool,
+            env: dict[str, str],
+        ) -> SimpleNamespace:
+            calls.append((cmd, env.get("PASSWORD_STORE_DIR")))
+            if cmd[1] == "ls":
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="\nwork/jira\n-bad\nempty\npersonal/mail\n",
+                    stderr="",
+                )
+            entry = cmd[2]
+            outputs = {
+                "empty": "",
+                "personal/mail": "mail-pw\nusername: alice@mail.test\n",
+                "work/jira": "jira-pw\n",
+            }
+            return SimpleNamespace(returncode=0, stdout=outputs[entry], stderr="")
+
+        monkeypatch.delenv("PASSWORD_STORE_DIR", raising=False)
+        monkeypatch.setattr("pwned.audit.shutil.which", lambda _: "/usr/bin/gopass")
+        monkeypatch.setattr("pwned.audit.subprocess.run", _fake_run)
+
+        entries = parse_gopass_store(tmp_path)
+        assert entries == [
+            AuditEntry(name="personal/mail", username="alice@mail.test", password="mail-pw"),
+            AuditEntry(name="work/jira", username="", password="jira-pw"),
+        ]
+        assert calls == [
+            (["/usr/bin/gopass", "ls", "--flat"], str(tmp_path)),
+            (["/usr/bin/gopass", "show", "empty"], str(tmp_path)),
+            (["/usr/bin/gopass", "show", "personal/mail"], str(tmp_path)),
+            (["/usr/bin/gopass", "show", "work/jira"], str(tmp_path)),
+        ]
+
+        calls.clear()
+        assert len(parse_gopass_store(None)) == 2
+        assert calls[0] == (["/usr/bin/gopass", "ls", "--flat"], None)
+
+    def test_parse_gopass_store_nonzero_exit_raises_runtime_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("pwned.audit.shutil.which", lambda _: "/usr/bin/gopass")
+
+        monkeypatch.setattr(
+            "pwned.audit.subprocess.run",
+            lambda *a, **kw: SimpleNamespace(returncode=1, stdout="", stderr="store locked\n"),
+        )
+        with pytest.raises(RuntimeError, match="store locked"):
+            parse_gopass_store()
+
+        def _ls_ok_show_fail(cmd: list[str], **kw: object) -> SimpleNamespace:
+            if cmd[1] == "ls":
+                return SimpleNamespace(returncode=0, stdout="item1\n", stderr="")
+            return SimpleNamespace(returncode=3, stdout="", stderr="")
+
+        monkeypatch.setattr("pwned.audit.subprocess.run", _ls_ok_show_fail)
+        with pytest.raises(RuntimeError, match="exit code 3"):
+            parse_gopass_store()
+
+
+class TestLoadExportWave2A:
+    def test_dispatches_new_file_sources(self, tmp_path: Path) -> None:
+        pwd = tmp_path / "pwdump.txt"
+        pwd.write_text(
+            "D\\u:1000:aad3b435b51404eeaad3b435b51404ee:8846f7eaee8fb117ad06bdd830b7586c:::\n",
+            encoding="utf-8",
+        )
+        assert load_export(pwd, source="pwdump") == [
+            AuditEntry(
+                name="D",
+                username="u",
+                password="8846F7EAEE8FB117AD06BDD830B7586C",
+                is_hash=True,
+                hash_type="ntlm",
+            )
+        ]
+
+        lp = tmp_path / "lp.csv"
+        lp.write_text("name,username,password\nS,u,p\n", encoding="utf-8")
+        assert load_export(lp, source="lastpass-csv") == [
+            AuditEntry(name="S", username="u", password="p")
+        ]
+
+        dl = tmp_path / "dl.csv"
+        dl.write_text("title,username,password\nS,u,p\n", encoding="utf-8")
+        assert load_export(dl, source="dashlane-csv") == [
+            AuditEntry(name="S", username="u", password="p")
+        ]
+
+        pp = tmp_path / "pp.csv"
+        pp.write_text("name,username,password\nS,u,p\n", encoding="utf-8")
+        assert load_export(pp, source="protonpass-csv") == [
+            AuditEntry(name="S", username="u", password="p")
+        ]
+
+    def test_dispatches_pass_and_gopass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "pwned.audit.parse_pass_store",
+            lambda p=None: [AuditEntry(name="p", username="u", password=str(p))],
+        )
+        monkeypatch.setattr(
+            "pwned.audit.parse_gopass_store",
+            lambda p=None: [AuditEntry(name="g", username="u", password=str(p))],
+        )
+        assert load_export(None, source="pass") == [
+            AuditEntry(name="p", username="u", password="None")
+        ]
+        assert load_export(tmp_path, source="pass") == [
+            AuditEntry(name="p", username="u", password=str(tmp_path))
+        ]
+        assert load_export(None, source="gopass") == [
+            AuditEntry(name="g", username="u", password="None")
+        ]
+
+    @pytest.mark.parametrize(
+        "source",
+        ["csv", "keepass", "bitwarden-encrypted-json", "pwdump"],
+    )
+    def test_none_path_for_file_source_raises_value_error(self, source: ExportSource) -> None:
+        with pytest.raises(ValueError, match="A file path is required"):
+            load_export(None, source=source)
+
+    def test_none_path_with_unknown_source_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="Unsupported export source"):
+            load_export(None, source="unknown")  # type: ignore[arg-type]
+
+
+class TestPreHashedAndStrengthAudit:
+    @pytest.mark.parametrize("bad_score", [-1, 5, True])
+    def test_invalid_min_strength_score_raises_value_error(self, bad_score: int) -> None:
+        sync_client = MagicMock(spec=PwnedPasswordsClient)
+        with pytest.raises(ValueError, match="min_strength_score"):
+            audit_entries([], sync_client, min_strength_score=bad_score)
+
+        async_client = MagicMock(spec=AsyncPwnedPasswordsClient)
+
+        async def _run() -> None:
+            with pytest.raises(ValueError, match="min_strength_score"):
+                await async_audit_entries([], async_client, min_strength_score=bad_score)
+
+        asyncio.run(_run())
+
+    def test_pre_hashed_entries_sync_and_async(self) -> None:
+        ntlm_shared = "8846F7EAEE8FB117AD06BDD830B7586C"
+        sha1_unique = "5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8"
+        entries = [
+            AuditEntry(
+                name="CORP",
+                username="alice",
+                password=ntlm_shared,
+                is_hash=True,
+                hash_type="ntlm",
+            ),
+            AuditEntry(
+                name="CORP",
+                username="bob",
+                password=ntlm_shared,
+                is_hash=True,
+                hash_type="ntlm",
+            ),
+            AuditEntry(
+                name="Legacy",
+                username="carol",
+                password=sha1_unique,
+                is_hash=True,
+                hash_type="sha1",
+            ),
+            AuditEntry(name="Plain", username="dave", password="strong!UniquePassword99"),
+        ]
+
+        sync_client = MagicMock(spec=PwnedPasswordsClient)
+        sync_client.check_hash.side_effect = lambda h, **kw: (
+            42 if h == ntlm_shared and kw["ntlm"] else (7 if h == sha1_unique else 0)
+        )
+        sync_client.check_password.return_value = 0
+
+        class _FakeAsyncClient:
+            def __init__(self) -> None:
+                self.hash_calls: list[tuple[str, bool, bool]] = []
+                self.pw_calls: list[tuple[str, bool, bool]] = []
+
+            async def check_hash(
+                self, hash_hex: str, *, ntlm: bool = False, pad: bool = False
+            ) -> int:
+                self.hash_calls.append((hash_hex, ntlm, pad))
+                if hash_hex == ntlm_shared and ntlm:
+                    return 42
+                return 7 if hash_hex == sha1_unique else 0
+
+            async def check_password(
+                self, password: str, *, ntlm: bool = False, pad: bool = False
+            ) -> int:
+                self.pw_calls.append((password, ntlm, pad))
+                return 0
+
+        async_client = _FakeAsyncClient()
+
+        sync_summary = audit_entries(
+            entries,
+            sync_client,
+            ntlm=False,
+            pad=False,
+            check_reuse=True,
+            check_strength=True,
+        )
+
+        async def _run() -> AuditSummary:
+            return await async_audit_entries(
+                entries,
+                async_client,  # type: ignore[arg-type]
+                ntlm=False,
+                pad=False,
+                check_reuse=True,
+                check_strength=True,
+            )
+
+        async_summary = asyncio.run(_run())
+
+        assert sync_summary == async_summary
+        assert sync_client.check_hash.call_count == 2
+        sync_client.check_hash.assert_any_call(ntlm_shared, ntlm=True, pad=False)
+        sync_client.check_hash.assert_any_call(sha1_unique, ntlm=False, pad=False)
+        sync_client.check_password.assert_called_once_with(
+            "strong!UniquePassword99", ntlm=False, pad=False
+        )
+        assert sync_summary.unique_passwords == 3
+        assert sync_summary.compromised_entries == 3
+        assert sync_summary.reused_groups == [
+            ReuseGroup(
+                entries=["CORP (alice)", "CORP (bob)"],
+                count=2,
+                pwn_count=42,
+            )
+        ]
+        # Pre-hashed entries are skipped for strength evaluation; Plain is strong (score >= 3)
+        assert sync_summary.weak_entries == 0
+        assert sync_summary.strength_findings == []
+        assert sync_summary.risk_score is not None
+
+    def test_strength_and_risk_score_and_exclude_unset(self) -> None:
+        entries = [
+            AuditEntry(name="Zebra", username="alice", password="password"),
+            AuditEntry(name="Alpha", username="bob", password="12345"),
+            AuditEntry(name="Strong", username="carol", password="X9!kLm#7Qp$2Zv@8Rw"),
+        ]
+        sync_client = MagicMock(spec=PwnedPasswordsClient)
+        sync_client.check_password.side_effect = lambda pw, **_: 10 if pw == "12345" else 0
+
+        # Without check_strength / check_reuse: optional fields stay unset
+        plain_summary = audit_entries(entries, sync_client)
+        plain_dumped = plain_summary.model_dump(exclude_unset=True)
+        assert "reused_groups" not in plain_dumped
+        assert "weak_entries" not in plain_dumped
+        assert "strength_findings" not in plain_dumped
+        assert "risk_score" not in plain_dumped
+
+        # With check_strength=True and check_reuse=False
+        strength_summary = audit_entries(
+            entries,
+            sync_client,
+            check_strength=True,
+            min_strength_score=2,
+        )
+        strength_dumped = strength_summary.model_dump(exclude_unset=True)
+        assert "reused_groups" not in strength_dumped
+        assert "weak_entries" in strength_dumped
+        assert "strength_findings" in strength_dumped
+        assert "risk_score" in strength_dumped
+        assert strength_summary.weak_entries == 2
+        assert [(f.score, f.name) for f in strength_summary.strength_findings] == sorted(
+            [(f.score, f.name) for f in strength_summary.strength_findings]
+        )
+        assert strength_summary.risk_score == 30  # round((1/3)*60 + 0 + (2/3)*15) = 30
+
+        # With check_strength=True and check_reuse=True on reused weak passwords
+        reused_entries = [
+            AuditEntry(name="A", username="u1", password="123"),
+            AuditEntry(name="B", username="u2", password="123"),
+        ]
+        reused_client = MagicMock(spec=PwnedPasswordsClient)
+        reused_client.check_password.return_value = 500
+        both_summary = audit_entries(
+            reused_entries,
+            reused_client,
+            check_reuse=True,
+            check_strength=True,
+        )
+        assert both_summary.risk_score == 100
+        assert "reused_groups" in both_summary.model_dump(exclude_unset=True)
+        assert "risk_score" in both_summary.model_dump(exclude_unset=True)

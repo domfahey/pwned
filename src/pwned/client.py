@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import secrets
 import time
 from typing import Any
 from urllib.parse import quote
@@ -122,6 +123,23 @@ def _parse_raw_retry_after(resp: httpx.Response) -> int | None:
     return value if value >= 0 else None
 
 
+def _validate_retry_jitter(retry_jitter: float) -> float:
+    if not 0.0 <= retry_jitter <= 1.0:
+        raise ValueError("retry_jitter must be between 0.0 and 1.0")
+    return retry_jitter
+
+
+def _compute_retry_delay(resp: httpx.Response, *, jitter: float = 0.0) -> float:
+    """Compute 429 retry delay in seconds, optionally adding positive random jitter."""
+    base = _parse_retry_after(resp)
+    if jitter == 0.0:
+        return base
+    fraction = (secrets.randbelow(1000) / 1000.0) * jitter
+    if base == 0:
+        return fraction
+    return base + base * fraction
+
+
 def _build_headers(api_key: str | None, user_agent: str) -> dict[str, str]:
     headers: dict[str, str] = {"User-Agent": user_agent}
     if api_key:
@@ -214,6 +232,7 @@ class HIBPClient:
         base_url: str = BASE_URL,
         timeout: float = REQUEST_TIMEOUT,
         max_retries: int = MAX_RETRIES,
+        retry_jitter: float = 0.0,
         proxy: str | None = None,
         client: httpx.Client | None = None,
         cache: ResponseCache | None = None,
@@ -221,6 +240,7 @@ class HIBPClient:
         if max_retries < 0:
             raise ValueError("max_retries must be non-negative")
         self._max_retries = max_retries
+        self._retry_jitter = _validate_retry_jitter(retry_jitter)
         self._cache = cache
         if client is not None:
             self._client = client
@@ -256,7 +276,7 @@ class HIBPClient:
                         "Rate limit exceeded after retries",
                         retry_after=_parse_raw_retry_after(resp),
                     )
-                time.sleep(_parse_retry_after(resp))
+                time.sleep(_compute_retry_delay(resp, jitter=self._retry_jitter))
                 continue
             _raise_for_error_response(resp)
             return resp

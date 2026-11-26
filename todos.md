@@ -60,35 +60,28 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 - [x] **Reusable GitHub Action / `pre-commit` hook** — composite `action.yml` for scheduled domain/account breach monitoring in CI.
 - [x] **Meta-tag domain verification (`domain-verify meta-tag|meta-check`)** — verify and support HIBP HTML `<meta>` tag verification endpoints alongside DNS TXT and email verification.
 
-## Completed (Unreleased — Full HIBP API v3 Parity)
-
-- [x] **Remove subscribed domain (`DELETE /subscribedDomains/{domain}`)** — `HIBPClient.remove_subscribed_domain()`, `AsyncHIBPClient.remove_subscribed_domain()`, and `pwned subscribed-domains remove <domain>` (retaining backwards-compatible `pwned subscribed-domains` / `pwned sd` listing alongside `subscribed-domains list`).
-- [x] **Exclude unverified breaches on `GET /breaches`** — `include_unverified=False` (`?includeUnverified=false`) in sync/async clients and `pwned breaches --no-include-unverified`.
-- [x] **Spec-compliant error body parsing (`401`, `404`, JSON strings, `text/plain`)** — parse JSON objects, JSON strings, and `text/plain` bodies while ignoring HTML/binary error pages, surfacing `verifyMetaTag` 404 and API-key 401 diagnostics.
-- [x] **Complete HIBP test-account integration coverage & CC BY 4.0 attribution** — cover all 16 documented `hibp-integration-tests.com` aliases and document HIBP CC BY 4.0 data attribution in `README.md`.
-
-## Planned (v0.4.0)
+## Completed (Unreleased — v0.4.0)
 
 ### Enterprise & Active Directory Credential Auditing
-- [ ] **`ntds` / `secretsdump` / `pwdump` hash-dump auditing (`pwned audit --source pwdump`)** — parse `domain\user:RID:LM:NT:::` dumps directly, check NTLM hashes via async k-anonymity (`?mode=ntlm`) or `--offline-db`, and detect shared NTLM hashes across domain accounts (`--check-reuse`) without plaintext passwords (inspired by `impacket` `secretsdump.py` / `DSInternals`).
-- [ ] **Built-in resumable offline dump downloader (`pwned offline download <output>`)** — async resumable downloader (`00000`–`FFFFF`, `--ntlm`, `--concurrency`, `--resume`, ETag support) using `httpx` so `OfflinePasswordsClient` workflows work end-to-end in pure Python (inspired by `HaveIBeenPwned/PwnedPasswordsDownloader`).
-- [ ] **Bitwarden Argon2id encrypted JSON (`kdfType == 1`)** — support modern Argon2id Bitwarden encrypted exports using `cryptography`'s native `Argon2id` with zero new dependencies.
+- [x] **`ntds` / `secretsdump` / `pwdump` hash-dump auditing (`pwned audit --source pwdump`)** — parse `domain\user:RID:LM:NT:::` dumps directly, check NTLM hashes via async k-anonymity (`?mode=ntlm`) or `--offline-db`, and detect shared NTLM hashes across domain accounts (`--check-reuse`) without plaintext passwords.
+- [x] **Built-in resumable offline dump downloader (`pwned offline download <output>`)** — async resumable downloader (`00000`–`FFFFF`, `--ntlm`, `--concurrency`, `--resume`, ETag support) using `httpx` so `OfflinePasswordsClient` workflows work end-to-end in pure Python.
+- [x] **Bitwarden Argon2id encrypted JSON (`kdfType == 1`)** — support modern Argon2id Bitwarden encrypted exports using `cryptography`'s native `Argon2id` with zero new dependencies.
 
 ### Vault & Password Hygiene Expansion
-- [ ] **Additional password managers (`pass`, `gopass`, LastPass, Dashlane, Proton Pass)** — zero-dep CSV/JSON parsers for LastPass, Dashlane, and Proton Pass, plus optional live Unix `pass` / `gopass` store auditing without writing plaintext exports to disk (inspired by `antonlindstrom/passpwn` and `jcgay/am-i-pwned`).
-- [ ] **Combined breach + reuse + weakness scoring (`pwned audit --check-strength`)** — flag short/low-entropy passwords alongside breached and reused entries (zero-dep heuristics or optional `zxcvbn` extra) with an overall vault risk summary.
-- [ ] **Opt-in `--cache` for `/range/{prefix}` lookups** — extend `ResponseCache` to optionally cache Pwned Passwords range responses (matching Cloudflare CDN caching) to speed up repeated local vault audits and batch runs.
+- [x] **Additional password managers (`pass`, `gopass`, LastPass, Dashlane, Proton Pass)** — zero-dep CSV/JSON parsers for LastPass, Dashlane, and Proton Pass, plus optional live Unix `pass` / `gopass` store auditing without writing plaintext exports to disk.
+- [x] **Combined breach + reuse + weakness scoring (`pwned audit --check-strength`)** — flag short/low-entropy passwords alongside breached and reused entries (zero-dep heuristics or optional `zxcvbn` extra) with an overall vault risk summary.
+- [x] **Opt-in `--cache` for `/range/{prefix}` lookups** — extend `ResponseCache` to optionally cache Pwned Passwords range responses (matching Cloudflare CDN caching) to speed up repeated local vault audits and batch runs.
 
 ### Continuous Monitoring, Reporting & Alerting
-- [ ] **Markdown & standalone HTML reports (`--format markdown` / `--format html`)** — pipe Markdown directly into PR comments or GitHub Actions `$GITHUB_STEP_SUMMARY`, or generate a zero-dep single-file HTML report for compliance/security reviews (inspired by `BreachHunter`).
-- [ ] **Declarative monitoring config (`pwned monitor --config pwned.toml`)** — parse a repo-checked `pwned.toml` (via stdlib `tomllib`) defining watched accounts/domains, filters, baseline paths, and output formats in one file instead of long cron/CI command lines.
-- [ ] **Webhook notifications on new exposures (`--notify-webhook <url>`)** — pair with `--baseline` / `--save-baseline` to send Slack, Discord, or generic JSON webhooks via `httpx` only when newly discovered breaches, pastes, or stealer logs appear.
-- [ ] **Domain exposure risk summary (`pwned domain-report <domain>`)** — cross-reference a verified domain's breached aliases (and optional stealer logs) with cached breach metadata to summarize top breaches, recency, and counts by compromised `DataClasses`.
+- [x] **Markdown & standalone HTML reports (`--format markdown` / `--format html`)** — pipe Markdown directly into PR comments or GitHub Actions `$GITHUB_STEP_SUMMARY`, or generate a zero-dep single-file HTML report for compliance/security reviews.
+- [x] **Declarative monitoring config (`pwned monitor --config pwned.toml`)** — parse a repo-checked `pwned.toml` (via stdlib `tomllib`) defining watched accounts/domains, filters, baseline paths, and output formats in one file instead of long cron/CI command lines.
+- [x] **Webhook notifications on new exposures (`--notify-webhook <url>`)** — pair with `--baseline` / `--save-baseline` to send Slack, Discord, or generic JSON webhooks via `httpx` only when newly discovered breaches, pastes, or stealer logs appear.
+- [x] **Domain exposure risk summary (`pwned domain-report <domain>`)** — cross-reference a verified domain's breached aliases (and optional stealer logs) with cached breach metadata to summarize top breaches, recency, and counts by compromised `DataClasses`.
 
 ### Ecosystem & Distribution
-- [ ] **Local stdio MCP server extra (`pwned mcp` / `pwned[mcp]`)** — local-only privacy tools complementing HIBP's remote MCP server for workflows that shouldn't cross a chat prompt: local k-anonymity/offline password checks, local vault auditing, and baseline diffing (inspired by `Cyreslab-AI/hibp-mcp-server`).
-- [ ] **Container image (`ghcr.io/domfahey/pwned`)** — publish a minimal distroless/alpine image via `release.yml` for air-gapped, Kubernetes CronJob, and non-Python CI environments.
-- [ ] **Async account batching (`async_batch_check_accounts`) + retry jitter** — mirror `async_batch_check_passwords` for async applications, with jittered 429 backoff.
+- [x] **Local stdio MCP server extra (`pwned mcp` / `pwned[mcp]`)** — local-only privacy tools complementing HIBP's remote MCP server for workflows that shouldn't cross a chat prompt: local k-anonymity/offline password checks, local vault auditing, and baseline diffing.
+- [x] **Container image (`ghcr.io/domfahey/pwned`)** — publish a minimal distroless/alpine image via `release.yml` for air-gapped, Kubernetes CronJob, and non-Python CI environments.
+- [x] **Async account batching (`async_batch_check_accounts`) + retry jitter** — mirror `async_batch_check_passwords` for async applications, with jittered 429 backoff.
 
 ## Backlog / External
 

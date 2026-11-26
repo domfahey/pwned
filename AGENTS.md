@@ -33,25 +33,31 @@ src/pwned/
 ├── audit.py            # Password manager vault auditing & reused password detection
 ├── baseline.py         # Exposure baseline snapshotting and diffing
 ├── batch.py            # Batch account/password checks with RPM rate limiting and stats
-├── cache.py            # File-based TTL response caching for public endpoints
+├── cache.py            # File-based TTL response caching for public endpoints & ranges
 ├── cli.py              # Click command groups and global option parser
-├── cli_commands.py     # Additional commands (`auth`, `search`, `account-range`, `domain-verify`, `audit`, `cache`, `completion`)
+├── cli_commands.py     # Additional commands (`auth`, `search`, `account-range`, `domain-verify`, `audit`, `offline`, `domain-report`, `monitor`, `mcp`, `cache`, `completion`)
 ├── cli_helpers.py      # CLI output rendering, error handling, and API key validation
 ├── client.py           # Sync HIBP API client (`HIBPClient`)
 ├── config.py           # pydantic-settings configuration with XDG fallback and OS Keychain backend
 ├── filtering.py        # Breach filtering and sorting helpers
-├── formatting.py       # Output formatters (`text`, `json`, `jsonl`, `csv`, `table`, `sarif`)
+├── formatting.py       # Output formatters (`text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, `html`)
+├── mcp_server.py       # Local privacy-first stdio Model Context Protocol server
 ├── models.py           # Pydantic v2 models for API responses
+├── monitor.py          # Declarative TOML exposure monitoring engine
+├── notify.py           # Webhook notification client (Slack, Discord, generic JSON)
 ├── offline.py          # Offline sorted hash file lookups (`OfflinePasswordsClient`)
+├── offline_download.py # Resumable official Pwned Passwords dump downloader
 ├── passwords.py        # Sync & async Pwned Passwords clients (`PwnedPasswordsClient`, `AsyncPwnedPasswordsClient`)
 ├── py.typed            # PEP 561 type marker
+├── reporting.py        # Domain exposure risk summary reporting
+├── strength.py         # Password strength heuristics & zxcvbn integration
 └── validators.py       # Framework password validation helpers (Pydantic / FastAPI / Django)
 ```
 
 Client families and features:
 - HTTP client families: `HIBPClient` / `AsyncHIBPClient` (main API, auth required for most endpoints) and `PwnedPasswordsClient` / `AsyncPwnedPasswordsClient` (password range API, no auth, uses k-anonymity).
 - Offline client: `OfflinePasswordsClient` for local `O(log N)` binary search over official HIBP password hash dumps.
-- Optional extras: `keepass` (`pykeepass`), `keyring` (`keyring`), `crypto` (`cryptography` for Bitwarden encrypted JSON), and `all`.
+- Optional extras: `keepass` (`pykeepass`), `keyring` (`keyring`), `crypto` (`cryptography>=44.0` for Bitwarden encrypted JSON & Argon2id), `strength` (`zxcvbn`), and `all`.
 
 ## Code Conventions
 

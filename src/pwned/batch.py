@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
 
 from pwned._parsers import parse_input_lines as parse_input_lines
+from pwned.async_client import AsyncHIBPClient
 from pwned.client import HIBPClient, HIBPError, NotFoundError
-from pwned.models import NonNegativeInt, PasswordChecker, _HIBPBase
+from pwned.models import Breach, NonNegativeInt, PasswordChecker, _HIBPBase
 from pwned.passwords import AsyncPwnedPasswordsClient
 
 
@@ -94,6 +95,15 @@ def load_input_file(
         )
 
 
+def _account_item(account: str, breaches: Sequence[Breach]) -> AccountBatchItem:
+    names = [b.name for b in breaches]
+    return AccountBatchItem(
+        account=account,
+        breaches=names,
+        status="pwned" if names else "clean",
+    )
+
+
 def _check_single_account(
     account: str,
     client: HIBPClient,
@@ -112,12 +122,7 @@ def _check_single_account(
         return AccountBatchItem(account=account, breaches=[], status="clean")
     except HIBPError as exc:
         return AccountBatchItem(account=account, breaches=[], status="error", error=str(exc))
-    names = [b.name for b in breaches]
-    return AccountBatchItem(
-        account=account,
-        breaches=names,
-        status="pwned" if names else "clean",
-    )
+    return _account_item(account, breaches)
 
 
 def _resolve_rpm(
@@ -160,6 +165,78 @@ def batch_check_accounts(
         if idx > 1 and delay > 0.0:
             sleep(delay)
         item = _check_single_account(
+            account,
+            client,
+            domain=domain,
+            include_unverified=include_unverified,
+        )
+        results.append(item)
+        if on_progress is not None:
+            on_progress(idx, total, item)
+    return results
+
+
+async def _async_check_single_account(
+    account: str,
+    client: AsyncHIBPClient,
+    *,
+    domain: str | None,
+    include_unverified: bool,
+) -> AccountBatchItem:
+    try:
+        breaches = await client.get_account_breaches(
+            account,
+            truncate=True,
+            domain=domain,
+            include_unverified=include_unverified,
+        )
+    except NotFoundError:
+        return AccountBatchItem(account=account, breaches=[], status="clean")
+    except HIBPError as exc:
+        return AccountBatchItem(account=account, breaches=[], status="error", error=str(exc))
+    return _account_item(account, breaches)
+
+
+async def _async_resolve_rpm(
+    client: AsyncHIBPClient,
+    rpm: int | None,
+    *,
+    auto_rpm: bool,
+    total: int,
+) -> int | None:
+    if rpm is not None:
+        if rpm <= 0:
+            raise ValueError("rpm must be greater than 0")
+        return rpm
+    if not auto_rpm or total <= 1:
+        return None
+    try:
+        detected = (await client.get_subscription_status()).rpm
+    except HIBPError:
+        return None
+    return detected if detected > 0 else None
+
+
+async def async_batch_check_accounts(
+    accounts: Sequence[str],
+    client: AsyncHIBPClient,
+    *,
+    rpm: int | None = None,
+    auto_rpm: bool = False,
+    domain: str | None = None,
+    include_unverified: bool = True,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    on_progress: Callable[[int, int, AccountBatchItem], None] | None = None,
+) -> list[AccountBatchItem]:
+    """Check a sequence of accounts asynchronously with optional RPM pacing."""
+    total = len(accounts)
+    effective_rpm = await _async_resolve_rpm(client, rpm, auto_rpm=auto_rpm, total=total)
+    delay = 60.0 / effective_rpm if effective_rpm is not None else 0.0
+    results: list[AccountBatchItem] = []
+    for idx, account in enumerate(accounts, start=1):
+        if idx > 1 and delay > 0.0:
+            await sleep(delay)
+        item = await _async_check_single_account(
             account,
             client,
             domain=domain,

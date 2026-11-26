@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import click
 import click.shell_completion
@@ -17,7 +17,13 @@ from pwned.audit import (
 )
 from pwned.baseline import diff_search_result, load_baseline, save_baseline
 from pwned.cache import ResponseCache
-from pwned.cli_helpers import get_output_format, handle_errors, render_output, require_api_key
+from pwned.cli_helpers import (
+    get_cache,
+    get_output_format,
+    handle_errors,
+    render_output,
+    require_api_key,
+)
 from pwned.client import HIBPClient
 from pwned.config import (
     clear_api_key,
@@ -29,9 +35,15 @@ from pwned.config import (
     save_api_key,
     save_api_key_keyring,
 )
+from pwned.formatting import format_output
+from pwned.mcp_server import MCPServer, serve_stdio
 from pwned.models import EmailAlias
+from pwned.monitor import load_monitor_config, run_monitor
+from pwned.notify import WEBHOOK_FORMATS, WebhookFormat, send_webhook_notification
 from pwned.offline import OfflinePasswordsClient
+from pwned.offline_download import download_offline_db
 from pwned.passwords import AsyncPwnedPasswordsClient
+from pwned.reporting import generate_domain_report
 
 _EMAIL_ALIASES = ("admin", "hostmaster", "info", "security", "webmaster")
 _AUDIT_SOURCES = (
@@ -45,6 +57,12 @@ _AUDIT_SOURCES = (
     "apple-csv",
     "csv",
     "keepass",
+    "pwdump",
+    "lastpass-csv",
+    "dashlane-csv",
+    "protonpass-csv",
+    "pass",
+    "gopass",
 )
 _AUTH_BACKENDS = ("file", "keyring")
 _COMPLETION_SHELLS = ("bash", "zsh", "fish")
@@ -54,6 +72,21 @@ def _authed_client(ctx: click.Context) -> HIBPClient:
     settings = ctx.obj["settings"]
     api_key = require_api_key(ctx)
     return HIBPClient(api_key=api_key, user_agent=settings.user_agent)
+
+
+def _maybe_notify(
+    webhook_url: str | None,
+    webhook_format: WebhookFormat,
+    data: Any,
+    *,
+    title: str,
+) -> None:
+    if webhook_url is None:
+        return
+    try:
+        send_webhook_notification(webhook_url, data, fmt=webhook_format, title=title)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
 
 
 @click.group()
@@ -159,6 +192,17 @@ def auth_clear(backend: str) -> None:
     default=None,
     help="Save full search results as a JSON baseline snapshot.",
 )
+@click.option(
+    "--notify-webhook",
+    default=None,
+    help="HTTPS webhook URL to notify on exposures.",
+)
+@click.option(
+    "--webhook-format",
+    type=click.Choice(WEBHOOK_FORMATS),
+    default="auto",
+    help="Webhook payload format.",
+)
 @click.option("--fail-if-pwned", is_flag=True, help="Exit with code 1 if exposed.")
 @click.pass_context
 @handle_errors
@@ -171,6 +215,8 @@ def search(
     include_stealer_logs: bool,
     baseline_path: Path | None,
     save_baseline_path: Path | None,
+    notify_webhook: str | None,
+    webhook_format: str,
     fail_if_pwned: bool,
 ) -> None:
     """Search breaches, pastes, and optionally stealer logs for an account."""
@@ -191,6 +237,12 @@ def search(
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
     render_output(ctx, result)
+    _maybe_notify(
+        notify_webhook,
+        cast(WebhookFormat, webhook_format),
+        result,
+        title=f"pwned Search Alert: {account}",
+    )
     if fail_if_pwned and (result.breaches or result.pastes or result.stealer_logs):
         sys.exit(1)
 
@@ -271,7 +323,7 @@ def domain_verify_meta_check(ctx: click.Context, domain: str) -> None:
 
 
 @click.command()
-@click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("path", required=False, type=click.Path(exists=True, dir_okay=True, path_type=Path))
 @click.option(
     "--source",
     type=click.Choice(_AUDIT_SOURCES),
@@ -294,6 +346,11 @@ def domain_verify_meta_check(ctx: click.Context, domain: str) -> None:
     help="Report passwords reused across multiple entries.",
 )
 @click.option(
+    "--check-strength",
+    is_flag=True,
+    help="Flag weak passwords and compute vault risk score.",
+)
+@click.option(
     "--concurrency",
     type=click.IntRange(min=1),
     default=10,
@@ -306,22 +363,42 @@ def domain_verify_meta_check(ctx: click.Context, domain: str) -> None:
     default=None,
     help="Path to a local HIBP password dump file for offline checking.",
 )
+@click.option(
+    "--notify-webhook",
+    default=None,
+    help="HTTPS webhook URL to notify on exposures.",
+)
+@click.option(
+    "--webhook-format",
+    type=click.Choice(WEBHOOK_FORMATS),
+    default="auto",
+    help="Webhook payload format.",
+)
 @click.option("--fail-if-pwned", is_flag=True, help="Exit with code 1 if compromised.")
 @click.pass_context
 @handle_errors
 def audit(
     ctx: click.Context,
-    path: Path,
+    path: Path | None,
     source: str,
     ntlm: bool,
     no_pad: bool,
     threshold: int,
     check_reuse: bool,
+    check_strength: bool,
     concurrency: int,
     offline_db: Path | None,
+    notify_webhook: str | None,
+    webhook_format: str,
     fail_if_pwned: bool,
 ) -> None:
     """Audit a password-manager export locally via k-anonymity."""
+    if source not in ("pass", "gopass"):
+        if path is None:
+            raise click.UsageError(f"PATH is required for --source {source}.")
+        if path.is_dir():
+            raise click.UsageError(f"PATH must be a file for --source {source}.")
+
     master_password: str | None = None
     if source == "keepass":
         master_password = click.prompt("KeePass master password", hide_input=True)
@@ -337,34 +414,258 @@ def audit(
         raise click.ClickException(str(exc)) from exc
 
     settings = ctx.obj["settings"]
+    effective_ntlm = ntlm or source == "pwdump"
     if offline_db is not None:
-        with OfflinePasswordsClient(offline_db, ntlm=ntlm) as offline_client:
+        with OfflinePasswordsClient(offline_db, ntlm=effective_ntlm) as offline_client:
             summary = audit_entries(
                 entries,
                 offline_client,
                 threshold=threshold,
-                ntlm=ntlm,
+                ntlm=effective_ntlm,
                 pad=not no_pad,
                 check_reuse=check_reuse,
+                check_strength=check_strength,
             )
     else:
 
         async def _run_online_audit() -> AuditSummary:
-            async with AsyncPwnedPasswordsClient(user_agent=settings.user_agent) as pw_client:
+            async with AsyncPwnedPasswordsClient(
+                user_agent=settings.user_agent,
+                cache=get_cache(ctx),
+            ) as pw_client:
                 return await async_audit_entries(
                     entries,
                     pw_client,
                     threshold=threshold,
-                    ntlm=ntlm,
+                    ntlm=effective_ntlm,
                     pad=not no_pad,
                     check_reuse=check_reuse,
+                    check_strength=check_strength,
                     concurrency=concurrency,
                 )
 
         summary = asyncio.run(_run_online_audit())
     render_output(ctx, summary)
+    _maybe_notify(
+        notify_webhook,
+        cast(WebhookFormat, webhook_format),
+        summary,
+        title="pwned Vault Audit Alert",
+    )
     if fail_if_pwned and summary.compromised_entries > 0:
         sys.exit(1)
+
+
+@click.group()
+def offline() -> None:
+    """Manage local offline Pwned Passwords hash dumps."""
+
+
+@offline.command("download")
+@click.argument("output", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--ntlm", is_flag=True, help="Download NTLM hashes instead of SHA-1.")
+@click.option(
+    "--concurrency",
+    type=click.IntRange(min=1),
+    default=32,
+    show_default=True,
+    help="Maximum concurrent prefix downloads.",
+)
+@click.option(
+    "--resume/--no-resume",
+    default=True,
+    show_default=True,
+    help="Resume an interrupted download if partial shards exist.",
+)
+@click.option(
+    "--etag-cache",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="JSON file storing ETags for conditional HTTP 304 updates.",
+)
+@click.pass_context
+@handle_errors
+def offline_download(
+    ctx: click.Context,
+    output: Path,
+    ntlm: bool,
+    concurrency: int,
+    resume: bool,
+    etag_cache: Path | None,
+) -> None:
+    """Download an offline Pwned Passwords hash dump."""
+    settings = ctx.obj["settings"]
+    stats = asyncio.run(
+        download_offline_db(
+            output,
+            ntlm=ntlm,
+            concurrency=concurrency,
+            resume=resume,
+            etag_cache_path=etag_cache,
+            user_agent=settings.user_agent,
+        )
+    )
+    render_output(ctx, stats)
+
+
+@click.command("domain-report")
+@click.argument("domain")
+@click.option(
+    "--include-stealer-logs",
+    is_flag=True,
+    help="Include stealer log alias exposure counts.",
+)
+@click.option(
+    "--notify-webhook",
+    default=None,
+    help="HTTPS webhook URL to notify on exposures.",
+)
+@click.option(
+    "--webhook-format",
+    type=click.Choice(WEBHOOK_FORMATS),
+    default="auto",
+    help="Webhook payload format.",
+)
+@click.option(
+    "--fail-if-pwned",
+    is_flag=True,
+    help="Exit with code 1 if any exposures are found.",
+)
+@click.pass_context
+@handle_errors
+def domain_report(
+    ctx: click.Context,
+    domain: str,
+    include_stealer_logs: bool,
+    notify_webhook: str | None,
+    webhook_format: str,
+    fail_if_pwned: bool,
+) -> None:
+    """Generate an aggregated breach exposure report for a verified domain."""
+    settings = ctx.obj["settings"]
+    api_key = require_api_key(ctx)
+    with HIBPClient(
+        api_key=api_key,
+        user_agent=settings.user_agent,
+        cache=get_cache(ctx),
+    ) as client:
+        report = generate_domain_report(
+            client,
+            domain,
+            include_stealer_logs=include_stealer_logs,
+        )
+    render_output(ctx, report)
+    _maybe_notify(
+        notify_webhook,
+        cast(WebhookFormat, webhook_format),
+        report,
+        title=f"pwned Domain Report Alert: {domain}",
+    )
+    if fail_if_pwned and (report.total_exposed_aliases > 0 or bool(report.stealer_log_aliases)):
+        sys.exit(1)
+
+
+@click.command("monitor")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=Path("pwned.toml"),
+    show_default=True,
+    help="Path to declarative monitor TOML config.",
+)
+@click.option(
+    "--save-baselines",
+    is_flag=True,
+    help="Save updated snapshots to baseline_dir.",
+)
+@click.option(
+    "--notify-webhook",
+    default=None,
+    help="Override webhook URL from config.",
+)
+@click.option(
+    "--webhook-format",
+    type=click.Choice(WEBHOOK_FORMATS),
+    default=None,
+    help="Override webhook format from config.",
+)
+@click.option(
+    "--fail-if-pwned",
+    is_flag=True,
+    help="Exit with code 1 if new exposures are detected.",
+)
+@click.pass_context
+@handle_errors
+def monitor(
+    ctx: click.Context,
+    config_path: Path,
+    save_baselines: bool,
+    notify_webhook: str | None,
+    webhook_format: str | None,
+    fail_if_pwned: bool,
+) -> None:
+    """Run declarative account and domain monitoring from a TOML config."""
+    try:
+        config = load_monitor_config(config_path)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    settings = ctx.obj["settings"]
+    api_key = require_api_key(ctx)
+    cache_backend = ResponseCache() if (config.cache or ctx.obj.get("use_cache")) else None
+    with HIBPClient(
+        api_key=api_key,
+        user_agent=settings.user_agent,
+        cache=cache_backend,
+        retry_jitter=0.25,
+    ) as client:
+        try:
+            report = run_monitor(
+                config,
+                client,
+                save_baselines=save_baselines,
+                webhook_url_override=notify_webhook,
+                webhook_format_override=(
+                    cast(WebhookFormat, webhook_format) if webhook_format is not None else None
+                ),
+            )
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+
+    if config.format is not None and ctx.obj.get("fmt") == "text" and not ctx.obj.get("use_json"):
+        click.echo(format_output(report, fmt=config.format))
+    else:
+        render_output(ctx, report)
+
+    if (fail_if_pwned or config.fail_if_pwned) and report.new_exposures > 0:
+        sys.exit(1)
+
+
+@click.command("mcp")
+@click.option(
+    "--offline-db",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Local HIBP password hash dump for offline MCP lookups.",
+)
+@click.option(
+    "--ntlm",
+    is_flag=True,
+    help="Default to NTLM hash mode for MCP lookups.",
+)
+@click.pass_context
+def mcp(ctx: click.Context, offline_db: Path | None, ntlm: bool) -> None:
+    """Run the local stdio MCP server for AI assistants."""
+    settings = ctx.obj["settings"]
+    server = MCPServer(
+        api_key=settings.get_api_key(),
+        user_agent=settings.user_agent,
+        offline_db=offline_db,
+        ntlm=ntlm,
+        cache=get_cache(ctx),
+    )
+    serve_stdio(server)
 
 
 @click.group()
@@ -404,5 +705,9 @@ def register_extra_commands(cli_group: click.Group) -> None:
     cli_group.add_command(account_range)
     cli_group.add_command(domain_verify)
     cli_group.add_command(audit)
+    cli_group.add_command(offline)
+    cli_group.add_command(domain_report)
+    cli_group.add_command(monitor)
+    cli_group.add_command(mcp)
     cli_group.add_command(cache)
     cli_group.add_command(completion)

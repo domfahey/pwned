@@ -10,10 +10,12 @@ from pydantic import ValidationError
 from pytest_httpx import HTTPXMock
 
 from pwned._parsers import _md4
+from pwned.async_client import AsyncHIBPClient
 from pwned.batch import (
     AccountBatchItem,
     BatchStats,
     PasswordBatchItem,
+    async_batch_check_accounts,
     async_batch_check_passwords,
     batch_check_accounts,
     batch_check_passwords,
@@ -807,3 +809,259 @@ class TestAsyncBatchCheckPasswords:
             PasswordBatchItem(index=2, pwn_count=0, status="clean"),
             PasswordBatchItem(index=3, pwn_count=999, status="pwned"),
         ]
+
+
+class TestAsyncBatchCheckAccounts:
+    @pytest.mark.parametrize("bad_rpm", [0, -1, -60])
+    def test_invalid_rpm_raises_value_error(self, bad_rpm: int) -> None:
+        client = MagicMock()
+        client.get_account_breaches = AsyncMock()
+
+        async def _run() -> None:
+            with pytest.raises(ValueError, match="rpm"):
+                await async_batch_check_accounts(["a@example.com"], client, rpm=bad_rpm)
+
+        asyncio.run(_run())
+        client.get_account_breaches.assert_not_called()
+
+    def test_empty_accounts_returns_empty_without_sleeping(self) -> None:
+        client = MagicMock()
+        client.get_account_breaches = AsyncMock()
+        sleep = AsyncMock()
+        progress = MagicMock()
+
+        results = asyncio.run(
+            async_batch_check_accounts([], client, rpm=60, sleep=sleep, on_progress=progress)
+        )
+
+        assert results == []
+        client.get_account_breaches.assert_not_called()
+        sleep.assert_not_awaited()
+        progress.assert_not_called()
+
+    def test_mixed_outcomes_and_continues_after_error(self) -> None:
+        client = MagicMock()
+        client.get_account_breaches = AsyncMock(
+            side_effect=[
+                [Breach(Name="Adobe"), Breach(Name="LinkedIn")],
+                NotFoundError("Not found"),
+                RateLimitError("Rate limit exceeded after retries"),
+                [],
+            ]
+        )
+        progress_calls: list[tuple[int, int, AccountBatchItem]] = []
+
+        results = asyncio.run(
+            async_batch_check_accounts(
+                [
+                    "pwned@example.com",
+                    "clean@example.com",
+                    "err@example.com",
+                    "empty@example.com",
+                ],
+                client,
+                domain="adobe.com",
+                include_unverified=False,
+                on_progress=lambda idx, total, item: progress_calls.append((idx, total, item)),
+            )
+        )
+
+        assert results == [
+            AccountBatchItem(
+                account="pwned@example.com",
+                breaches=["Adobe", "LinkedIn"],
+                status="pwned",
+            ),
+            AccountBatchItem(account="clean@example.com", breaches=[], status="clean"),
+            AccountBatchItem(
+                account="err@example.com",
+                breaches=[],
+                status="error",
+                error="Rate limit exceeded after retries",
+            ),
+            AccountBatchItem(account="empty@example.com", breaches=[], status="clean"),
+        ]
+        assert progress_calls == [
+            (1, 4, results[0]),
+            (2, 4, results[1]),
+            (3, 4, results[2]),
+            (4, 4, results[3]),
+        ]
+        assert client.get_account_breaches.call_args_list == [
+            call("pwned@example.com", truncate=True, domain="adobe.com", include_unverified=False),
+            call("clean@example.com", truncate=True, domain="adobe.com", include_unverified=False),
+            call("err@example.com", truncate=True, domain="adobe.com", include_unverified=False),
+            call("empty@example.com", truncate=True, domain="adobe.com", include_unverified=False),
+        ]
+
+    def test_rpm_sleeps_only_between_requests(self) -> None:
+        client = MagicMock()
+        events: list[str] = []
+
+        async def fake_check(account: str, **kwargs: object) -> list[Breach]:
+            _ = kwargs
+            events.append(f"req:{account}")
+            return []
+
+        async def fake_sleep(secs: float) -> None:
+            events.append(f"sleep:{secs}")
+
+        client.get_account_breaches = AsyncMock(side_effect=fake_check)
+
+        asyncio.run(
+            async_batch_check_accounts(
+                ["a@example.com", "b@example.com", "c@example.com"],
+                client,
+                rpm=30,
+                sleep=fake_sleep,
+            )
+        )
+
+        assert events == [
+            "req:a@example.com",
+            "sleep:2.0",
+            "req:b@example.com",
+            "sleep:2.0",
+            "req:c@example.com",
+        ]
+
+    def test_single_account_with_rpm_does_not_sleep(self) -> None:
+        client = MagicMock()
+        client.get_account_breaches = AsyncMock(return_value=[])
+        sleep = AsyncMock()
+
+        asyncio.run(async_batch_check_accounts(["only@example.com"], client, rpm=60, sleep=sleep))
+
+        sleep.assert_not_awaited()
+
+    def test_rpm_none_does_not_sleep(self) -> None:
+        client = MagicMock()
+        client.get_account_breaches = AsyncMock(return_value=[])
+        client.get_subscription_status = AsyncMock()
+        sleep = AsyncMock()
+
+        asyncio.run(
+            async_batch_check_accounts(
+                ["a@example.com", "b@example.com"], client, rpm=None, sleep=sleep
+            )
+        )
+
+        sleep.assert_not_awaited()
+        client.get_subscription_status.assert_not_awaited()
+
+    def test_auto_rpm_queries_subscription_when_rpm_omitted(self) -> None:
+        client = MagicMock()
+        client.get_subscription_status = AsyncMock(
+            return_value=Subscription.model_validate(
+                {
+                    "SubscriptionName": "Pwned 1",
+                    "Description": "Desc",
+                    "SubscribedUntil": "2027-01-01T00:00:00Z",
+                    "Rpm": 120,
+                    "DomainSearchMaxBreachedAccounts": 0,
+                    "IncludesStealerLogs": False,
+                }
+            )
+        )
+        client.get_account_breaches = AsyncMock(return_value=[])
+        sleep = AsyncMock()
+
+        asyncio.run(
+            async_batch_check_accounts(
+                ["a@example.com", "b@example.com"],
+                client,
+                auto_rpm=True,
+                sleep=sleep,
+            )
+        )
+
+        client.get_subscription_status.assert_awaited_once()
+        sleep.assert_awaited_once_with(0.5)
+
+    def test_auto_rpm_skips_subscription_for_single_account(self) -> None:
+        client = MagicMock()
+        client.get_account_breaches = AsyncMock(return_value=[])
+        client.get_subscription_status = AsyncMock()
+        sleep = AsyncMock()
+
+        asyncio.run(
+            async_batch_check_accounts(["only@example.com"], client, auto_rpm=True, sleep=sleep)
+        )
+
+        client.get_subscription_status.assert_not_awaited()
+        sleep.assert_not_awaited()
+
+    def test_auto_rpm_falls_back_on_hibp_error(self) -> None:
+        client = MagicMock()
+        client.get_subscription_status = AsyncMock(side_effect=HIBPError("HTTP 500"))
+        client.get_account_breaches = AsyncMock(return_value=[])
+        sleep = AsyncMock()
+
+        results = asyncio.run(
+            async_batch_check_accounts(
+                ["a@example.com", "b@example.com"],
+                client,
+                auto_rpm=True,
+                sleep=sleep,
+            )
+        )
+
+        assert len(results) == 2
+        sleep.assert_not_awaited()
+
+    def test_auto_rpm_ignores_non_positive_subscription_rpm(self) -> None:
+        client = MagicMock()
+        client.get_subscription_status = AsyncMock(
+            return_value=Subscription.model_validate(
+                {
+                    "SubscriptionName": "Custom",
+                    "Description": "Desc",
+                    "SubscribedUntil": "2027-01-01T00:00:00Z",
+                    "Rpm": 0,
+                    "DomainSearchMaxBreachedAccounts": 0,
+                    "IncludesStealerLogs": False,
+                }
+            )
+        )
+        client.get_account_breaches = AsyncMock(return_value=[])
+        sleep = AsyncMock()
+
+        asyncio.run(
+            async_batch_check_accounts(
+                ["a@example.com", "b@example.com"],
+                client,
+                auto_rpm=True,
+                sleep=sleep,
+            )
+        )
+
+        sleep.assert_not_awaited()
+
+    def test_with_real_async_hibp_client_and_httpx_mock(self, httpx_mock: HTTPXMock) -> None:
+        base = "https://haveibeenpwned.com/api/v3"
+        httpx_mock.add_response(
+            url=f"{base}/breachedaccount/pwned%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(
+            url=f"{base}/breachedaccount/clean%40example.com",
+            status_code=404,
+        )
+        sleep = AsyncMock()
+
+        async def _run() -> list[AccountBatchItem]:
+            async with AsyncHIBPClient(api_key="testkey", user_agent="test") as client:
+                return await async_batch_check_accounts(
+                    ["pwned@example.com", "clean@example.com"],
+                    client,
+                    rpm=60,
+                    sleep=sleep,
+                )
+
+        results = asyncio.run(_run())
+
+        assert results == [
+            AccountBatchItem(account="pwned@example.com", breaches=["Adobe"], status="pwned"),
+            AccountBatchItem(account="clean@example.com", breaches=[], status="clean"),
+        ]
+        sleep.assert_awaited_once_with(1.0)

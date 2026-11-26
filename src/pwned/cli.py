@@ -28,6 +28,7 @@ from pwned.batch import (
     load_input_file,
     parse_input_lines,
 )
+from pwned.cache import ResponseCache
 from pwned.cli_commands import register_extra_commands
 from pwned.cli_helpers import (
     get_cache,
@@ -43,6 +44,7 @@ from pwned.config import load_settings
 from pwned.filtering import BREACH_SORT_KEYS, BreachSortKey, filter_breaches
 from pwned.formatting import OUTPUT_FORMATS, OutputFormat, should_use_color
 from pwned.models import Breach, DataClassDescription
+from pwned.notify import WEBHOOK_FORMATS, WebhookFormat, send_webhook_notification
 from pwned.offline import OfflinePasswordsClient
 from pwned.passwords import AsyncPwnedPasswordsClient, PwnedPasswordsClient
 
@@ -108,7 +110,7 @@ class _GlobalOptionGroup(click.Group):
     "output_format",
     type=click.Choice(OUTPUT_FORMATS),
     default=None,
-    help="Output format: text, json, jsonl, csv, table, or sarif.",
+    help="Output format: text, json, jsonl, csv, table, sarif, markdown, or html.",
 )
 @click.option(
     "--json",
@@ -178,6 +180,21 @@ def _apply_baseline_diff[T](
         return diff_fn(current, previous)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+def _maybe_notify(
+    webhook_url: str | None,
+    webhook_format: WebhookFormat,
+    data: Any,
+    *,
+    title: str,
+) -> None:
+    if webhook_url is None:
+        return
+    try:
+        send_webhook_notification(webhook_url, data, fmt=webhook_format, title=title)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
 
 
 # --- Breach commands ---
@@ -316,6 +333,8 @@ def _run_account_single(
     baseline: Path | None,
     save_baseline_path: Path | None,
     fail_if_pwned: bool,
+    notify_webhook: str | None = None,
+    webhook_format: WebhookFormat = "auto",
 ) -> None:
     s = ctx.obj["settings"]
     api_key = require_api_key(ctx)
@@ -350,6 +369,12 @@ def _run_account_single(
         _echo_status("Clean (not found in any breaches).", fg="green")
     else:
         render_output(ctx, data)
+    _maybe_notify(
+        notify_webhook,
+        webhook_format,
+        data,
+        title=f"pwned Account Alert: {account}",
+    )
     if fail_if_pwned and data:
         sys.exit(1)
 
@@ -416,6 +441,17 @@ def _run_account_single(
     is_flag=True,
     help="Exit with code 1 if any account is found in breaches.",
 )
+@click.option(
+    "--notify-webhook",
+    default=None,
+    help="HTTPS webhook URL (Slack, Discord, or generic) to notify on exposures.",
+)
+@click.option(
+    "--webhook-format",
+    type=click.Choice(WEBHOOK_FORMATS),
+    default="auto",
+    help="Webhook payload format: auto, slack, discord, or generic.",
+)
 @click.pass_context
 @handle_errors
 def account(
@@ -436,6 +472,8 @@ def account(
     save_baseline_path: Path | None,
     stats: bool,
     fail_if_pwned: bool,
+    notify_webhook: str | None,
+    webhook_format: WebhookFormat,
 ) -> None:
     """Get breaches for an account (email or username). Requires API key."""
     sources = sum([account is not None, input_file is not None, from_stdin])
@@ -459,6 +497,8 @@ def account(
             baseline=baseline,
             save_baseline_path=save_baseline_path,
             fail_if_pwned=fail_if_pwned,
+            notify_webhook=notify_webhook,
+            webhook_format=webhook_format,
         )
         return
 
@@ -502,6 +542,12 @@ def account(
             err=True,
         )
     render_output(ctx, results)
+    _maybe_notify(
+        notify_webhook,
+        webhook_format,
+        results,
+        title="pwned Batch Account Alert",
+    )
     if fail_if_pwned and any(r.status == "pwned" for r in results):
         sys.exit(1)
 
@@ -526,6 +572,17 @@ def account(
     is_flag=True,
     help="Exit with code 1 if any domain aliases are found in breaches.",
 )
+@click.option(
+    "--notify-webhook",
+    default=None,
+    help="HTTPS webhook URL (Slack, Discord, or generic) to notify on exposures.",
+)
+@click.option(
+    "--webhook-format",
+    type=click.Choice(WEBHOOK_FORMATS),
+    default="auto",
+    help="Webhook payload format: auto, slack, discord, or generic.",
+)
 @click.pass_context
 @handle_errors
 def domain_cmd(
@@ -534,6 +591,8 @@ def domain_cmd(
     baseline: Path | None,
     save_baseline_path: Path | None,
     fail_if_pwned: bool,
+    notify_webhook: str | None,
+    webhook_format: WebhookFormat,
 ) -> None:
     """Get breached email addresses for a domain. Requires API key."""
     s = ctx.obj["settings"]
@@ -549,6 +608,12 @@ def domain_cmd(
         save_baseline(save_baseline_path, data)
     data = _apply_baseline_diff(data, baseline, diff_domain_breaches)
     render_output(ctx, data)
+    _maybe_notify(
+        notify_webhook,
+        webhook_format,
+        data,
+        title=f"pwned Domain Alert: {domain}",
+    )
     if fail_if_pwned and data:
         sys.exit(1)
 
@@ -669,7 +734,7 @@ def _check_single_password(
     client_cm: OfflinePasswordsClient | PwnedPasswordsClient = (
         OfflinePasswordsClient(offline_db, ntlm=ntlm)
         if offline_db is not None
-        else PwnedPasswordsClient(user_agent=s.user_agent)
+        else PwnedPasswordsClient(user_agent=s.user_agent, cache=get_cache(ctx))
     )
     with client_cm as client:
         try:
@@ -701,8 +766,9 @@ async def _run_async_password_batch(
     hashed: bool,
     concurrency: int,
     on_progress: Callable[[int, int, PasswordBatchItem], None] | None,
+    cache: ResponseCache | None = None,
 ) -> list[PasswordBatchItem]:
-    async with AsyncPwnedPasswordsClient(user_agent=user_agent) as client:
+    async with AsyncPwnedPasswordsClient(user_agent=user_agent, cache=cache) as client:
         return await async_batch_check_passwords(
             passwords,
             client,
@@ -727,6 +793,7 @@ def _check_batch_passwords(
     offline_db: Path | None,
     concurrency: int,
     stats: bool,
+    cache: ResponseCache | None = None,
 ) -> None:
     s = ctx.obj["settings"]
     on_progress = _password_progress if _is_stderr_tty() else None
@@ -753,6 +820,7 @@ def _check_batch_passwords(
                 hashed=hashed,
                 concurrency=concurrency,
                 on_progress=on_progress,
+                cache=cache,
             )
         )
     if stats:
@@ -860,6 +928,7 @@ def password(
             offline_db=offline_db,
             concurrency=concurrency,
             stats=stats,
+            cache=get_cache(ctx),
         )
         return
 
@@ -879,6 +948,7 @@ def password(
                 offline_db=offline_db,
                 concurrency=concurrency,
                 stats=stats,
+                cache=get_cache(ctx),
             )
             return
         single_password = lines[0]

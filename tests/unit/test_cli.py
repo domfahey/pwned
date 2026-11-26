@@ -1993,3 +1993,324 @@ class TestSarifFormatEndToEnd:
         assert res_dom.exit_code == 0
         doc_d = json.loads(res_dom.output)
         assert doc_d["runs"][0]["results"][0]["ruleId"] == "HIBP003"
+
+
+class TestMarkdownHtmlAndHelp:
+    def test_global_format_help_mentions_markdown_and_html(self, cli_runner: CliRunner) -> None:
+        result = cli_runner.invoke(cli, ["--help"])
+        assert result.exit_code == 0
+        normalized = " ".join(result.output.split())
+        expected = "Output format: text, json, jsonl, csv, table, sarif, markdown, or html."
+        assert expected in normalized
+
+    def test_format_markdown_and_html_breaches(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            json=[{"Name": "Adobe", "Domain": "adobe.com"}],
+        )
+        res_md = cli_runner.invoke(cli, ["--format", "markdown", "breaches"])
+        assert res_md.exit_code == 0
+        assert "| Name |" in res_md.output
+        assert "Adobe" in res_md.output
+
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            json=[{"Name": "Adobe", "Domain": "adobe.com"}],
+        )
+        res_html = cli_runner.invoke(cli, ["--format", "html", "breaches"])
+        assert res_html.exit_code == 0
+        assert "<!DOCTYPE html>" in res_html.output
+        assert "<table>" in res_html.output
+        assert "Adobe" in res_html.output
+
+
+class TestPasswordCache:
+    def test_password_single_cache_hit_and_no_cache(
+        self,
+        httpx_mock: HTTPXMock,
+        cli_runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        prefix, suffix = _sha1_parts("password")
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{prefix}",
+            text=f"{suffix}:12345\n",
+        )
+
+        first = cli_runner.invoke(cli, ["password", "--cache", "password"])
+        assert first.exit_code == 0
+        assert "12,345" in first.output
+        assert len(httpx_mock.get_requests()) == 1
+
+        second = cli_runner.invoke(cli, ["--cache", "--json", "password", "password"])
+        assert second.exit_code == 0
+        assert json.loads(second.output) == {"count": 12345}
+        assert len(httpx_mock.get_requests()) == 1
+
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{prefix}",
+            text=f"{suffix}:99\n",
+        )
+        third = cli_runner.invoke(cli, ["password", "--no-cache", "password"])
+        assert third.exit_code == 0
+        assert "99" in third.output
+        assert len(httpx_mock.get_requests()) == 2
+
+    def test_password_batch_cache_hit_file_and_stdin(
+        self,
+        httpx_mock: HTTPXMock,
+        cli_runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        p1_prefix, p1_suffix = _sha1_parts("alpha")
+        p2_prefix, _ = _sha1_parts("beta")
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p1_prefix}",
+            text=f"{p1_suffix}:42\n",
+        )
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p2_prefix}",
+            text="",
+        )
+        pw_file = tmp_path / "passwords.txt"
+        pw_file.write_text("alpha\nbeta\n", encoding="utf-8")
+
+        first = cli_runner.invoke(cli, ["--cache", "--json", "password", "--file", str(pw_file)])
+        assert first.exit_code == 0
+        assert json.loads(first.output) == [
+            {"index": 1, "pwn_count": 42, "status": "pwned"},
+            {"index": 2, "pwn_count": 0, "status": "clean"},
+        ]
+        assert len(httpx_mock.get_requests()) == 2
+
+        second = cli_runner.invoke(
+            cli,
+            ["--cache", "--json", "password", "--stdin"],
+            input="alpha\nbeta\n",
+        )
+        assert second.exit_code == 0
+        assert json.loads(second.output) == [
+            {"index": 1, "pwn_count": 42, "status": "pwned"},
+            {"index": 2, "pwn_count": 0, "status": "clean"},
+        ]
+        assert len(httpx_mock.get_requests()) == 2
+
+
+class TestWebhookNotifications:
+    def test_account_single_notify_webhook_pwned_and_fail_if_pwned(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        webhook_url = "https://hooks.example.com/account"
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/test%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(method="POST", url=webhook_url, status_code=200)
+
+        res = cli_runner.invoke(
+            cli,
+            [
+                "--api-key",
+                TEST_KEY,
+                "account",
+                "test@example.com",
+                "--notify-webhook",
+                webhook_url,
+                "--fail-if-pwned",
+            ],
+        )
+        assert res.exit_code == 1
+        assert "Adobe" in res.output
+        requests = httpx_mock.get_requests()
+        assert len(requests) == 2
+        payload = json.loads(requests[1].content.decode("utf-8"))
+        assert payload["source"] == "pwned"
+        assert payload["title"] == "pwned Account Alert: test@example.com"
+
+    def test_account_single_notify_webhook_clean_no_http(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/clean%40example.com",
+            status_code=404,
+        )
+        res = cli_runner.invoke(
+            cli,
+            [
+                "--api-key",
+                TEST_KEY,
+                "account",
+                "clean@example.com",
+                "--fail-if-pwned",
+                "--notify-webhook",
+                "https://hooks.example.com/account",
+            ],
+        )
+        assert res.exit_code == 0
+        assert "Clean" in res.output
+        assert len(httpx_mock.get_requests()) == 1
+
+    def test_account_single_notify_webhook_invalid_url_exits_2(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/test%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        res_pwned = cli_runner.invoke(
+            cli,
+            [
+                "--api-key",
+                TEST_KEY,
+                "account",
+                "test@example.com",
+                "--notify-webhook",
+                "http://insecure.example.com/hook",
+            ],
+        )
+        assert res_pwned.exit_code == 2
+        assert "https" in res_pwned.output
+        assert len(httpx_mock.get_requests()) == 1
+
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/clean%40example.com",
+            status_code=404,
+        )
+        res_clean = cli_runner.invoke(
+            cli,
+            [
+                "--api-key",
+                TEST_KEY,
+                "account",
+                "clean@example.com",
+                "--fail-if-pwned",
+                "--notify-webhook",
+                "http://insecure.example.com/hook",
+            ],
+        )
+        assert res_clean.exit_code == 2
+        assert "https" in res_clean.output
+        assert len(httpx_mock.get_requests()) == 2
+
+    def test_account_batch_notify_webhook_pwned_and_error(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        accounts_file = tmp_path / "accounts.txt"
+        accounts_file.write_text("pwned@example.com\nclean@example.com\n", encoding="utf-8")
+        webhook_url = "https://hooks.example.com/batch"
+
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/pwned%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/clean%40example.com",
+            status_code=404,
+        )
+        httpx_mock.add_response(method="POST", url=webhook_url, status_code=200)
+
+        res = cli_runner.invoke(
+            cli,
+            [
+                "--api-key",
+                TEST_KEY,
+                "account",
+                "--file",
+                str(accounts_file),
+                "--rpm",
+                "1000",
+                "--notify-webhook",
+                webhook_url,
+            ],
+        )
+        assert res.exit_code == 0
+        requests = httpx_mock.get_requests()
+        assert len(requests) == 3
+        payload = json.loads(requests[2].content.decode("utf-8"))
+        assert payload["title"] == "pwned Batch Account Alert"
+
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/pwned%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/clean%40example.com",
+            status_code=404,
+        )
+        httpx_mock.add_response(method="POST", url=webhook_url, status_code=500)
+        res_err = cli_runner.invoke(
+            cli,
+            [
+                "--api-key",
+                TEST_KEY,
+                "account",
+                "--file",
+                str(accounts_file),
+                "--rpm",
+                "1000",
+                "--notify-webhook",
+                webhook_url,
+            ],
+        )
+        assert res_err.exit_code == 1
+        assert "Webhook notification failed" in res_err.output
+
+    def test_domain_notify_webhook_slack_and_clean_baseline_no_http(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        webhook_url = "https://hooks.example.com/slack"
+        httpx_mock.add_response(
+            url=f"{BASE}/breacheddomain/example.com",
+            json={"alice": ["Adobe"]},
+        )
+        httpx_mock.add_response(method="POST", url=webhook_url, status_code=200)
+
+        res_slack = cli_runner.invoke(
+            cli,
+            [
+                "--api-key",
+                TEST_KEY,
+                "domain",
+                "example.com",
+                "--notify-webhook",
+                webhook_url,
+                "--webhook-format",
+                "slack",
+            ],
+        )
+        assert res_slack.exit_code == 0
+        requests = httpx_mock.get_requests()
+        assert len(requests) == 2
+        payload = json.loads(requests[1].content.decode("utf-8"))
+        assert "blocks" in payload
+        assert payload["blocks"][0]["text"]["text"] == "pwned Domain Alert: example.com"
+
+        baseline_file = tmp_path / "domain_base.json"
+        baseline_file.write_text('{"alice": ["Adobe"]}', encoding="utf-8")
+        httpx_mock.add_response(
+            url=f"{BASE}/breacheddomain/example.com",
+            json={"alice": ["Adobe"]},
+        )
+        res_clean = cli_runner.invoke(
+            cli,
+            [
+                "--api-key",
+                TEST_KEY,
+                "--json",
+                "domain",
+                "example.com",
+                "--baseline",
+                str(baseline_file),
+                "--notify-webhook",
+                webhook_url,
+            ],
+        )
+        assert res_clean.exit_code == 0
+        assert json.loads(res_clean.output) == {}
+        assert len(httpx_mock.get_requests()) == 3

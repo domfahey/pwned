@@ -13,6 +13,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `includeUnverified=false` server-side filtering on `GET /breaches` via `get_breaches(include_unverified=False)` and `pwned breaches --no-include-unverified`.
 - Live integration test coverage for `breaches --no-include-unverified`, `opt-out-breach`, and `paste-sensitive-breach` test accounts, plus CC BY 4.0 HIBP data attribution in `README.md`.
 
+- **Enterprise & Active Directory Auditing (`v0.4.0`)**:
+  - `pwdump` / `secretsdump` / `NTDS` hash dump auditing (`pwned audit --source pwdump`) parsing NTLM hashes with `--check-reuse` support.
+  - Built-in resumable Pwned Passwords dump downloader (`pwned offline download <output>`) supporting `--ntlm`, `--concurrency`, `--resume`, and ETag caching.
+  - Bitwarden Argon2id encrypted JSON support (`kdfType=1`) using `cryptography`.
+
+- **Vault & Password Hygiene (`v0.4.0`)**:
+  - Expanded password manager and browser support: LastPass CSV, Dashlane CSV, Proton Pass CSV, and live Unix `pass` / `gopass` store auditing.
+  - Combined strength and risk scoring (`--check-strength`) utilizing heuristic rules or optional `zxcvbn` (`strength` extra).
+  - Opt-in `--cache` support for Pwned Passwords range prefix queries (`/range/{prefix}`).
+
+- **Monitoring, Reporting & Alerting (`v0.4.0`)**:
+  - Markdown (`--format markdown`) and standalone HTML (`--format html`) report generation.
+  - Declarative TOML exposure monitoring engine (`pwned monitor --config pwned.toml`).
+  - Webhook notifications (`--notify-webhook <url>`, `--webhook-format auto|slack|discord|generic`) on newly discovered exposures.
+  - Domain exposure risk summary (`pwned domain-report <domain>`).
+
+- **Ecosystem & Distribution (`v0.4.0`)**:
+  - Local privacy-first stdio Model Context Protocol server (`pwned mcp` / `pwned[mcp]`).
+  - Async account batch checks (`async_batch_check_accounts`) with jittered 429 backoff.
+  - Multi-architecture container images published to GitHub Container Registry (`ghcr.io/domfahey/pwned`).
+
 ### Fixed
 - Parsed JSON-string and `text/plain` HIBP error bodies (while still ignoring HTML/binary error pages) and surfaced endpoint-specific `401` and `404` details (such as `verifyMetaTag` diagnostics) in `UnauthorizedError`, `NotFoundError`, and CLI error output.
 
@@ -98,4 +119,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.3.0]: https://github.com/domfahey/pwned/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/domfahey/pwned/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/domfahey/pwned/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/domfahey/pwned/releases/tag/v0.1.0

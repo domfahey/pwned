@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+dist
+build
+tests
+Formula
+.clusterfuzzlite
+todos.md
+.env
+.env.*
+*.pyc
+__pycache__

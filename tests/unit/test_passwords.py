@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import Iterator
+from pathlib import Path
 
 import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
+from pwned.cache import ResponseCache
 from pwned.client import HIBPError
 from pwned.config import DEFAULT_USER_AGENT
 from pwned.passwords import (
@@ -713,3 +715,102 @@ class TestAsyncHashMethods:
             assert req.url.params["mode"] == "ntlm"
 
         asyncio.run(run())
+
+
+class TestPasswordsCache:
+    def test_sync_cache_hit_skips_http_and_uses_expected_key(
+        self, httpx_mock: HTTPXMock, tmp_path: Path
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/{PREFIX}",
+            text=RANGE_RESPONSE,
+        )
+        cache = ResponseCache(tmp_path)
+        with PwnedPasswordsClient(user_agent="test-agent", cache=cache) as c:
+            first = c.get_password_range(f"  {PREFIX.lower()} ")
+            second = c.get_password_range(PREFIX)
+            assert c.check_password("password") == 3861493
+            assert c.is_pwned("password") is True
+
+        assert first == second
+        assert len(httpx_mock.get_requests()) == 1
+        cached_bytes = cache.get(f"pwnedpasswords:/range/{PREFIX}?mode=sha1")
+        assert cached_bytes is not None
+        assert cached_bytes.decode("utf-8") == RANGE_RESPONSE
+
+    def test_sync_cache_separates_sha1_and_ntlm_modes(
+        self, httpx_mock: HTTPXMock, tmp_path: Path
+    ) -> None:
+        ntlm = _ntlm_hash("password")
+        ntlm_prefix = ntlm[:5]
+        ntlm_suffix = ntlm[5:]
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/{ntlm_prefix}",
+            text=f"{SUFFIX}:10\n",
+        )
+        httpx_mock.add_response(
+            url=httpx.URL(f"{BASE_URL}/range/{ntlm_prefix}", params={"mode": "ntlm"}),
+            text=f"{ntlm_suffix}:99\n",
+        )
+        cache = ResponseCache(tmp_path)
+        with PwnedPasswordsClient(user_agent="test-agent", cache=cache) as c:
+            assert c.get_password_range(ntlm_prefix, ntlm=False) == {SUFFIX: 10}
+            assert c.get_password_range(ntlm_prefix, ntlm=True) == {ntlm_suffix: 99}
+            assert c.get_password_range(ntlm_prefix, ntlm=False) == {SUFFIX: 10}
+            assert c.get_password_range(ntlm_prefix, ntlm=True) == {ntlm_suffix: 99}
+
+        assert len(httpx_mock.get_requests()) == 2
+        assert cache.get(f"pwnedpasswords:/range/{ntlm_prefix}?mode=sha1") is not None
+        assert cache.get(f"pwnedpasswords:/range/{ntlm_prefix}?mode=ntlm") is not None
+
+    def test_sync_disabled_cache_fetches_every_time(
+        self, httpx_mock: HTTPXMock, tmp_path: Path
+    ) -> None:
+        httpx_mock.add_response(url=f"{BASE_URL}/range/{PREFIX}", text=f"{SUFFIX}:1\n")
+        httpx_mock.add_response(url=f"{BASE_URL}/range/{PREFIX}", text=f"{SUFFIX}:2\n")
+        cache = ResponseCache(tmp_path, enabled=False)
+        with PwnedPasswordsClient(user_agent="test-agent", cache=cache) as c:
+            assert c.get_password_range(PREFIX) == {SUFFIX: 1}
+            assert c.get_password_range(PREFIX) == {SUFFIX: 2}
+        assert len(httpx_mock.get_requests()) == 2
+
+    def test_async_cache_hit_and_ntlm_isolation(
+        self, httpx_mock: HTTPXMock, tmp_path: Path
+    ) -> None:
+        ntlm = _ntlm_hash("password")
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/{PREFIX}",
+            text=f"{SUFFIX}:42\n",
+        )
+        httpx_mock.add_response(
+            url=httpx.URL(f"{BASE_URL}/range/{ntlm[:5]}", params={"mode": "ntlm"}),
+            text=f"{ntlm[5:]}:77\n",
+        )
+        cache = ResponseCache(tmp_path)
+
+        async def run() -> None:
+            async with AsyncPwnedPasswordsClient(user_agent="test-agent", cache=cache) as ac:
+                assert await ac.check_password("password") == 42
+                assert await ac.check_password("password") == 42
+                assert await ac.check_password("password", ntlm=True) == 77
+                assert await ac.check_password("password", ntlm=True) == 77
+
+        asyncio.run(run())
+        assert len(httpx_mock.get_requests()) == 2
+        assert cache.get(f"pwnedpasswords:/range/{PREFIX}?mode=sha1") is not None
+        assert cache.get(f"pwnedpasswords:/range/{ntlm[:5]}?mode=ntlm") is not None
+
+    def test_async_disabled_cache_fetches_every_time(
+        self, httpx_mock: HTTPXMock, tmp_path: Path
+    ) -> None:
+        httpx_mock.add_response(url=f"{BASE_URL}/range/{PREFIX}", text=f"{SUFFIX}:1\n")
+        httpx_mock.add_response(url=f"{BASE_URL}/range/{PREFIX}", text=f"{SUFFIX}:2\n")
+        cache = ResponseCache(tmp_path, enabled=False)
+
+        async def run() -> None:
+            async with AsyncPwnedPasswordsClient(user_agent="test-agent", cache=cache) as ac:
+                assert await ac.get_password_range(PREFIX) == {SUFFIX: 1}
+                assert await ac.get_password_range(PREFIX) == {SUFFIX: 2}
+
+        asyncio.run(run())
+        assert len(httpx_mock.get_requests()) == 2

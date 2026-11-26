@@ -139,3 +139,41 @@ def _md4(data: bytes) -> str:
         d0 = (d0 + d) & 0xFFFFFFFF
 
     return struct.pack("<4I", a0, b0, c0, d0).hex()
+
+
+def parse_pwdump_lines(lines: Iterable[str]) -> list[tuple[str, str, str]]:
+    """Parse impacket secretsdump / pwdump lines into (domain, username, nt_hash_upper) tuples."""
+    results: list[tuple[str, str, str]] = []
+    for raw in lines:
+        line = raw.rstrip("\r\n")
+        if not line:
+            continue
+        stripped = line.lstrip()
+        if stripped.startswith("#") or stripped.startswith("[*]"):
+            continue
+        parts = line.split(":")
+        if len(parts) < 4:
+            continue
+        account = parts[0].strip()
+        rid = parts[1].strip()
+        nt = parts[3].strip()
+
+        if not account or not rid.isdigit():
+            continue
+        if len(nt) != 32 or not all(c in "0123456789abcdefABCDEF" for c in nt):
+            continue
+
+        if "\\" in account:
+            if account.startswith("\\"):
+                continue
+            domain, _, username = account.partition("\\")
+        else:
+            domain, username = "", account
+
+        domain = domain.strip()
+        username = username.strip()
+        if not username:
+            continue
+
+        results.append((domain, username, nt.upper()))
+    return results

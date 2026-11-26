@@ -6,6 +6,7 @@ import httpx
 
 from pwned._parsers import _md4 as _md4
 from pwned._parsers import _parse_range_response as _parse_range_response
+from pwned.cache import ResponseCache
 from pwned.client import REQUEST_TIMEOUT, HIBPError
 from pwned.config import DEFAULT_USER_AGENT
 
@@ -53,6 +54,11 @@ def _build_range_request_args(*, ntlm: bool, pad: bool) -> tuple[dict[str, str],
     return headers, params
 
 
+def _range_cache_key(normalized_prefix: str, *, ntlm: bool) -> str:
+    mode = "ntlm" if ntlm else "sha1"
+    return f"pwnedpasswords:/range/{normalized_prefix}?mode={mode}"
+
+
 class PwnedPasswordsClient:
     """Synchronous client for the HIBP Pwned Passwords k-anonymity range API."""
 
@@ -63,7 +69,9 @@ class PwnedPasswordsClient:
         timeout: float = REQUEST_TIMEOUT,
         proxy: str | None = None,
         client: httpx.Client | None = None,
+        cache: ResponseCache | None = None,
     ) -> None:
+        self._cache = cache
         self._owns_client = client is None
         if client is not None:
             self._client = client
@@ -94,6 +102,11 @@ class PwnedPasswordsClient:
     ) -> dict[str, int]:
         """Fetch all compromised hash suffixes and counts matching a 5-char hex prefix."""
         normalized_prefix = _validate_prefix(prefix)
+        cache_key = _range_cache_key(normalized_prefix, ntlm=ntlm)
+        if self._cache is not None:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                return _parse_range_response(cached.decode("utf-8"))
         headers, params = _build_range_request_args(ntlm=ntlm, pad=pad)
         try:
             resp = self._client.get(
@@ -106,6 +119,8 @@ class PwnedPasswordsClient:
             raise HIBPError(f"HTTP {exc.response.status_code}") from exc
         except httpx.RequestError as exc:
             raise HIBPError(f"Request failed: {exc}") from exc
+        if self._cache is not None:
+            self._cache.set(cache_key, resp.content)
         return _parse_range_response(resp.text)
 
     def check_hash(
@@ -165,7 +180,9 @@ class AsyncPwnedPasswordsClient:
         timeout: float = REQUEST_TIMEOUT,
         proxy: str | None = None,
         client: httpx.AsyncClient | None = None,
+        cache: ResponseCache | None = None,
     ) -> None:
+        self._cache = cache
         self._owns_client = client is None
         if client is not None:
             self._client = client
@@ -196,6 +213,11 @@ class AsyncPwnedPasswordsClient:
     ) -> dict[str, int]:
         """Fetch all compromised hash suffixes and counts matching a 5-char hex prefix."""
         normalized_prefix = _validate_prefix(prefix)
+        cache_key = _range_cache_key(normalized_prefix, ntlm=ntlm)
+        if self._cache is not None:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                return _parse_range_response(cached.decode("utf-8"))
         headers, params = _build_range_request_args(ntlm=ntlm, pad=pad)
         try:
             resp = await self._client.get(
@@ -208,6 +230,8 @@ class AsyncPwnedPasswordsClient:
             raise HIBPError(f"HTTP {exc.response.status_code}") from exc
         except httpx.RequestError as exc:
             raise HIBPError(f"Request failed: {exc}") from exc
+        if self._cache is not None:
+            self._cache.set(cache_key, resp.content)
         return _parse_range_response(resp.text)
 
     async def check_hash(

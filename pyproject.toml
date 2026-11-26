@@ -32,8 +32,9 @@ dependencies = [
 [project.optional-dependencies]
 keepass = ["pykeepass>=4.0"]
 keyring = ["keyring>=25.0"]
-crypto = ["cryptography>=42.0"]
-all = ["pykeepass>=4.0", "keyring>=25.0", "cryptography>=42.0"]
+crypto = ["cryptography>=44.0"]
+strength = ["zxcvbn>=4.4"]
+all = ["pykeepass>=4.0", "keyring>=25.0", "cryptography>=44.0", "zxcvbn>=4.4"]
 
 [project.urls]
 Homepage = "https://github.com/domfahey/pwned"
@@ -55,12 +56,14 @@ packages = ["src/pwned"]
 exclude = [
     "/.claude",
     "/.clusterfuzzlite",
+    "/.dockerignore",
     "/.env.sample",
     "/.github",
     "/.pre-commit-hooks.yaml",
     "/.python-version",
     "/AGENTS.md",
     "/CLAUDE.md",
+    "/Dockerfile",
     "/Formula",
     "/Makefile",
     "/action.yml",

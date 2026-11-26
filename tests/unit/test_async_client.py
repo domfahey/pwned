@@ -713,3 +713,36 @@ class TestAsyncSearchAccount:
             assert result.stealer_logs == ["netflix.com"]
 
         asyncio.run(_run())
+
+
+class TestAsyncRetryJitter:
+    @pytest.mark.parametrize("bad_jitter", [-0.01, 1.01, float("nan"), float("inf")])
+    def test_invalid_retry_jitter_raises_value_error(self, bad_jitter: float) -> None:
+        with pytest.raises(ValueError, match="retry_jitter must be between 0.0 and 1.0"):
+            AsyncHIBPClient(retry_jitter=bad_jitter)
+
+    @pytest.mark.parametrize("valid_jitter", [0.0, 0.5, 1.0])
+    def test_valid_retry_jitter_accepted(self, valid_jitter: float) -> None:
+        client = AsyncHIBPClient(retry_jitter=valid_jitter)
+        assert client._retry_jitter == valid_jitter
+
+    def test_429_uses_configured_retry_jitter(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=429,
+            headers={"retry-after": "4"},
+        )
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[])
+
+        async def _run() -> None:
+            with (
+                patch("pwned.client.secrets.randbelow", return_value=500),
+                patch("pwned.async_client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            ):
+                async with AsyncHIBPClient(
+                    api_key=TEST_KEY, user_agent="test", retry_jitter=0.5
+                ) as client:
+                    assert await client.get_breaches() == []
+            mock_sleep.assert_awaited_once_with(5.0)
+
+        asyncio.run(_run())

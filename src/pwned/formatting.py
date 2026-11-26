@@ -1,17 +1,28 @@
 from __future__ import annotations
 
 import csv
+import html
 import io
 import json
 import os
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel
 
 from pwned._parsers import strip_html as strip_html
 
-OutputFormat = Literal["text", "json", "jsonl", "csv", "table", "sarif"]
-OUTPUT_FORMATS: tuple[OutputFormat, ...] = ("text", "json", "jsonl", "csv", "table", "sarif")
+OutputFormat = Literal["text", "json", "jsonl", "csv", "table", "sarif", "markdown", "html"]
+OUTPUT_FORMATS: tuple[OutputFormat, ...] = (
+    "text",
+    "json",
+    "jsonl",
+    "csv",
+    "table",
+    "sarif",
+    "markdown",
+    "html",
+)
 
 _TABLE_MAX_CELL = 60
 _SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
@@ -348,6 +359,333 @@ def _format_sarif(serialized: Any) -> str:
     return json.dumps(doc, indent=2)
 
 
+@dataclass(frozen=True)
+class _Heading:
+    level: int
+    text: str
+
+
+@dataclass(frozen=True)
+class _Table:
+    headers: list[str]
+    rows: list[list[str]]
+
+
+@dataclass(frozen=True)
+class _BulletList:
+    items: list[str]
+
+
+@dataclass(frozen=True)
+class _Paragraph:
+    text: str
+
+
+_Block = _Heading | _Table | _BulletList | _Paragraph
+
+_DOMAIN_METRICS: tuple[tuple[str, str], ...] = (
+    ("domain", "Domain"),
+    ("total_exposed_aliases", "Total Exposed Aliases"),
+    ("total_exposures", "Total Exposures"),
+    ("unique_breaches", "Unique Breaches"),
+    ("most_recent_breach_date", "Most Recent Breach Date"),
+    ("sensitive_breach_count", "Sensitive Breach Count"),
+    ("stealer_log_aliases", "Stealer Log Aliases"),
+)
+
+_HTML_CSS = """\
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    line-height: 1.5;
+    margin: 0;
+    padding: 2rem 1rem;
+    background: #ffffff;
+    color: #1f2328;
+  }
+  main { max-width: 64rem; margin: 0 auto; }
+  h1, h2 { margin-top: 1.5rem; margin-bottom: 0.75rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td {
+    border: 1px solid #d0d7de;
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: #f6f8fa; font-weight: 600; }
+  footer {
+    max-width: 64rem;
+    margin: 2rem auto 0;
+    padding-top: 1rem;
+    border-top: 1px solid #d0d7de;
+    font-size: 0.875rem;
+    color: #59636e;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #0d1117; color: #e6edf3; }
+    th, td { border-color: #30363d; }
+    th { background: #161b22; }
+    footer { border-top-color: #30363d; color: #8b949e; }
+    a { color: #58a6ff; }
+  }"""
+
+
+def _dict_list_table(items: list[dict[str, Any]]) -> _Table:
+    headers = _collect_keys(items)
+    rows = [[_format_cell(k, row.get(k)) for k in headers] for row in items]
+    return _Table(headers=headers, rows=rows)
+
+
+def _audit_blocks(serialized: dict[str, Any]) -> list[_Block]:
+    summary_rows: list[list[str]] = [["Total Entries", str(serialized["total_entries"])]]
+    for key, label in (
+        ("unique_passwords", "Unique Passwords"),
+        ("compromised_entries", "Compromised Entries"),
+    ):
+        if key in serialized:
+            summary_rows.append([label, str(serialized[key])])
+    reused_groups = serialized.get("reused_groups")
+    if isinstance(reused_groups, list):
+        summary_rows.append(["Reused Password Groups", str(len(reused_groups))])
+    strength_findings = serialized.get("strength_findings")
+    if isinstance(strength_findings, list):
+        summary_rows.append(["Weak Passwords", str(len(strength_findings))])
+
+    blocks: list[_Block] = [
+        _Heading(2, "Vault Audit Summary"),
+        _Table(["Metric", "Value"], summary_rows),
+    ]
+    findings = serialized.get("findings")
+    if isinstance(findings, list) and findings:
+        blocks.append(_Heading(3, "Compromised Credentials"))
+        blocks.append(
+            _Table(
+                ["Name", "Username", "Pwn Count"],
+                [
+                    [
+                        str(f.get("name", "")),
+                        str(f.get("username", "")),
+                        str(f.get("pwn_count", 0)),
+                    ]
+                    for f in findings
+                ],
+            )
+        )
+    if isinstance(reused_groups, list) and reused_groups:
+        blocks.append(_Heading(3, "Reused Passwords"))
+        blocks.append(
+            _Table(
+                ["Entries", "Count", "Pwn Count"],
+                [
+                    [
+                        _format_cell("entries", g.get("entries", [])),
+                        str(g.get("count", 0)),
+                        str(g.get("pwn_count", 0)),
+                    ]
+                    for g in reused_groups
+                ],
+            )
+        )
+    if isinstance(strength_findings, list) and strength_findings:
+        blocks.append(_Heading(3, "Weak Passwords"))
+        blocks.append(_dict_list_table(strength_findings))
+    return blocks
+
+
+def _domain_report_blocks(serialized: dict[str, Any]) -> list[_Block]:
+    overview_rows = [
+        [label, _format_cell(key, serialized[key], none_str="N/A")]
+        for key, label in _DOMAIN_METRICS
+        if key in serialized
+    ]
+    blocks: list[_Block] = [
+        _Heading(2, f"Domain Exposure Report: {serialized['domain']}"),
+        _Table(["Metric", "Value"], overview_rows),
+    ]
+    top_breaches = serialized.get("top_breaches")
+    if isinstance(top_breaches, list) and top_breaches:
+        blocks.append(_Heading(3, "Top Breaches"))
+        blocks.append(_dict_list_table(top_breaches))
+    data_classes = serialized.get("data_classes")
+    if isinstance(data_classes, list) and data_classes:
+        blocks.append(_Heading(3, "Compromised Data Classes"))
+        blocks.append(_dict_list_table(data_classes))
+    return blocks
+
+
+def _search_result_blocks(serialized: dict[str, Any]) -> list[_Block]:
+    blocks: list[_Block] = [_Heading(2, "Account Search Results")]
+    breaches = serialized.get("breaches")
+    blocks.append(_Heading(3, "Breaches"))
+    if isinstance(breaches, list) and breaches:
+        blocks.append(_dict_list_table(breaches))
+    else:
+        blocks.append(_Paragraph("No breaches found."))
+
+    pastes = serialized.get("pastes")
+    blocks.append(_Heading(3, "Pastes"))
+    if isinstance(pastes, list) and pastes:
+        blocks.append(_dict_list_table(pastes))
+    else:
+        blocks.append(_Paragraph("No pastes found."))
+
+    stealer_logs = serialized.get("stealer_logs")
+    if isinstance(stealer_logs, list):
+        blocks.append(_Heading(3, "Stealer Logs"))
+        if stealer_logs:
+            blocks.append(_BulletList([str(item) for item in stealer_logs]))
+        else:
+            blocks.append(_Paragraph("No stealer logs found."))
+    return blocks
+
+
+def _monitor_section_title(key: str) -> str:
+    if key in ("accounts", "account_results"):
+        return "Accounts"
+    if key in ("domains", "domain_results"):
+        return "Domains"
+    return key.replace("_", " ").title()
+
+
+def _monitor_report_blocks(serialized: dict[str, Any]) -> list[_Block]:
+    blocks: list[_Block] = [_Heading(2, "Monitor Report")]
+    summary_rows = [
+        [str(k), _format_cell(str(k), v, none_str="N/A")]
+        for k, v in serialized.items()
+        if not isinstance(v, (list, dict))
+    ]
+    if summary_rows:
+        blocks.append(_Table(["Metric", "Value"], summary_rows))
+
+    for key, value in serialized.items():
+        if not isinstance(value, list):
+            continue
+        title = _monitor_section_title(str(key))
+        blocks.append(_Heading(3, title))
+        if not value:
+            blocks.append(_Paragraph(f"No {title.lower()} found."))
+        elif all(isinstance(item, dict) for item in value):
+            blocks.append(_dict_list_table(value))
+        else:
+            blocks.append(_BulletList([_format_cell("value", item) for item in value]))
+    return blocks
+
+
+def _build_blocks(serialized: Any) -> list[_Block]:
+    if isinstance(serialized, (list, dict)) and not serialized:
+        return [_Paragraph("No results found.")]
+    if isinstance(serialized, dict):
+        if "total_entries" in serialized and "findings" in serialized:
+            return _audit_blocks(serialized)
+        if "domain" in serialized and "top_breaches" in serialized and "data_classes" in serialized:
+            return _domain_report_blocks(serialized)
+        if "breaches" in serialized and "pastes" in serialized:
+            return _search_result_blocks(serialized)
+        if "accounts_checked" in serialized and "domains_checked" in serialized:
+            return _monitor_report_blocks(serialized)
+        if _is_str_list_mapping(serialized):
+            return [
+                _Table(
+                    ["Key", "Values"],
+                    [[str(k), ", ".join(v)] for k, v in serialized.items()],
+                )
+            ]
+        return [
+            _Table(
+                ["Field", "Value"],
+                [[str(k), _format_cell(str(k), v)] for k, v in serialized.items()],
+            )
+        ]
+    if isinstance(serialized, list):
+        if all(isinstance(item, dict) for item in serialized):
+            return [_dict_list_table(serialized)]
+        return [_BulletList([_format_cell("value", item) for item in serialized])]
+    return [_Paragraph(str(serialized))]
+
+
+def _md_escape(text: str) -> str:
+    """Escape pipe characters and normalize linebreaks for GitHub-Flavored Markdown."""
+    return _normalize_linebreaks(text).replace("|", "\\|")
+
+
+def _render_md_table(headers: list[str], rows: list[list[str]]) -> str:
+    header_line = "| " + " | ".join(_md_escape(h) for h in headers) + " |"
+    sep_line = "| " + " | ".join("---" for _ in headers) + " |"
+    data_lines = ["| " + " | ".join(_md_escape(cell) for cell in row) + " |" for row in rows]
+    return "\n".join([header_line, sep_line, *data_lines])
+
+
+def _format_markdown(serialized: Any) -> str:
+    parts: list[str] = []
+    for block in _build_blocks(serialized):
+        if isinstance(block, _Heading):
+            prefix = "#" * block.level
+            parts.append(f"{prefix} {_md_escape(block.text)}")
+        elif isinstance(block, _Table):
+            parts.append(_render_md_table(block.headers, block.rows))
+        elif isinstance(block, _BulletList):
+            parts.append("\n".join(f"- {_md_escape(item)}" for item in block.items))
+        else:
+            parts.append(_md_escape(block.text))
+    return "\n\n".join(parts)
+
+
+def _html_escape(text: str) -> str:
+    return html.escape(text, quote=True)
+
+
+def _render_html_table(headers: list[str], rows: list[list[str]]) -> str:
+    head = "".join(f"<th>{_html_escape(h)}</th>" for h in headers)
+    body_rows = [
+        "<tr>" + "".join(f"<td>{_html_escape(cell)}</td>" for cell in row) + "</tr>" for row in rows
+    ]
+    return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
+
+
+def _format_html(serialized: Any) -> str:
+    title = "pwned Report"
+    parts: list[str] = []
+    for block in _build_blocks(serialized):
+        if isinstance(block, _Heading):
+            if block.level == 2:
+                title = block.text
+                tag = "h1"
+            else:
+                tag = "h2"
+            parts.append(f"<{tag}>{_html_escape(block.text)}</{tag}>")
+        elif isinstance(block, _Table):
+            parts.append(_render_html_table(block.headers, block.rows))
+        elif isinstance(block, _BulletList):
+            items_html = "".join(f"<li>{_html_escape(item)}</li>" for item in block.items)
+            parts.append(f"<ul>{items_html}</ul>")
+        else:
+            parts.append(f"<p>{_html_escape(block.text)}</p>")
+
+    body = "\n".join(parts)
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{_html_escape(title)}</title>\n"
+        "<style>\n"
+        f"{_HTML_CSS}\n"
+        "</style>\n"
+        "</head>\n"
+        "<body>\n"
+        "<main>\n"
+        f"{body}\n"
+        "</main>\n"
+        "<footer>\n"
+        'Data sourced from <a href="https://haveibeenpwned.com/">Have I Been Pwned</a> '
+        "(CC BY 4.0).\n"
+        "</footer>\n"
+        "</body>\n"
+        "</html>"
+    )
+
+
 def format_output(data: Any, *, fmt: OutputFormat = "text") -> str:
     """Format API response data according to the requested output format."""
     serialized = serialize(data)
@@ -363,6 +701,10 @@ def format_output(data: Any, *, fmt: OutputFormat = "text") -> str:
         return _format_table(serialized)
     if fmt == "sarif":
         return _format_sarif(serialized)
+    if fmt == "markdown":
+        return _format_markdown(serialized)
+    if fmt == "html":
+        return _format_html(serialized)
     raise ValueError(f"Unsupported output format: {fmt!r}")
 
 

@@ -26,14 +26,15 @@ uvx --from git+https://github.com/domfahey/pwned.git pwned password
 uv tool install git+https://github.com/domfahey/pwned.git
 ```
 
-With optional extras (KeePass vault support, OS Keychain credential storage, or Bitwarden encrypted JSON decryption):
+With optional extras (KeePass vault support, OS Keychain credential storage, Bitwarden encrypted JSON / Argon2id decryption, or optional `zxcvbn` password strength boost):
 ```bash
 uv tool install "pwned[all] @ git+https://github.com/domfahey/pwned.git"
 ```
 Available optional extras:
 - `keepass` (`pykeepass`)
 - `keyring` (`keyring` for OS Keychain storage)
-- `crypto` (`cryptography` for encrypted Bitwarden JSON dumps)
+- `crypto` (`cryptography>=44.0` for Bitwarden PBKDF2 & Argon2id encrypted JSON)
+- `strength` (`zxcvbn` optional password strength boost)
 - `all` (installs all optional dependencies)
 
 ### Development setup
@@ -63,8 +64,10 @@ Configuration is resolved in the following order (highest precedence first):
 ## CLI Usage (by HIBP Plan Tier)
 
 ### Free / No API key
-- `password` — Check password exposure (supports `--stdin`, `--file`, `--hashed`, `--offline-db`, `--concurrency`, `--stats`, `--ntlm`, `--pad`, `--threshold`, `--fail-if-pwned`)
-- `audit` — Audit local password manager or browser exports (Bitwarden JSON/Encrypted-JSON/CSV, 1Password CSV/1PUX, Chrome/Firefox/Apple CSV, generic CSV, KeePass via `--source keepass`, `--check-reuse`, `--concurrency`, `--offline-db`, `--fail-if-pwned`)
+- `password` — Check password exposure (supports `--stdin`, `--file`, `--hashed`, `--offline-db`, `--concurrency`, `--stats`, `--ntlm`, `--pad`, `--threshold`, `--cache`, `--fail-if-pwned`)
+- `audit` — Audit local password manager, browser, or Active Directory exports (Bitwarden JSON/Encrypted-JSON/CSV, 1Password CSV/1PUX, LastPass CSV, Dashlane CSV, Proton Pass CSV, Chrome/Firefox/Apple CSV, generic CSV, KeePass `.kdbx`, Active Directory `pwdump`/`secretsdump`, Unix `pass`/`gopass`, `--check-reuse`, `--check-strength`, `--cache`, `--notify-webhook`, `--concurrency`, `--offline-db`, `--fail-if-pwned`)
+- `offline download <output>` — Built-in resumable offline Pwned Passwords dump downloader (supports `--ntlm`, `--concurrency`, `--resume`, `--etag-cache`)
+- `mcp` — Local privacy-first stdio Model Context Protocol server (`--offline-db`, `--ntlm`, `--cache`)
 - `breach` — Get details for a specific breach
 - `breaches` — List all known breaches (supports `--domain`, `--spam-list`, `--no-spam-list`, `--no-include-unverified`, `--since`, `--data-class`, `--verified-only`, `--exclude-retired`, `--sort pwn-count|date|name`)
 - `latest-breach` — Get the most recently added breach
@@ -74,11 +77,13 @@ Configuration is resolved in the following order (highest precedence first):
 - `completion` — Generate shell tab-completion scripts (`completion bash|zsh|fish`)
 
 ### Core / Pro / High RPM
-- `account` — Check email or username breaches (supports `--file`, `--stdin`, `--rpm`, `--fail-if-pwned`, `--no-truncate`, `--domain`, `--no-include-unverified`, `--baseline`, `--save-baseline`, `--stats`)
-- `search` — Composite search for breaches, pastes, and stealer logs (`--include-stealer-logs`, `--baseline`, `--save-baseline`)
+- `account` — Check email or username breaches (supports `--file`, `--stdin`, `--rpm`, `--fail-if-pwned`, `--no-truncate`, `--domain`, `--no-include-unverified`, `--baseline`, `--save-baseline`, `--notify-webhook`, `--webhook-format`, `--stats`)
+- `search` — Composite search for breaches, pastes, and stealer logs (`--include-stealer-logs`, `--baseline`, `--save-baseline`, `--notify-webhook`, `--webhook-format`)
 - `pastes` — Get pastes for an email address
 - `subscription` — View HIBP subscription status and rate limits
-- `domain` — Get breached email addresses for a domain (supports `--baseline`, `--save-baseline`, `--fail-if-pwned`)
+- `domain` — Get breached email addresses for a domain (supports `--baseline`, `--save-baseline`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned`)
+- `domain-report <domain>` — Comprehensive domain exposure risk summary cross-referencing breach counts, stealer logs, and data classes (`--include-stealer-logs`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned`)
+- `monitor` — Declarative TOML exposure monitoring (`--config pwned.toml`, `--save-baselines`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned`)
 - `subscribed-domains` / `subscribed-domains list` — List subscribed domains
 
 ### Pro / High RPM
@@ -106,15 +111,54 @@ For convenience, ergonomic short aliases are available:
 |---|---|
 | `--api-key TEXT` | HIBP API key override |
 | `--user-agent TEXT` | Custom User-Agent string override (default `pwned-cli`) |
-| `--format TEXT` | Output format: `text`, `json`, `jsonl`, `csv`, `table`, or `sarif` |
+| `--format TEXT` | Output format: `text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, or `html` |
 | `--json` | Shorthand for `--format json` |
-| `--cache / --no-cache` | Cache public endpoint responses locally |
+| `--cache / --no-cache` | Cache public endpoint and range responses locally |
 | `--version` | Show CLI version and exit |
 
 Global flags can appear before or after subcommands:
 ```bash
 pwned --json --cache breach Adobe
-pwned breach Adobe --format table
+pwned breach Adobe --format html > report.html
+```
+
+## Declarative Monitoring (`pwned.toml`)
+
+Automate continuous exposure checks across accounts and domains using a declarative TOML configuration file:
+
+```toml
+[monitor]
+baseline_dir = ".pwned-baselines"
+cache = true
+format = "markdown"
+fail_if_pwned = true
+
+[notify]
+webhook_url = "${PWNED_WEBHOOK_URL}"
+format = "auto"
+
+[[accounts]]
+email = "security@example.com"
+include_stealer_logs = true
+include_unverified = false
+
+[[domains]]
+domain = "example.com"
+include_stealer_logs = true
+```
+
+Run monitoring with:
+```bash
+pwned monitor --config pwned.toml --save-baselines
+```
+
+## Container Usage
+
+For air-gapped environments, CI pipelines, or non-Python systems, run `pwned` via Docker or Podman:
+
+```bash
+docker run --rm ghcr.io/domfahey/pwned password --stdin < passwords.txt
+docker run --rm -v $(pwd):/data ghcr.io/domfahey/pwned audit --source bitwarden-json /data/vault.json --format markdown
 ```
 
 ## Python Library Usage
@@ -130,7 +174,7 @@ with PwnedPasswordsClient() as pw:
     is_compromised = pw.is_pwned("hunter2", threshold=1)
     suffix_map = pw.get_password_range("5BAA6")
 
-# HIBP API requests (with optional public-endpoint caching)
+# HIBP API requests (with optional public-endpoint & range caching)
 with HIBPClient(api_key="your_api_key", user_agent="my-app", cache=ResponseCache()) as client:
     breaches = client.get_account_breaches("user@example.com", truncate=False)
     search_res = client.search_account("user@example.com", include_stealer_logs=True)
@@ -194,21 +238,22 @@ Add `pwned` to your `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/domfahey/pwned
-    rev: v0.3.0
+    rev: v0.4.0
     hooks:
       - id: pwned-audit
 ```
 
-## Official HIBP MCP Server
+## Model Context Protocol (MCP) Servers
 
-If you want to query Have I Been Pwned directly from an MCP-capable AI client, HIBP also provides an official remote [Model Context Protocol (MCP) server](https://haveibeenpwned.com/mcp):
+`pwned` supports both HIBP's official remote MCP server and a local privacy-first stdio MCP server for AI clients:
 
+### 1. HIBP Official Remote MCP Server
+To query Have I Been Pwned directly via AI chat clients:
 - **Endpoint & docs:** `https://haveibeenpwned.com/mcp`
-- **Public tools (no auth):** breach metadata, latest breach, data classes, and Pwned Passwords (*k*-anonymity range lookup)
-- **Authenticated tools (HIBP subscription required):** account breaches, pastes, verified domain lookups/management, and stealer logs (via OAuth with `hibp.mcp` scope or an `hibp-api-key` header)
+- **Public tools (no auth):** breach metadata, latest breach, data classes, and Pwned Passwords range lookup
+- **Authenticated tools (subscription required):** account breaches, pastes, verified domain management, and stealer logs
 
 Example HTTP MCP client configuration:
-
 ```json
 {
   "HIBP": {
@@ -221,7 +266,19 @@ Example HTTP MCP client configuration:
 }
 ```
 
-> **Note:** For checking passwords, prefer the local CLI (`pwned password` or `pwned password --stdin`) so the plaintext password is hashed locally and never enters an AI chat prompt.
+### 2. Local Privacy-First Stdio MCP Server (`pwned mcp`)
+For offline or local workflows where plaintext passwords or internal vaults must never cross an AI chat prompt, `pwned` includes a built-in, zero-dependency local stdio Model Context Protocol server (`check_password_hash`, `audit_vault`, `diff_baseline`, `lookup_breach`, `check_account_range`):
+
+```json
+{
+  "mcpServers": {
+    "pwned-local": {
+      "command": "pwned",
+      "args": ["mcp", "--offline-db", "/path/to/pwned-passwords-sha1.txt"]
+    }
+  }
+}
+```
 
 ## Development
 
@@ -247,18 +304,24 @@ src/pwned/
 ├── audit.py            # Password manager vault auditing & reused password detection
 ├── baseline.py         # Exposure baseline snapshotting and diffing
 ├── batch.py            # Batch processing & rate limiting for accounts/passwords
-├── cache.py            # File-based TTL response caching for public endpoints
+├── cache.py            # File-based TTL response caching for public endpoints & ranges
 ├── cli.py              # Click command groups and global option parser
 ├── cli_commands.py     # Additional command modules (auth, search, audit, cache, completion, etc.)
 ├── cli_helpers.py      # CLI error handling, output rendering, and validation helpers
 ├── client.py           # Sync HIBP API client (haveibeenpwned.com)
 ├── config.py           # pydantic-settings configuration & XDG / keyring credential storage
 ├── filtering.py        # Breach filtering and sorting helpers
-├── formatting.py       # Output formatters (text, json, jsonl, csv, table, sarif)
+├── formatting.py       # Output formatters (text, json, jsonl, csv, table, sarif, markdown, html)
+├── mcp_server.py       # Local privacy-first stdio Model Context Protocol server
 ├── models.py           # Pydantic v2 models for API responses
+├── monitor.py          # Declarative TOML exposure monitoring engine
+├── notify.py           # Webhook notification client (Slack, Discord, generic JSON)
 ├── offline.py          # Offline sorted hash file lookups (OfflinePasswordsClient)
+├── offline_download.py # Resumable official Pwned Passwords dump downloader
 ├── passwords.py        # Sync & async Pwned Passwords client (api.pwnedpasswords.com)
 ├── py.typed            # PEP 561 type marker
+├── reporting.py        # Domain exposure risk summary reporting
+├── strength.py         # Password strength heuristics & zxcvbn integration
 └── validators.py       # Framework password validation helpers
 
 tests/

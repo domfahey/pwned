@@ -20,6 +20,7 @@ from pwned.client import (
     NotFoundError,
     RateLimitError,
     UnauthorizedError,
+    _compute_retry_delay,
     _parse_raw_retry_after,
     _parse_retry_after,
 )
@@ -1075,3 +1076,49 @@ class TestPublicResponseCache:
             assert [b.name for b in c.get_breaches(include_unverified=False)] == ["VerifiedOnly"]
             assert [b.name for b in c.get_breaches(include_unverified=False)] == ["VerifiedOnly"]
         assert len(httpx_mock.get_requests()) == 2
+
+
+class TestRetryJitter:
+    @pytest.mark.parametrize("bad_jitter", [-0.1, -1.0, 1.01, 2.0, float("nan"), float("inf")])
+    def test_invalid_retry_jitter_raises_value_error(self, bad_jitter: float) -> None:
+        with pytest.raises(ValueError, match="retry_jitter must be between 0.0 and 1.0"):
+            HIBPClient(retry_jitter=bad_jitter)
+
+    @pytest.mark.parametrize("valid_jitter", [0.0, 0.25, 1.0])
+    def test_valid_retry_jitter_accepted(self, valid_jitter: float) -> None:
+        with HIBPClient(retry_jitter=valid_jitter) as c:
+            assert c._retry_jitter == valid_jitter
+
+    def test_compute_retry_delay_without_jitter_preserves_int_base(self) -> None:
+        delay = _compute_retry_delay(httpx.Response(429, headers={"retry-after": "4"}), jitter=0.0)
+        assert delay == 4
+        assert isinstance(delay, int)
+
+    def test_compute_retry_delay_with_positive_base_and_jitter(self) -> None:
+        resp = httpx.Response(429, headers={"retry-after": "10"})
+        with patch("pwned.client.secrets.randbelow", return_value=500) as mock_rand:
+            delay = _compute_retry_delay(resp, jitter=0.5)
+        mock_rand.assert_called_once_with(1000)
+        assert delay == pytest.approx(12.5)
+
+    def test_compute_retry_delay_with_zero_base_and_jitter(self) -> None:
+        resp = httpx.Response(429, headers={"retry-after": "0"})
+        with patch("pwned.client.secrets.randbelow", return_value=250) as mock_rand:
+            delay = _compute_retry_delay(resp, jitter=0.8)
+        mock_rand.assert_called_once_with(1000)
+        assert delay == pytest.approx(0.2)
+
+    def test_429_uses_configured_retry_jitter(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=429,
+            headers={"retry-after": "4"},
+        )
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[])
+        with (
+            patch("pwned.client.secrets.randbelow", return_value=500),
+            patch("pwned.client.time.sleep") as mock_sleep,
+            HIBPClient(user_agent="test", retry_jitter=0.5) as c,
+        ):
+            assert c.get_breaches() == []
+        mock_sleep.assert_called_once_with(5.0)
