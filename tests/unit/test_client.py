@@ -575,7 +575,7 @@ class TestValidation:
         assert noauth_client.get_breach("Foo/Bar").name == "Foo/Bar"
 
     def test_models_frozen_populate_by_name_and_constraints(self) -> None:
-        b = Breach(name="Adobe")
+        b = Breach.model_validate({"name": "Adobe"})
         assert b.model_dump(by_alias=True, exclude_unset=True) == {"Name": "Adobe"}
         with pytest.raises(ValidationError):
             b.name = "Other"

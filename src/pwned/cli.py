@@ -352,7 +352,7 @@ def password(
     if from_stdin and password is not None:
         raise click.UsageError("Cannot specify both PASSWORD argument and --stdin.")
     if from_stdin:
-        password = click.get_text_stream("stdin").readline().removesuffix("\n").removesuffix("\r")
+        password = sys.stdin.readline().removesuffix("\n").removesuffix("\r")
         if not password:
             raise click.UsageError("No password provided on stdin.")
     elif password is None:
