@@ -96,7 +96,7 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 
 ## Planned (v0.5.0)
 
-Prioritized from cross-ecosystem research (`DSInternals`, `easybill/easypwned`, `ScottHelme/when-pwned-passwords-bloom`, `alexbrazier/pwned-bloom`, `HaveIBeenPwned/PwnedPasswordsCloudflareWorker`, `Keyguard`, `1Password`/`Bitwarden` CLIs, `brycx/checkpwn`, and `wneessen/go-hibp`).
+Prioritized from cross-ecosystem research (official `HaveIBeenPwned.Cli` / `haveibeenpwned.com/cli`, `DSInternals`, `easybill/easypwned`, `ScottHelme/when-pwned-passwords-bloom`, `alexbrazier/pwned-bloom`, `HaveIBeenPwned/PwnedPasswordsCloudflareWorker`, `Keyguard`, `1Password`/`Bitwarden` CLIs, `brycx/checkpwn`, and `wneessen/go-hibp`).
 
 ### Active Directory & Enterprise Credential Hygiene
 - [ ] **Extended AD `pwdump` quality checks** — detect empty NTLM hashes (`31D6CFE0D16AE931B73C59D7E0C089C0`), present legacy LM hashes, username-as-password matches (local MD4 of `SamAccountName` and case variants), and add `--exclude-machines` filtering for `$` computer accounts.
@@ -107,15 +107,23 @@ Prioritized from cross-ecosystem research (`DSInternals`, `easybill/easypwned`, 
 - [ ] **Vault breach & stealer-log correlation (`pwned audit --check-breaches`)** — cross-reference vault entry emails and login domains against HIBP breaches and stealer logs to flag accounts on compromised sites even when the password itself has not yet appeared in Pwned Passwords.
 
 ### Offline Scale & Self-Hosted Infrastructure
+- [ ] **Per-prefix offline dump directory interop (`00000.txt`–`FFFFF.txt`)** — support directory-per-prefix downloads with ETag index refreshes (`--force` / `--overwrite`) alongside single-file exports in `pwned offline download`, and `O(1)` directory lookups in `OfflinePasswordsClient` for direct interoperability with official `HaveIBeenPwned.Cli` (`hibp password download`).
 - [ ] **Self-hosted k-anonymity HTTP server / caching proxy (`pwned serve`)** — expose a drop-in `/range/{prefix}` endpoint, `/healthz`, and optional Prometheus `/metrics` backed by `--offline-db` or an upstream TTL cache for air-gapped services and high-QPS auth backends.
 - [ ] **Compact offline hash indexes (`pwned offline build-bloom` / `compact`)** — build sub-1 GB mmap-able Bloom filters for RAM-resident checks in containers/CI runners, plus a fixed-width binary prefix-indexed format (~50% smaller than ASCII dumps with `O(1)` prefix jump).
 
 ### Continuous Monitoring, History & Alerting
+- [ ] **Smart `latestBreach` pre-check in `pwned monitor`** — poll unauthenticated `GET /latestBreach` (Cloudflare-cached) first and skip `GET /breachedDomain/{domain}` queries when no new breach has been added since the last baseline snapshot.
 - [ ] **SQLite exposure history & remediation tracking (`monitor --db`)** — persist first-seen and resolved exposure timestamps in a stdlib `sqlite3` store to track breach trends and rotated credentials across runs, feeding trend summaries into `domain-report`, `--format markdown`, and `--format html`.
 - [ ] **Expanded alert destinations** — add Microsoft Teams (Adaptive Cards), PagerDuty (Events API v2), SMTP email, and GitHub Issue auto-creation/commenting for CI monitoring pipelines.
+- [ ] **CC BY 4.0 attribution footer in Markdown reports** — append a compact HIBP attribution footer to `--format markdown` breach and paste reports (matching `README.md` and `--format html`).
 
 ### CLI UX & End-User Diagnostics
+- [ ] **CLI password range lookup (`pwned password-range <5-hex>`)** — expose `get_password_range()` on the CLI (`--ntlm`, padding stripped) alongside `pwned password`.
+- [ ] **Raw 6-char SHA-1 prefix support on `account-range`** — allow passing a pre-hashed 6-char hex prefix directly to `pwned account-range` (matching `hibp account range <prefix>`).
+- [ ] **Non-interactive `pwned auth set --stdin`** — read `HIBP_API_KEY` from standard input for scripted setup without exposing secrets in shell history or `ps` output.
+- [ ] **Global `--outfile <path>` (+ `--force`)** — write formatted UTF-8 output directly to disk from any data command with safe overwrite protection (avoiding Windows PowerShell UTF-16 redirection issues).
 - [ ] **End-user `pwned doctor` CLI subcommand** — verify HIBP API connectivity, subscription tier/RPM, active credential source, keyring availability, cache size, and offline DB integrity directly from installed `pwned` binaries.
+- [ ] **Granular semantic exit codes (opt-in / v1.0 evaluation)** — evaluate distinguishing auth, permission/plan, rate-limit, network, and not-found exit codes (inspired by official `hibp` codes `0`–`9`) without breaking existing `0`/`1`/`2` scripting contracts.
 
 ## Backlog / External
 

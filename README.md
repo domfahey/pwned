@@ -12,7 +12,7 @@ An unofficial command-line tool and typed Python SDK for querying [Troy Hunt](ht
 
 - **100% HIBP API v3 parity** — all 21 / 21 endpoints across sync/async clients and the CLI ([coverage matrix](docs/hibp-api-coverage.md)).
 - **Privacy-first password checks** — *k*-anonymity (SHA-1 & NTLM, 5-char prefix only) or air-gapped `O(log N)` offline hash dumps; plaintext passwords never leave your machine.
-- **16 vault & Active Directory audit sources** — Bitwarden (JSON, PBKDF2/Argon2id encrypted JSON, CSV), 1Password (CSV, 1PUX), LastPass, Dashlane, Proton Pass, Chrome/Edge, Firefox, Apple Passwords, KeePass `.kdbx`, AD `pwdump`/`secretsdump`, and live Unix `pass`/`gopass`.
+- **16 vault & Active Directory audit sources** — Bitwarden (JSON, PBKDF2/Argon2id encrypted JSON, CSV), 1Password (CSV, 1PUX), LastPass, Dashlane, Proton Pass, Chrome/Edge, Firefox, Apple Passwords, generic CSV, KeePass `.kdbx`, AD `pwdump`/`secretsdump`, and live Unix `pass`/`gopass`.
 - **CI/CD & reporting ready** — `text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, and standalone `html` outputs, declarative `pwned.toml` monitoring, baseline diffing, Slack/Discord/generic webhooks, GitHub Action, and multi-arch container images.
 
 ## Quickstart
@@ -258,7 +258,7 @@ pre-commit run pwned-audit --hook-stage manual --files vault.json
 
 ## Model Context Protocol (MCP)
 
-`pwned` complements HIBP's official remote MCP server (`https://haveibeenpwned.com/mcp`) with a built-in, zero-dependency **local stdio MCP server** (`pwned mcp`) for workflows where plaintext passwords or internal vaults must never leave your machine (`check_password_hash`, `audit_vault`, `diff_baseline`, `lookup_breach`, `check_account_range`):
+`pwned` complements HIBP's [official remote MCP server](https://haveibeenpwned.com/Docs/MCP) (`https://haveibeenpwned.com/mcp`) with a built-in, zero-dependency **local stdio MCP server** (`pwned mcp`) for workflows where plaintext passwords or internal vaults must never leave your machine (`check_password_hash`, `audit_vault`, `diff_baseline`, `lookup_breach`, `check_account_range`):
 
 ```json
 {
@@ -341,8 +341,9 @@ tests/
 
 ### See Also
 
-Direct Have I Been Pwned CLIs in other ecosystems:
+Other Have I Been Pwned CLIs:
 
+- [`HaveIBeenPwned.Cli`](https://haveibeenpwned.com/cli) — .NET (official HIBP CLI)
 - [`wKovacs64/pwned`](https://github.com/wKovacs64/pwned) — Node.js/TypeScript
 - [`brycx/checkpwn`](https://github.com/brycx/checkpwn) — Rust
 

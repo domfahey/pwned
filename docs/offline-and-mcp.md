@@ -27,7 +27,7 @@ How it works:
 
 ## Local Privacy-First Stdio MCP Server (`pwned mcp`)
 
-Have I Been Pwned offers an official remote MCP server (`https://haveibeenpwned.com/mcp`) for general breach intelligence. `pwned mcp` complements it with a **built-in, zero-dependency local JSON-RPC 2.0 stdio MCP server** specifically for workflows where plaintext passwords, password-manager files, or local baselines must never leave your machine.
+Have I Been Pwned offers an [official remote MCP server](https://haveibeenpwned.com/Docs/MCP) (`https://haveibeenpwned.com/mcp`) for general breach intelligence. `pwned mcp` complements it with a **built-in, zero-dependency local JSON-RPC 2.0 stdio MCP server** specifically for workflows where plaintext passwords, password-manager files, or local baselines must never leave your machine.
 
 ### Client Configuration
 

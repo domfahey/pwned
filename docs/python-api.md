@@ -118,7 +118,7 @@ validate_password_not_pwned("my-candidate-password", threshold=1)
 # await async_validate_password_not_pwned("my-candidate-password", threshold=1)
 ```
 
-For Django forms or `AUTH_PASSWORD_VALIDATORS`, wrap `validate_password_not_pwned(password)` and re-raise `ValueError` as `django.core.exceptions.ValidationError`.
+For Django forms or `AUTH_PASSWORD_VALIDATORS`, wrap `validate_password_not_pwned(password)` and re-raise `ValueError` as `django.core.exceptions.ValidationError`. See [Have I Been Pwned's NIST SP 800-63B guidance](https://haveibeenpwned.com/NIST) for compromised-password screening compliance details.
 
 ## Reporting, Webhooks, Monitoring & Formatting
 
