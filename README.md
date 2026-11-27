@@ -63,6 +63,8 @@ Configuration is resolved in the following order (highest precedence first):
 
 ## CLI Usage (by HIBP Plan Tier)
 
+`pwned` implements **100% of the official HIBP API v3 specification (21 / 21 endpoints)** across sync/async clients and the CLI. See [docs/hibp-api-coverage.md](docs/hibp-api-coverage.md) for the complete endpoint, parameter, model, and protocol parity matrix.
+
 ### Free / No API key
 - `password` — Check password exposure (supports `--stdin`, `--file`, `--hashed`, `--offline-db`, `--concurrency`, `--stats`, `--ntlm`, `--pad`, `--threshold`, `--cache`, `--fail-if-pwned`)
 - `audit` — Audit local password manager, browser, or Active Directory exports (Bitwarden JSON/Encrypted-JSON/CSV, 1Password CSV/1PUX, LastPass CSV, Dashlane CSV, Proton Pass CSV, Chrome/Firefox/Apple CSV, generic CSV, KeePass `.kdbx`, Active Directory `pwdump`/`secretsdump`, Unix `pass`/`gopass`, `--check-reuse`, `--check-strength`, `--cache`, `--notify-webhook`, `--concurrency`, `--offline-db`, `--fail-if-pwned`)
