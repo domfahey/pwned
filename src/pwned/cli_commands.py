@@ -18,13 +18,15 @@ from pwned.audit import (
 from pwned.baseline import diff_search_result, load_baseline, save_baseline
 from pwned.cache import ResponseCache
 from pwned.cli_helpers import (
+    ExitCode,
+    FileOrStoreError,
     get_cache,
     get_output_format,
     handle_errors,
     render_output,
     require_api_key,
 )
-from pwned.client import HIBPClient
+from pwned.client import HIBPClient, NotFoundError
 from pwned.config import (
     clear_api_key,
     clear_api_key_keyring,
@@ -37,12 +39,12 @@ from pwned.config import (
 )
 from pwned.formatting import format_output
 from pwned.mcp_server import MCPServer, serve_stdio
-from pwned.models import EmailAlias
+from pwned.models import BreachedAccountRangeResult, EmailAlias
 from pwned.monitor import load_monitor_config, run_monitor
 from pwned.notify import WEBHOOK_FORMATS, WebhookFormat, send_webhook_notification
 from pwned.offline import OfflinePasswordsClient
 from pwned.offline_download import download_offline_db
-from pwned.passwords import AsyncPwnedPasswordsClient
+from pwned.passwords import AsyncPwnedPasswordsClient, PwnedPasswordsClient
 from pwned.reporting import generate_domain_report
 
 _EMAIL_ALIASES = ("admin", "hostmaster", "info", "security", "webmaster")
@@ -64,7 +66,7 @@ _AUDIT_SOURCES = (
     "pass",
     "gopass",
 )
-_AUTH_BACKENDS = ("file", "keyring")
+_AUTH_BACKENDS = ("auto", "file", "keyring")
 _COMPLETION_SHELLS = ("bash", "zsh", "fish")
 
 
@@ -89,6 +91,13 @@ def _maybe_notify(
         raise click.UsageError(str(exc)) from exc
 
 
+def _finish_keyring_save() -> None:
+    if clear_api_key():
+        click.echo("Saved API key to OS keyring (removed previous key from config file).")
+    else:
+        click.echo("Saved API key to OS keyring.")
+
+
 @click.group()
 def auth() -> None:
     """Manage stored HIBP API key credentials."""
@@ -96,25 +105,51 @@ def auth() -> None:
 
 @auth.command("set")
 @click.argument("api_key", required=False)
+@click.option("--stdin", "from_stdin", is_flag=True, help="Read API key from stdin.")
 @click.option(
     "--backend",
     type=click.Choice(_AUTH_BACKENDS),
-    default="file",
+    default="auto",
     show_default=True,
-    help="Credential storage backend.",
+    help="Credential storage backend (auto prefers OS keyring when installed).",
 )
-def auth_set(api_key: str | None, backend: str) -> None:
-    """Store the HIBP API key in the user config file or OS keyring."""
-    key = api_key if api_key is not None else click.prompt("HIBP API key", hide_input=True)
+@handle_errors
+def auth_set(api_key: str | None, from_stdin: bool, backend: str) -> None:
+    """Store the HIBP API key in the OS keyring or user config file."""
+    if api_key is not None and from_stdin:
+        raise click.UsageError("Cannot specify both API_KEY and --stdin.")
+    if from_stdin:
+        key = sys.stdin.readline().rstrip("\r\n")
+        if not key:
+            raise click.UsageError("No API key provided on stdin.")
+    elif api_key is not None:
+        key = api_key
+    else:
+        key = click.prompt("HIBP API key", hide_input=True, err=True)
+
     if backend == "keyring":
         try:
             save_api_key_keyring(key)
         except ValueError as exc:
             raise click.UsageError(str(exc)) from exc
-        except RuntimeError as exc:
-            raise click.ClickException(str(exc)) from exc
-        click.echo("Saved API key to OS keyring.")
+        except Exception as exc:
+            raise FileOrStoreError(str(exc)) from exc
+        _finish_keyring_save()
         return
+
+    if backend == "auto" and keyring_available():
+        try:
+            save_api_key_keyring(key)
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+        except Exception as exc:
+            click.echo(
+                f"OS keyring unavailable ({exc}); falling back to file storage.",
+                err=True,
+            )
+        else:
+            _finish_keyring_save()
+            return
 
     try:
         path = save_api_key(key)
@@ -133,37 +168,61 @@ def auth_show(ctx: click.Context) -> None:
         config_file = str(get_config_file())
     except RuntimeError:
         config_file = None
-    render_output(
-        ctx,
-        {
-            "api_key": mask_api_key(key),
-            "config_file": config_file,
-            "configured": bool(key),
-            "source": get_api_key_source(api_key=ctx.obj.get("cli_api_key")),
-            "keyring_available": keyring_available(),
-        },
-    )
+    data = {
+        "api_key": mask_api_key(key),
+        "config_file": config_file,
+        "configured": bool(key),
+        "source": get_api_key_source(api_key=ctx.obj.get("cli_api_key")),
+        "keyring_available": keyring_available(),
+    }
+    click.echo(format_output(data, fmt=get_output_format(ctx)))
 
 
 @auth.command("clear")
 @click.option(
     "--backend",
     type=click.Choice(_AUTH_BACKENDS),
-    default="file",
+    default="auto",
     show_default=True,
-    help="Credential storage backend.",
+    help="Credential storage backend (auto clears OS keyring and config file).",
 )
+@handle_errors
 def auth_clear(backend: str) -> None:
-    """Remove the stored API key from the user config file or OS keyring."""
+    """Remove the stored API key from the OS keyring and/or user config file."""
     if backend == "keyring":
         try:
             removed = clear_api_key_keyring()
-        except RuntimeError as exc:
-            raise click.ClickException(str(exc)) from exc
+        except Exception as exc:
+            raise FileOrStoreError(str(exc)) from exc
         if removed:
             click.echo("API key removed from OS keyring.")
         else:
             click.echo("No stored API key found in OS keyring.")
+        return
+
+    if backend == "auto":
+        removed_keyring = False
+        keyring_error: Exception | None = None
+        if keyring_available():
+            try:
+                removed_keyring = clear_api_key_keyring()
+            except Exception as exc:
+                keyring_error = exc
+        removed_file = clear_api_key()
+        if keyring_error is not None:
+            if removed_file:
+                click.echo("API key removed from config file.")
+            raise FileOrStoreError(
+                f"Failed to clear OS keyring: {keyring_error}"
+            ) from keyring_error
+        if removed_keyring and removed_file:
+            click.echo("API key removed from OS keyring and config file.")
+        elif removed_keyring:
+            click.echo("API key removed from OS keyring.")
+        elif removed_file:
+            click.echo("API key removed.")
+        else:
+            click.echo("No stored API key found.")
         return
 
     if clear_api_key():
@@ -174,7 +233,9 @@ def auth_clear(backend: str) -> None:
 
 @click.command()
 @click.argument("account")
-@click.option("--no-truncate", is_flag=True, help="Return full breach model.")
+@click.option(
+    "--no-truncate", "--full", "no_truncate", is_flag=True, help="Return full breach model."
+)
 @click.option("--domain", default=None, help="Filter by domain.")
 @click.option("--no-include-unverified", is_flag=True, help="Exclude unverified breaches.")
 @click.option("--include-stealer-logs", is_flag=True, help="Include stealer log domains.")
@@ -203,7 +264,13 @@ def auth_clear(backend: str) -> None:
     default="auto",
     help="Webhook payload format.",
 )
-@click.option("--fail-if-pwned", is_flag=True, help="Exit with code 1 if exposed.")
+@click.option(
+    "--fail-if-pwned",
+    "--fail-if-found",
+    "fail_if_pwned",
+    is_flag=True,
+    help="Exit with code 8 if exposed.",
+)
 @click.pass_context
 @handle_errors
 def search(
@@ -235,7 +302,7 @@ def search(
             prev = load_baseline(baseline_path)
             result = diff_search_result(result, prev)
         except ValueError as exc:
-            raise click.ClickException(str(exc)) from exc
+            raise FileOrStoreError(str(exc)) from exc
     render_output(ctx, result)
     _maybe_notify(
         notify_webhook,
@@ -244,21 +311,73 @@ def search(
         title=f"pwned Search Alert: {account}",
     )
     if fail_if_pwned and (result.breaches or result.pastes or result.stealer_logs):
-        sys.exit(1)
+        sys.exit(int(ExitCode.FINDINGS))
 
 
 @click.command("account-range")
-@click.argument("email")
-@click.option("--fail-if-pwned", is_flag=True, help="Exit with code 1 if breached.")
+@click.argument("target")
+@click.option(
+    "--fail-if-pwned",
+    "--fail-if-found",
+    "fail_if_pwned",
+    is_flag=True,
+    help="Exit with code 8 if breached.",
+)
 @click.pass_context
 @handle_errors
-def account_range(ctx: click.Context, email: str, fail_if_pwned: bool) -> None:
-    """Check breached sites for an email using k-anonymity range search."""
+def account_range(ctx: click.Context, target: str, fail_if_pwned: bool) -> None:
+    """Check breached sites for an email address or 6-char SHA-1 hex prefix."""
+    results: list[str] | list[BreachedAccountRangeResult]
     with _authed_client(ctx) as client:
-        breaches = client.check_account_range(email)
-    render_output(ctx, breaches)
-    if fail_if_pwned and breaches:
-        sys.exit(1)
+        if "@" in target:
+            results = client.check_account_range(target)
+        else:
+            try:
+                results = client.get_account_range(target)
+            except ValueError as exc:
+                raise click.UsageError(str(exc)) from exc
+            except NotFoundError:
+                results = []
+    render_output(ctx, results)
+    if fail_if_pwned and results:
+        sys.exit(int(ExitCode.FINDINGS))
+
+
+@click.command("password-range")
+@click.argument("prefix")
+@click.option("--ntlm", is_flag=True, help="Use NTLM hash mode instead of SHA-1.")
+@click.option(
+    "--pad/--no-pad",
+    default=True,
+    show_default=True,
+    help="Request padded responses to hide response length.",
+)
+@click.option(
+    "--fail-if-pwned",
+    "--fail-if-found",
+    "fail_if_pwned",
+    is_flag=True,
+    help="Exit with code 8 if any hashes are found in the range.",
+)
+@click.pass_context
+@handle_errors
+def password_range(
+    ctx: click.Context,
+    prefix: str,
+    ntlm: bool,
+    pad: bool,
+    fail_if_pwned: bool,
+) -> None:
+    """Fetch compromised password hash suffixes for a 5-character hex prefix."""
+    settings = ctx.obj["settings"]
+    with PwnedPasswordsClient(user_agent=settings.user_agent, cache=get_cache(ctx)) as client:
+        try:
+            results = client.get_password_range(prefix, ntlm=ntlm, pad=pad)
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+    render_output(ctx, results)
+    if fail_if_pwned and results:
+        sys.exit(int(ExitCode.FINDINGS))
 
 
 @click.group("domain-verify")
@@ -332,7 +451,12 @@ def domain_verify_meta_check(ctx: click.Context, domain: str) -> None:
     help="Password manager export format.",
 )
 @click.option("--ntlm", is_flag=True, help="Use NTLM hashes instead of SHA-1.")
-@click.option("--no-pad", is_flag=True, default=False, help="Disable response padding.")
+@click.option(
+    "--pad/--no-pad",
+    default=True,
+    show_default=True,
+    help="Request padded responses to hide response length.",
+)
 @click.option(
     "--threshold",
     type=click.IntRange(min=1),
@@ -374,7 +498,13 @@ def domain_verify_meta_check(ctx: click.Context, domain: str) -> None:
     default="auto",
     help="Webhook payload format.",
 )
-@click.option("--fail-if-pwned", is_flag=True, help="Exit with code 1 if compromised.")
+@click.option(
+    "--fail-if-pwned",
+    "--fail-if-found",
+    "fail_if_pwned",
+    is_flag=True,
+    help="Exit with code 8 if compromised.",
+)
 @click.pass_context
 @handle_errors
 def audit(
@@ -382,7 +512,7 @@ def audit(
     path: Path | None,
     source: str,
     ntlm: bool,
-    no_pad: bool,
+    pad: bool,
     threshold: int,
     check_reuse: bool,
     check_strength: bool,
@@ -401,9 +531,9 @@ def audit(
 
     master_password: str | None = None
     if source == "keepass":
-        master_password = click.prompt("KeePass master password", hide_input=True)
+        master_password = click.prompt("KeePass master password", hide_input=True, err=True)
     elif source == "bitwarden-encrypted-json":
-        master_password = click.prompt("Bitwarden export password", hide_input=True)
+        master_password = click.prompt("Bitwarden export password", hide_input=True, err=True)
     try:
         entries = load_export(
             path,
@@ -411,7 +541,7 @@ def audit(
             master_password=master_password,
         )
     except (ValueError, RuntimeError) as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise FileOrStoreError(str(exc)) from exc
 
     settings = ctx.obj["settings"]
     effective_ntlm = ntlm or source == "pwdump"
@@ -422,7 +552,7 @@ def audit(
                 offline_client,
                 threshold=threshold,
                 ntlm=effective_ntlm,
-                pad=not no_pad,
+                pad=pad,
                 check_reuse=check_reuse,
                 check_strength=check_strength,
             )
@@ -438,7 +568,7 @@ def audit(
                     pw_client,
                     threshold=threshold,
                     ntlm=effective_ntlm,
-                    pad=not no_pad,
+                    pad=pad,
                     check_reuse=check_reuse,
                     check_strength=check_strength,
                     concurrency=concurrency,
@@ -453,7 +583,16 @@ def audit(
         title="pwned Vault Audit Alert",
     )
     if fail_if_pwned and summary.compromised_entries > 0:
-        sys.exit(1)
+        sys.exit(int(ExitCode.FINDINGS))
+
+
+def _is_stderr_tty() -> bool:
+    return sys.stderr.isatty()
+
+
+def _offline_progress(completed: int, total: int) -> None:
+    if completed == total or completed % max(1, total // 100) == 0:
+        click.echo(f"[{completed:,}/{total:,}] ranges downloaded", err=True)
 
 
 @click.group()
@@ -483,6 +622,20 @@ def offline() -> None:
     default=None,
     help="JSON file storing ETags for conditional HTTP 304 updates.",
 )
+@click.option(
+    "--max-retries",
+    type=click.IntRange(min=0),
+    default=3,
+    show_default=True,
+    help="Maximum retries per range prefix on transient errors.",
+)
+@click.option(
+    "--overwrite",
+    "-o",
+    is_flag=True,
+    default=False,
+    help="Permit replacing an existing output file.",
+)
 @click.pass_context
 @handle_errors
 def offline_download(
@@ -492,6 +645,8 @@ def offline_download(
     concurrency: int,
     resume: bool,
     etag_cache: Path | None,
+    max_retries: int,
+    overwrite: bool,
 ) -> None:
     """Download an offline Pwned Passwords hash dump."""
     settings = ctx.obj["settings"]
@@ -501,8 +656,11 @@ def offline_download(
             ntlm=ntlm,
             concurrency=concurrency,
             resume=resume,
+            overwrite=overwrite,
             etag_cache_path=etag_cache,
             user_agent=settings.user_agent,
+            max_retries=max_retries,
+            on_progress=_offline_progress if _is_stderr_tty() else None,
         )
     )
     render_output(ctx, stats)
@@ -528,8 +686,10 @@ def offline_download(
 )
 @click.option(
     "--fail-if-pwned",
+    "--fail-if-found",
+    "fail_if_pwned",
     is_flag=True,
-    help="Exit with code 1 if any exposures are found.",
+    help="Exit with code 8 if any exposures are found.",
 )
 @click.pass_context
 @handle_errors
@@ -562,7 +722,7 @@ def domain_report(
         title=f"pwned Domain Report Alert: {domain}",
     )
     if fail_if_pwned and (report.total_exposed_aliases > 0 or bool(report.stealer_log_aliases)):
-        sys.exit(1)
+        sys.exit(int(ExitCode.FINDINGS))
 
 
 @click.command("monitor")
@@ -592,8 +752,10 @@ def domain_report(
 )
 @click.option(
     "--fail-if-pwned",
+    "--fail-if-found",
+    "fail_if_pwned",
     is_flag=True,
-    help="Exit with code 1 if new exposures are detected.",
+    help="Exit with code 8 if new exposures are detected.",
 )
 @click.pass_context
 @handle_errors
@@ -609,7 +771,7 @@ def monitor(
     try:
         config = load_monitor_config(config_path)
     except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise FileOrStoreError(str(exc)) from exc
 
     settings = ctx.obj["settings"]
     api_key = require_api_key(ctx)
@@ -639,7 +801,7 @@ def monitor(
         render_output(ctx, report)
 
     if (fail_if_pwned or config.fail_if_pwned) and report.new_exposures > 0:
-        sys.exit(1)
+        sys.exit(int(ExitCode.FINDINGS))
 
 
 @click.command("mcp")
@@ -655,6 +817,7 @@ def monitor(
     help="Default to NTLM hash mode for MCP lookups.",
 )
 @click.pass_context
+@handle_errors
 def mcp(ctx: click.Context, offline_db: Path | None, ntlm: bool) -> None:
     """Run the local stdio MCP server for AI assistants."""
     settings = ctx.obj["settings"]
@@ -675,6 +838,7 @@ def cache() -> None:
 
 @cache.command("clear")
 @click.pass_context
+@handle_errors
 def cache_clear(ctx: click.Context) -> None:
     """Delete all cached HIBP responses."""
     count = ResponseCache().clear()
@@ -703,6 +867,7 @@ def register_extra_commands(cli_group: click.Group) -> None:
     cli_group.add_command(auth)
     cli_group.add_command(search)
     cli_group.add_command(account_range)
+    cli_group.add_command(password_range)
     cli_group.add_command(domain_verify)
     cli_group.add_command(audit)
     cli_group.add_command(offline)

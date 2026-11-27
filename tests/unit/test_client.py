@@ -14,6 +14,7 @@ from pwned.cache import ResponseCache
 from pwned.client import (
     MAX_ERROR_MESSAGE_LEN,
     MAX_RETRY_AFTER,
+    BadRequestError,
     ForbiddenError,
     HIBPClient,
     HIBPError,
@@ -247,13 +248,25 @@ class TestRequestErrors:
             status_code=400,
             json={"statusCode": 400, "message": "Bad\n\trequest  " + ("x" * 300)},
         )
-        with pytest.raises(HIBPError) as exc_info:
+        with pytest.raises(BadRequestError) as exc_info:
             client.get_breaches()
+        assert isinstance(exc_info.value, HIBPError)
         msg = str(exc_info.value)
         assert msg.startswith("HTTP 400: Bad request ")
         assert "\n" not in msg
         assert "\t" not in msg
         assert len(msg) <= 220
+
+    def test_500_with_json_message_raises_hibp_error(
+        self, client: HIBPClient, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=500,
+            json={"message": "Internal failure"},
+        )
+        with pytest.raises(HIBPError, match="^HTTP 500: Internal failure$"):
+            client.get_breaches()
 
     def test_503_html_body_not_leaked(self, client: HIBPClient, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(

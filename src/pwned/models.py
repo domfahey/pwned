@@ -191,7 +191,7 @@ class PasswordChecker(Protocol):
         password: str,
         *,
         ntlm: bool = False,
-        pad: bool = False,
+        pad: bool = True,
     ) -> int: ...
 
     def check_hash(
@@ -199,7 +199,7 @@ class PasswordChecker(Protocol):
         hash_hex: str,
         *,
         ntlm: bool = False,
-        pad: bool = False,
+        pad: bool = True,
     ) -> int: ...
 
 

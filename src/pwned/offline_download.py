@@ -111,6 +111,7 @@ async def download_offline_db(
     ntlm: bool = False,
     concurrency: int = 32,
     resume: bool = True,
+    overwrite: bool = True,
     etag_cache_path: Path | None = None,
     start_prefix: int = 0x00000,
     end_prefix: int = MAX_PREFIX_EXCLUSIVE,
@@ -128,6 +129,9 @@ async def download_offline_db(
     (``.<output_path.name>.part``) and merges them in ascending lexicographical order into
     ``output_path`` using an atomic file replacement.
 
+    When ``overwrite`` is ``False`` and ``output_path`` already exists, raises
+    :class:`FileExistsError` before creating any work directory or issuing HTTP requests.
+
     When ``etag_cache_path`` is provided, the sharded work directory is preserved after completion
     so future runs with ``resume=True`` can send ``If-None-Match`` headers and retain existing
     shards on HTTP 304 responses. When ``etag_cache_path`` is ``None``, the work directory is
@@ -139,6 +143,10 @@ async def download_offline_db(
         start_prefix=start_prefix,
         end_prefix=end_prefix,
     )
+    if not overwrite and output_path.exists():
+        raise FileExistsError(
+            f"Output file already exists: {output_path} (use --overwrite to replace)"
+        )
 
     started = time.monotonic()
     work_dir = output_path.parent / f".{output_path.name}.part"
@@ -148,7 +156,6 @@ async def download_offline_db(
     etags: dict[str, str] = _load_etags(etag_cache_path) if etag_cache_path is not None else {}
     params: dict[str, str] = {"mode": "ntlm"} if ntlm else {}
     total_prefixes = end_prefix - start_prefix
-    semaphore = asyncio.Semaphore(concurrency)
 
     prefixes_downloaded = 0
     prefixes_cached = 0
@@ -171,63 +178,69 @@ async def download_offline_db(
         prefix = f"{prefix_int:05X}"
         shard_path = work_dir / prefix[:2] / f"{prefix}.txt"
 
-        async with semaphore:
-            if resume and shard_path.exists() and etag_cache_path is None:
-                prefixes_cached += 1
-            else:
-                headers: dict[str, str] = {}
-                if resume and shard_path.exists():
-                    cached_etag = etags.get(prefix)
-                    if cached_etag is not None:
-                        headers["If-None-Match"] = cached_etag
+        if resume and shard_path.exists() and etag_cache_path is None:
+            prefixes_cached += 1
+        else:
+            headers: dict[str, str] = {}
+            if resume and shard_path.exists():
+                cached_etag = etags.get(prefix)
+                if cached_etag is not None:
+                    headers["If-None-Match"] = cached_etag
 
-                attempt = 0
-                while True:
-                    try:
-                        resp = await active_client.get(
-                            f"/range/{prefix}",
-                            headers=headers,
-                            params=params,
-                        )
-                    except httpx.RequestError as exc:
-                        if attempt < max_retries:
-                            await sleep(min(0.5 * (2**attempt), 10.0))
-                            attempt += 1
-                            continue
-                        raise HIBPError(f"Request failed for prefix {prefix}: {exc}") from exc
+            attempt = 0
+            while True:
+                try:
+                    resp = await active_client.get(
+                        f"/range/{prefix}",
+                        headers=headers,
+                        params=params,
+                    )
+                except httpx.RequestError as exc:
+                    if attempt < max_retries:
+                        await sleep(min(0.5 * (2**attempt), 10.0))
+                        attempt += 1
+                        continue
+                    raise HIBPError(f"Request failed for prefix {prefix}: {exc}") from exc
 
-                    if resp.status_code == 304 and "If-None-Match" in headers:
-                        prefixes_cached += 1
-                        break
-                    if resp.status_code == 429 or resp.status_code >= 500:
-                        if attempt < max_retries:
-                            await sleep(min(0.5 * (2**attempt), 10.0))
-                            attempt += 1
-                            continue
-                        raise HIBPError(f"HTTP {resp.status_code} for prefix {prefix}")
-                    if resp.status_code != 200:
-                        raise HIBPError(f"HTTP {resp.status_code} for prefix {prefix}")
-
-                    shard_path.parent.mkdir(parents=True, exist_ok=True)
-                    shard_path.write_text(resp.text, encoding="utf-8")
-                    new_etag = resp.headers.get("etag")
-                    if new_etag:
-                        etags[prefix] = new_etag
-                    prefixes_downloaded += 1
+                if resp.status_code == 304 and "If-None-Match" in headers:
+                    prefixes_cached += 1
                     break
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    if attempt < max_retries:
+                        await sleep(min(0.5 * (2**attempt), 10.0))
+                        attempt += 1
+                        continue
+                    raise HIBPError(f"HTTP {resp.status_code} for prefix {prefix}")
+                if resp.status_code != 200:
+                    raise HIBPError(f"HTTP {resp.status_code} for prefix {prefix}")
 
-            completed += 1
-            if on_progress is not None:
-                on_progress(completed, total_prefixes)
+                shard_path.parent.mkdir(parents=True, exist_ok=True)
+                shard_path.write_text(resp.text, encoding="utf-8")
+                new_etag = resp.headers.get("etag")
+                if new_etag:
+                    etags[prefix] = new_etag
+                prefixes_downloaded += 1
+                break
+
+        completed += 1
+        if on_progress is not None:
+            on_progress(completed, total_prefixes)
+
+    prefix_iter = iter(range(start_prefix, end_prefix))
+
+    async def _worker() -> None:
+        for prefix_int in prefix_iter:
+            await _process_prefix(prefix_int)
 
     try:
-        tasks = [asyncio.create_task(_process_prefix(i)) for i in range(start_prefix, end_prefix)]
+        worker_count = min(concurrency, total_prefixes)
+        workers = [asyncio.create_task(_worker()) for _ in range(worker_count)]
         try:
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*workers)
         except BaseException:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            for worker in workers:
+                worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
             raise
     finally:
         if owns_client:

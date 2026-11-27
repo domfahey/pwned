@@ -133,21 +133,27 @@ class TestCheckPassword:
         )
         assert client.check_password("password") == expected
 
-    def test_ntlm_and_pad_combined_and_default_omits_both(
+    def test_ntlm_and_pad_defaults_and_opt_out(
         self, client: PwnedPasswordsClient, httpx_mock: HTTPXMock
     ) -> None:
         httpx_mock.add_response(text="")
         client.check_password("password")
         req1 = httpx_mock.get_request()
         assert req1 is not None
-        assert "Add-Padding" not in req1.headers
+        assert req1.headers["Add-Padding"] == "true"
         assert "mode" not in req1.url.params
 
         httpx_mock.add_response(text="")
-        client.check_password("password", ntlm=True, pad=True)
+        client.check_password("password", pad=False)
         req2 = httpx_mock.get_requests()[-1]
-        assert req2.headers["Add-Padding"] == "true"
-        assert req2.url.params["mode"] == "ntlm"
+        assert "Add-Padding" not in req2.headers
+        assert "mode" not in req2.url.params
+
+        httpx_mock.add_response(text="")
+        client.check_password("password", ntlm=True, pad=True)
+        req3 = httpx_mock.get_requests()[-1]
+        assert req3.headers["Add-Padding"] == "true"
+        assert req3.url.params["mode"] == "ntlm"
 
     def test_default_user_agent_and_explicit_close(self, httpx_mock: HTTPXMock) -> None:
         c = PwnedPasswordsClient()
@@ -672,8 +678,8 @@ class TestAsyncHashMethods:
                 text=f"{ntlm[5:]}:88\n",
             )
             async with AsyncPwnedPasswordsClient(user_agent="test-agent") as ac:
-                assert await ac.check_hash(f" {SHA1_PASSWORD.lower()} ", pad=True) == 15
-                assert await ac.check_hash(SHA1_PASSWORD) == 0
+                assert await ac.check_hash(f" {SHA1_PASSWORD.lower()} ") == 15
+                assert await ac.check_hash(SHA1_PASSWORD, pad=False) == 0
                 assert await ac.check_hash(f" {ntlm.lower()} ", ntlm=True, pad=True) == 88
                 with pytest.raises(ValueError, match="40 hexadecimal"):
                     await ac.check_hash(ntlm)

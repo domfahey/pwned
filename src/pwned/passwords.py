@@ -98,7 +98,7 @@ class PwnedPasswordsClient:
         prefix: str,
         *,
         ntlm: bool = False,
-        pad: bool = False,
+        pad: bool = True,
     ) -> dict[str, int]:
         """Fetch all compromised hash suffixes and counts matching a 5-char hex prefix."""
         normalized_prefix = _validate_prefix(prefix)
@@ -128,7 +128,7 @@ class PwnedPasswordsClient:
         hash_hex: str,
         *,
         ntlm: bool = False,
-        pad: bool = False,
+        pad: bool = True,
     ) -> int:
         """Return the breach prevalence count for a pre-hashed SHA-1 or NTLM hex digest."""
         normalized = _validate_full_hash(hash_hex, ntlm=ntlm)
@@ -141,7 +141,7 @@ class PwnedPasswordsClient:
         *,
         threshold: int = 1,
         ntlm: bool = False,
-        pad: bool = False,
+        pad: bool = True,
     ) -> bool:
         """Return True if a pre-hashed digest appears at least `threshold` times in breaches."""
         _validate_threshold(threshold)
@@ -152,7 +152,7 @@ class PwnedPasswordsClient:
         password: str,
         *,
         ntlm: bool = False,
-        pad: bool = False,
+        pad: bool = True,
     ) -> int:
         """Return the breach prevalence count for a password (0 if not found)."""
         return self.check_hash(_hash_password(password, ntlm=ntlm), ntlm=ntlm, pad=pad)
@@ -163,7 +163,7 @@ class PwnedPasswordsClient:
         *,
         threshold: int = 1,
         ntlm: bool = False,
-        pad: bool = False,
+        pad: bool = True,
     ) -> bool:
         """Return True if password appears at least `threshold` times in breaches."""
         _validate_threshold(threshold)
@@ -209,7 +209,7 @@ class AsyncPwnedPasswordsClient:
         prefix: str,
         *,
         ntlm: bool = False,
-        pad: bool = False,
+        pad: bool = True,
     ) -> dict[str, int]:
         """Fetch all compromised hash suffixes and counts matching a 5-char hex prefix."""
         normalized_prefix = _validate_prefix(prefix)
@@ -239,7 +239,7 @@ class AsyncPwnedPasswordsClient:
         hash_hex: str,
         *,
         ntlm: bool = False,
-        pad: bool = False,
+        pad: bool = True,
     ) -> int:
         """Return the breach prevalence count for a pre-hashed SHA-1 or NTLM hex digest."""
         normalized = _validate_full_hash(hash_hex, ntlm=ntlm)
@@ -252,7 +252,7 @@ class AsyncPwnedPasswordsClient:
         *,
         threshold: int = 1,
         ntlm: bool = False,
-        pad: bool = False,
+        pad: bool = True,
     ) -> bool:
         """Return True if a pre-hashed digest appears at least `threshold` times in breaches."""
         _validate_threshold(threshold)
@@ -263,7 +263,7 @@ class AsyncPwnedPasswordsClient:
         password: str,
         *,
         ntlm: bool = False,
-        pad: bool = False,
+        pad: bool = True,
     ) -> int:
         """Return the breach prevalence count for a password (0 if not found)."""
         return await self.check_hash(_hash_password(password, ntlm=ntlm), ntlm=ntlm, pad=pad)
@@ -274,7 +274,7 @@ class AsyncPwnedPasswordsClient:
         *,
         threshold: int = 1,
         ntlm: bool = False,
-        pad: bool = False,
+        pad: bool = True,
     ) -> bool:
         """Return True if password appears at least `threshold` times in breaches."""
         _validate_threshold(threshold)

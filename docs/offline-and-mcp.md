@@ -12,12 +12,23 @@ pwned offline download /data/pwned-passwords-sha1.txt --concurrency 32
 pwned offline download /data/pwned-passwords-ntlm.txt \
   --ntlm \
   --concurrency 32 \
-  --etag-cache /data/pwned-ntlm-etags.json
+  --etag-cache /data/pwned-ntlm-etags.json \
+  --overwrite
 ```
 
+| Option | Default | Description |
+|---|---|---|
+| `--ntlm` | `False` | Download NTLM hashes (`?mode=ntlm`) instead of SHA-1 |
+| `--concurrency INT` | `32` | Number of workers in the bounded async download pool |
+| `--resume / --no-resume` | `True` | Resume an interrupted download by skipping existing partial shards |
+| `--etag-cache FILE` | `None` | JSON file storing ETags for conditional `If-None-Match` / HTTP `304` refreshes |
+| `--max-retries INT` | `3` | Maximum retry attempts per prefix on transient errors |
+| `-o`, `--overwrite` | `False` | Overwrite an existing `OUTPUT` file |
+
 How it works:
+- **Bounded worker pool & TTY progress:** Uses a fixed-size async worker pool (`--concurrency`) to keep memory flat across all 1,048,576 prefixes while reporting live progress to `stderr` when attached to a TTY (so `--json`/`--format` stdout stays clean).
 - **256-bucket sharded staging:** Partial prefixes are written under `.<output>.part/<00..FF>/<PREFIX>.txt` so filesystems (APFS/NTFS/ext4) never hold 1M files in a single directory.
-- **Resumable & incremental:** Interrupted downloads skip already-fetched shards automatically (`--resume` default). Passing `--etag-cache <path>` preserves shards and sends `If-None-Match` on future runs so unchanged ranges return `HTTP 304 Not Modified`.
+- **Resumable & incremental:** Interrupted downloads skip already-fetched shards automatically (`--resume` default). Passing `--etag-cache <path>` preserves shards and sends `If-None-Match` on future runs so unchanged ranges return `HTTP 304 Not Modified`. Pass `--overwrite` / `-o` when replacing an existing `OUTPUT` file.
 - **Atomic sorted merge:** Shards are merged in strict hexadecimal order (with zero-count entries stripped) into a temp file and atomically swapped into `OUTPUT` via `os.replace()`.
 - **Direct querying:** Query the resulting file immediately with zero network traffic:
   ```bash
