@@ -40,11 +40,21 @@ API keys are resolved in order (highest priority first):
 
 ## Exit Codes
 
-| Code | Meaning |
-|---|---|
-| `0` | Success (or clean result when `--fail-if-pwned` is set) |
-| `1` | Exposure detected with `--fail-if-pwned`, resource not found (`404`), authentication/API error, or runtime error |
-| `2` | Invalid CLI usage, conflicting flags, invalid hash format, or invalid webhook URL |
+Exit codes mirror the official [Have I Been Pwned CLI (`hibp`)](https://haveibeenpwned.com/cli):
+
+| Code | Constant | Meaning |
+|---|---|---|
+| `0` | `ExitCode.OK` | Success, including clean (no-match) results on `account`, `domain`, `pastes`, `stealer`, `search`, `account-range`, `password`, `audit`, `domain-report`, and `monitor` |
+| `1` | `ExitCode.ERROR` | Unexpected failure (e.g., API response schema mismatch) |
+| `2` | `ExitCode.INVALID_USAGE` | Invalid CLI usage/arguments, conflicting flags, invalid hash or webhook URL, or rejected API request (`HTTP 400`) |
+| `3` | `ExitCode.AUTH_ERROR` | Missing or rejected API key (`HTTP 401`) |
+| `4` | `ExitCode.FORBIDDEN` | Permission or subscription restriction (`HTTP 403`) |
+| `5` | `ExitCode.RATE_LIMITED` | Rate limit exhausted after retries (`HTTP 429`) |
+| `6` | `ExitCode.NETWORK_ERROR` | Network, timeout, webhook delivery, or upstream service failure (`HTTP 5xx`) |
+| `7` | `ExitCode.FILE_OR_STORE_ERROR` | Local file, baseline, vault, monitor config, or credential-store failure |
+| `8` | `ExitCode.FINDINGS` | Exposures detected with `--fail-if-pwned` |
+| `9` | `ExitCode.NOT_FOUND` | Resource missing (e.g., unknown `breach` name) or domain verification unsuccessful (`HTTP 404`) |
+| `130` | `ExitCode.CANCELLED` | Cancelled by user (`Ctrl+C` / prompt abort) |
 
 ---
 
@@ -60,13 +70,13 @@ Check one or more passwords or pre-computed hashes against Pwned Passwords (*k*-
 | `--stdin` | `False` | Read single or multi-line passwords/hashes from stdin |
 | `--file FILE` | `None` | Batch-check passwords/hashes (one per line) from file |
 | `--ntlm` | `False` | Use NTLM hash (`?mode=ntlm`) instead of SHA-1 |
-| `--pad` | `False` | Send `Add-Padding: true` header for traffic-analysis resistance |
+| `--pad / --no-pad` | `True` | Send `Add-Padding: true` header for traffic-analysis resistance (`--no-pad` to disable) |
 | `--hashed` | `False` | Treat input(s) as pre-computed 40-char SHA-1 or 32-char NTLM hashes |
 | `--offline-db FILE` | `None` | Query a local sorted HIBP dump file instead of the network API |
 | `--concurrency INT` | `10` | Max concurrent requests in online batch mode |
 | `--stats` | `False` | Print batch summary stats (`checked / pwned / clean / errors / elapsed`) to stderr |
 | `--threshold INT` | `1` | Minimum breach count to treat as pwned |
-| `--fail-if-pwned` | `False` | Exit `1` if count meets threshold |
+| `--fail-if-pwned` | `False` | Exit `8` if count meets threshold |
 
 #### `pwned audit [PATH]`
 Audit a password-manager export, browser CSV, Active Directory `pwdump` file, or local `pass`/`gopass` store. See [Vault & Active Directory Auditing](vault-auditing.md).
@@ -101,9 +111,9 @@ Fetch the most recently added breach (`GET /latestBreach`).
 List all tracked data classes (`--descriptions` queries `GET /dataClasses/descriptions`).
 
 #### `pwned auth set|show|clear`
-- `pwned auth set [API_KEY] [--backend file|keyring]` — Store API key (prompts securely if omitted).
+- `pwned auth set [API_KEY] [--backend auto|file|keyring]` — Store API key (prompts securely if omitted; default `auto` prefers OS keyring when `pwned[keyring]` is installed and falls back to `~/.config/pwned/.env` with `0600` permissions).
 - `pwned auth show` — Show masked key, active source (`cli`, `env`, `dotenv`, `xdg`, `keyring`, `none`), config path, and keyring availability.
-- `pwned auth clear [--backend file|keyring]` — Remove stored API key.
+- `pwned auth clear [--backend auto|file|keyring]` — Remove stored API key (default `auto` clears both OS keyring when available and config file).
 
 #### `pwned cache clear`
 Remove all cached JSON files from the XDG cache directory (`~/.cache/pwned`).
@@ -129,7 +139,7 @@ Check breaches for an email/username or batch via `--file`/`--stdin`.
 | `--baseline FILE` / `--save-baseline FILE` | Diff against or save JSON baseline snapshot |
 | `--stats` | Print batch statistics to stderr |
 | `--notify-webhook URL` / `--webhook-format [auto\|slack\|discord\|generic]` | Send HTTPS webhook alert on exposures |
-| `--fail-if-pwned` | Exit `1` if exposed |
+| `--fail-if-pwned` | Exit `8` if exposed |
 
 #### `pwned search ACCOUNT`
 Composite lookup across breaches, pastes, and optionally stealer logs (`--include-stealer-logs`, `--no-truncate`, `--domain`, `--no-include-unverified`, `--baseline`, `--save-baseline`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned`).

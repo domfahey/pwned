@@ -56,10 +56,10 @@ def _run_json(*args: str) -> object:
     return json.loads(out)
 
 
-def _run_fail(*args: str) -> str:
-    """Invoke CLI, assert non-zero exit, return output."""
+def _run_exit(expected_code: int, *args: str) -> str:
+    """Invoke CLI, assert expected exit code, return output."""
     code, out = _run(*args)
-    assert code != 0, f"Expected failure but got exit 0:\n{out}"
+    assert code == expected_code, f"Expected exit {expected_code} but got {code}:\n{out}"
     return out
 
 
@@ -80,7 +80,7 @@ class TestBreachCommand:
         assert isinstance(data["DataClasses"], list)
 
     def test_breach_not_found(self) -> None:
-        out = _run_fail("breach", "ZzzNonExistentBreach999")
+        out = _run_exit(9, "breach", "ZzzNonExistentBreach999")
         assert "Not found" in out
 
     def test_breach_sarif(self) -> None:
@@ -258,35 +258,36 @@ class TestAccountCommand:
         assert len(data) >= 1
 
     def test_unverified_breach_excluded(self) -> None:
-        out = _run_fail(
+        out = _run_ok(
             "--api-key",
             TEST_KEY,
             "account",
             f"unverified-breach@{DOMAIN}",
             "--no-include-unverified",
         )
-        assert "Not found" in out
+        assert "Clean" in out
 
     def test_opt_out_not_found(self) -> None:
-        out = _run_fail("--api-key", TEST_KEY, "account", f"opt-out@{DOMAIN}")
-        assert "Not found" in out
+        out = _run_ok("--api-key", TEST_KEY, "account", f"opt-out@{DOMAIN}")
+        assert "Clean" in out
+        assert _run_json("--api-key", TEST_KEY, "account", f"opt-out@{DOMAIN}") == []
 
     def test_opt_out_breach_not_found(self) -> None:
-        out = _run_fail("--api-key", TEST_KEY, "account", f"opt-out-breach@{DOMAIN}")
-        assert "Not found" in out
+        out = _run_ok("--api-key", TEST_KEY, "account", f"opt-out-breach@{DOMAIN}")
+        assert "Clean" in out
 
     def test_paste_sensitive_breach_not_found(self) -> None:
-        out = _run_fail("--api-key", TEST_KEY, "account", f"paste-sensitive-breach@{DOMAIN}")
-        assert "Not found" in out
+        out = _run_ok("--api-key", TEST_KEY, "account", f"paste-sensitive-breach@{DOMAIN}")
+        assert "Clean" in out
 
     def test_permanent_opt_out_not_found(self) -> None:
-        out = _run_fail("--api-key", TEST_KEY, "account", f"permanent-opt-out@{DOMAIN}")
-        assert "Not found" in out
+        out = _run_ok("--api-key", TEST_KEY, "account", f"permanent-opt-out@{DOMAIN}")
+        assert "Clean" in out
 
     def test_sensitive_breach_hidden(self) -> None:
-        """Sensitive-only breach returns 404 via the public API."""
-        out = _run_fail("--api-key", TEST_KEY, "account", f"sensitive-breach@{DOMAIN}")
-        assert "Not found" in out
+        """Sensitive-only breach returns 404 via the public API -> clean exit 0."""
+        out = _run_ok("--api-key", TEST_KEY, "account", f"sensitive-breach@{DOMAIN}")
+        assert "Clean" in out
 
     def test_sensitive_and_other_breaches(self) -> None:
         """Returns non-sensitive breaches; sensitive ones are hidden."""
@@ -295,8 +296,8 @@ class TestAccountCommand:
         assert len(data) >= 2
 
     def test_not_active_breach_returns_nothing(self) -> None:
-        out = _run_fail("--api-key", TEST_KEY, "account", f"not-active-breach@{DOMAIN}")
-        assert "Not found" in out
+        out = _run_ok("--api-key", TEST_KEY, "account", f"not-active-breach@{DOMAIN}")
+        assert "Clean" in out
 
     def test_not_active_and_active_breach(self) -> None:
         data = _run_json("--api-key", TEST_KEY, "account", f"not-active-and-active-breach@{DOMAIN}")
@@ -305,9 +306,9 @@ class TestAccountCommand:
         assert data[0]["Name"] == "Adobe"
 
     def test_subscription_free_breach_not_visible_with_test_key(self) -> None:
-        """Subscription-free breach is not returned with the test API key."""
-        out = _run_fail("--api-key", TEST_KEY, "account", f"subscription-free-breach@{DOMAIN}")
-        assert "Not found" in out
+        """Subscription-free breach is not returned with the test API key -> clean exit 0."""
+        out = _run_ok("--api-key", TEST_KEY, "account", f"subscription-free-breach@{DOMAIN}")
+        assert "Clean" in out
 
     def test_subscription_free_and_other_breaches(self) -> None:
         """Only the non-subscription-free breaches are returned with test key."""
@@ -352,7 +353,7 @@ class TestAccountCommand:
         assert len(doc["runs"]) == 1
         assert len(doc["runs"][0]["results"]) >= 1
 
-    def test_account_fail_if_pwned_exits_one(self) -> None:
+    def test_account_fail_if_pwned_exits_eight(self) -> None:
         code, out = _run(
             "--api-key",
             TEST_KEY,
@@ -360,7 +361,7 @@ class TestAccountCommand:
             f"account-exists@{DOMAIN}",
             "--fail-if-pwned",
         )
-        assert code == 1
+        assert code == 8
         assert "Name:" in out
 
     def test_account_fail_if_pwned_clean_exits_zero(self) -> None:
@@ -452,6 +453,11 @@ class TestPasswordCommand:
         assert isinstance(data, dict)
         assert data["count"] > 0
 
+    def test_no_padding(self) -> None:
+        data = _run_json("password", "password", "--no-pad")
+        assert isinstance(data, dict)
+        assert data["count"] > 0
+
     def test_ntlm_with_padding(self) -> None:
         data = _run_json("password", "password", "--ntlm", "--pad")
         assert isinstance(data, dict)
@@ -469,9 +475,9 @@ class TestPasswordCommand:
         assert isinstance(data, dict)
         assert data["count"] == 0
 
-    def test_fail_if_pwned_exits_one(self) -> None:
+    def test_fail_if_pwned_exits_eight(self) -> None:
         code, out = _run("password", "password", "--fail-if-pwned")
-        assert code == 1
+        assert code == 8
         assert "found" in out.lower()
 
     def test_fail_if_pwned_strong_exits_zero(self) -> None:
@@ -539,7 +545,7 @@ class TestAuditCommand:
             "--check-strength",
             "--fail-if-pwned",
         )
-        assert code == 1
+        assert code == 8
         data = json.loads(out)
         assert data["total_entries"] == 3
         assert data["compromised_entries"] == 2
@@ -565,7 +571,7 @@ class TestAuditCommand:
             "--check-reuse",
             "--fail-if-pwned",
         )
-        assert code == 1
+        assert code == 8
         data = json.loads(out)
         assert data["total_entries"] == 2
         assert data["compromised_entries"] == 2
@@ -618,16 +624,17 @@ class TestMcpCommand:
 
 class TestErrorHandling:
     def test_no_api_key_for_account(self) -> None:
-        """Account lookup without any API key fails with auth error."""
-        out = _run_fail("account", f"account-exists@{DOMAIN}")
+        """Account lookup without any API key fails with auth error (exit 3)."""
+        out = _run_exit(3, "account", f"account-exists@{DOMAIN}")
         assert "API key" in out or "Unauthorized" in out
 
     def test_malformed_api_key_diagnostic(self) -> None:
-        out = _run_fail("--api-key", "not-a-valid-key", "account", f"account-exists@{DOMAIN}")
+        out = _run_exit(3, "--api-key", "not-a-valid-key", "account", f"account-exists@{DOMAIN}")
         assert "improperly formed" in out
 
     def test_invalid_hex_api_key_diagnostic(self) -> None:
-        out = _run_fail(
+        out = _run_exit(
+            3,
             "--api-key",
             "11111111111111111111111111111111",
             "account",

@@ -118,12 +118,15 @@ Prioritized from cross-ecosystem research (official `HaveIBeenPwned.Cli` / `have
 - [ ] **CC BY 4.0 attribution footer in Markdown reports** — append a compact HIBP attribution footer to `--format markdown` breach and paste reports (matching `README.md` and `--format html`).
 
 ### CLI UX & End-User Diagnostics
+- [x] **Enable `--pad` by default on `pwned password`** — send `Add-Padding: true` by default (`--pad/--no-pad`, matching `pwned audit` and `pwned mcp`) so interactive password checks hide response lengths out of the box.
+- [x] **Auto-prefer OS keyring on `pwned auth set|clear`** — default `--backend auto` stores credentials in the OS Keychain when `pwned[keyring]` is installed and usable (falling back to `0600` `~/.config/pwned/.env`), and clears both backends by default.
+- [x] **Clean exit-0 on no-match search results (`account`, `domain`, `pastes`, `stealer`)** — treat HIBP HTTP `404` on search commands as clean exit `0` (`[]`/`{}` in JSON, green `Clean (...)` in text), matching `password`, `search`, `account-range`, and official `hibp`.
 - [ ] **CLI password range lookup (`pwned password-range <5-hex>`)** — expose `get_password_range()` on the CLI (`--ntlm`, padding stripped) alongside `pwned password`.
 - [ ] **Raw 6-char SHA-1 prefix support on `account-range`** — allow passing a pre-hashed 6-char hex prefix directly to `pwned account-range` (matching `hibp account range <prefix>`).
 - [ ] **Non-interactive `pwned auth set --stdin`** — read `HIBP_API_KEY` from standard input for scripted setup without exposing secrets in shell history or `ps` output.
 - [ ] **Global `--outfile <path>` (+ `--force`)** — write formatted UTF-8 output directly to disk from any data command with safe overwrite protection (avoiding Windows PowerShell UTF-16 redirection issues).
 - [ ] **End-user `pwned doctor` CLI subcommand** — verify HIBP API connectivity, subscription tier/RPM, active credential source, keyring availability, cache size, and offline DB integrity directly from installed `pwned` binaries.
-- [ ] **Granular semantic exit codes (opt-in / v1.0 evaluation)** — evaluate distinguishing auth, permission/plan, rate-limit, network, and not-found exit codes (inspired by official `hibp` codes `0`–`9`) without breaking existing `0`/`1`/`2` scripting contracts.
+- [x] **Mirrored HIBP CLI semantic exit codes (`0`–`9`, `130`)** — align exit codes with official `HaveIBeenPwned.Cli` (`ExitCode` `IntEnum`, `BadRequestError`, `FileOrStoreError`, exit `8` on `--fail-if-pwned`, `3` auth, `4` forbidden, `5` rate limit, `6` network/5xx, `7` file/store, `9` missing resource/verification failure, `130` cancelled).
 
 ## Backlog / External
 

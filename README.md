@@ -17,17 +17,18 @@ An unofficial command-line tool and typed Python SDK for querying [Troy Hunt](ht
 
 ## Quickstart
 
-Check a password without installing anything (free, hidden prompt, no API key required):
+Try a public breach lookup without installing anything (free, no API key or secrets required):
 
 ```bash
-uvx --from git+https://github.com/domfahey/pwned.git pwned password
-# Password:
-# Password not found in any data breaches.
+uvx --from git+https://github.com/domfahey/pwned.git@v0.4.1 pwned breach Adobe
 ```
 
-Common workflows once installed:
+Common workflows once installed from a pinned or verified release:
 
 ```bash
+# Check a password privately (hidden prompt, k-anonymity + padding on by default)
+pwned password
+
 # Audit a password manager export locally for breaches, reuse, and weak passwords
 pwned audit vault.json --source bitwarden-json --check-reuse --check-strength
 
@@ -60,11 +61,13 @@ Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/) (or Docker/Podman for
 ### Global CLI (`uv tool`)
 
 ```bash
-uv tool install git+https://github.com/domfahey/pwned.git
+uv tool install git+https://github.com/domfahey/pwned.git@v0.4.1
 
 # With all optional extras (KeePass, OS Keychain, Bitwarden encryption, zxcvbn)
-uv tool install "pwned[all] @ git+https://github.com/domfahey/pwned.git"
+uv tool install "pwned[all] @ git+https://github.com/domfahey/pwned.git@v0.4.1"
 ```
+
+For sensitive password or vault audits, prefer a pinned release tag, verified [GitHub Release](https://github.com/domfahey/pwned/releases) wheel (`SHA256SUMS.txt` + `gh attestation verify`), or audited local clone (`uv sync --frozen`).
 
 Optional extras: `keepass` (`pykeepass`), `keyring` (OS Keychain), `crypto` (`cryptography>=44.0` for Bitwarden PBKDF2 & Argon2id encrypted JSON), `strength` (`zxcvbn`), or `all`.
 
@@ -101,10 +104,11 @@ When running from a local clone, prefix commands with `uv run pwned ...`.
 Authenticated endpoints require an [HIBP API key](https://haveibeenpwned.com/API/Key). Manage credentials securely via `pwned auth`:
 
 ```bash
-pwned auth set                      # Store in ~/.config/pwned/.env (mode 0600)
-pwned auth set --backend keyring    # Store in OS Keychain (requires pwned[keyring])
+pwned auth set                      # Store in OS Keychain if pwned[keyring] is installed, else ~/.config/pwned/.env (0600)
+pwned auth set --backend file       # Force file storage (~/.config/pwned/.env, mode 0600)
+pwned auth set --backend keyring    # Force OS Keychain storage (requires pwned[keyring])
 pwned auth show                     # Show masked key status and active source
-pwned auth clear                    # Remove stored key
+pwned auth clear                    # Remove stored key from OS Keychain and/or config file
 ```
 
 API key precedence (highest first): `--api-key` CLI flag > `HIBP_API_KEY` env var > CWD `.env` (see [.env.example](.env.example)) > `~/.config/pwned/.env` > OS Keychain.
@@ -228,7 +232,7 @@ steps:
       api-key: ${{ secrets.HIBP_API_KEY }}
 ```
 
-Commands like `password` and `audit` use the free *k*-anonymity API and do not require `api-key`. Exit codes: `0` clean, `1` exposure found with `--fail-if-pwned`, `2` CLI/auth/config error.
+Commands like `password` and `audit` use the free *k*-anonymity API and do not require `api-key`. Exit codes mirror the official HIBP CLI (`0` clean/success, `8` exposure found with `--fail-if-pwned`, `2`–`7`/`9`/`130` usage, auth, plan, rate-limit, network, file/store, missing-resource, or cancellation codes — see [CLI Reference](docs/cli-reference.md#exit-codes)).
 
 | Input | Required | Default | Description |
 |---|---|---|---|

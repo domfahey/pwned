@@ -47,6 +47,10 @@ class HIBPError(Exception):
     pass
 
 
+class BadRequestError(HIBPError):
+    pass
+
+
 class NotFoundError(HIBPError):
     pass
 
@@ -149,6 +153,10 @@ def _build_headers(api_key: str | None, user_agent: str) -> dict[str, str]:
 
 def _raise_for_error_response(resp: httpx.Response) -> None:
     """Raise the appropriate HIBPError subclass for an HTTP error response."""
+    if resp.status_code == 400:
+        detail = _extract_error_message(resp)
+        msg = f"HTTP 400: {detail}" if detail else "HTTP 400"
+        raise BadRequestError(msg)
     if resp.status_code == 401:
         detail = _extract_error_message(resp)
         raise UnauthorizedError(detail or "Invalid or missing API key")

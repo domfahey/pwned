@@ -162,6 +162,7 @@ All HTTP clients (`HIBPClient`, `AsyncHIBPClient`, `PwnedPasswordsClient`, `Asyn
 | Exception | Cause |
 |---|---|
 | `HIBPError` | Base exception for all HTTP, network, and webhook failures |
+| `BadRequestError` | HTTP `400` (rejected request, invalid domain/parameter, or already-verified domain) |
 | `UnauthorizedError` | HTTP `401` (missing, malformed, or invalid `hibp-api-key`) |
 | `ForbiddenError` | HTTP `403` (missing `User-Agent`, unverified domain, or plan tier restriction) |
 | `NotFoundError` | HTTP `404` (no results found, or endpoint-specific detail such as `verifyMetaTag`) |

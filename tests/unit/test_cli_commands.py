@@ -147,8 +147,57 @@ class TestAuthCommands:
         monkeypatch.setattr("pwned.cli_commands.save_api_key_keyring", _raise_rt)
         app = _make_cli()
         result = cli_runner.invoke(app, ["auth", "set", "secret-key", "--backend", "keyring"])
-        assert result.exit_code == 1
+        assert result.exit_code == 7
         assert "keyring package is not installed." in result.output
+
+    def test_auth_set_auto_prefers_keyring_when_available(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        saved: list[str] = []
+        monkeypatch.setattr("pwned.cli_commands.keyring_available", lambda: True)
+        monkeypatch.setattr("pwned.cli_commands.save_api_key_keyring", saved.append)
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["auth", "set", "auto-kr-key"])
+        assert result.exit_code == 0
+        assert saved == ["auto-kr-key"]
+        assert "Saved API key to OS keyring." in result.output
+        assert not get_config_file().exists()
+
+    def test_auth_set_auto_invalid_key_does_not_fallback(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        def _raise_val(key: str) -> None:
+            raise ValueError("API key must not be empty.")
+
+        monkeypatch.setattr("pwned.cli_commands.keyring_available", lambda: True)
+        monkeypatch.setattr("pwned.cli_commands.save_api_key_keyring", _raise_val)
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["auth", "set", "   "])
+        assert result.exit_code == 2
+        assert "API key must not be empty." in result.output
+
+    def test_auth_set_auto_falls_back_to_file_when_keyring_fails(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        def _raise_err(key: str) -> None:
+            raise RuntimeError("No unlocked keyring backend.")
+
+        monkeypatch.setattr("pwned.cli_commands.keyring_available", lambda: True)
+        monkeypatch.setattr("pwned.cli_commands.save_api_key_keyring", _raise_err)
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["auth", "set", "fallback-key"])
+        assert result.exit_code == 0
+        assert "falling back to file storage" in result.stderr
+        assert "HIBP_API_KEY=fallback-key" in get_config_file().read_text(encoding="utf-8")
+
+    def test_auth_set_explicit_file_skips_keyring(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        monkeypatch.setattr("pwned.cli_commands.keyring_available", lambda: True)
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["auth", "set", "file-only-key", "--backend", "file"])
+        assert result.exit_code == 0
+        assert "HIBP_API_KEY=file-only-key" in get_config_file().read_text(encoding="utf-8")
 
     def test_auth_show_configured_json(
         self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
@@ -258,8 +307,58 @@ class TestAuthCommands:
         monkeypatch.setattr("pwned.cli_commands.clear_api_key_keyring", _raise_rt)
         app = _make_cli()
         result = cli_runner.invoke(app, ["auth", "clear", "--backend", "keyring"])
-        assert result.exit_code == 1
+        assert result.exit_code == 7
         assert "keyring package is not installed." in result.output
+
+    def test_auth_clear_auto_removes_both_keyring_and_file(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        save_api_key("1234567890abcdef")
+        monkeypatch.setattr("pwned.cli_commands.keyring_available", lambda: True)
+        monkeypatch.setattr("pwned.cli_commands.clear_api_key_keyring", lambda: True)
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["auth", "clear"])
+        assert result.exit_code == 0
+        assert result.output.strip() == "API key removed from OS keyring and config file."
+        assert not get_config_file().exists()
+
+    def test_auth_clear_auto_removes_keyring_only(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        monkeypatch.setattr("pwned.cli_commands.keyring_available", lambda: True)
+        monkeypatch.setattr("pwned.cli_commands.clear_api_key_keyring", lambda: True)
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["auth", "clear"])
+        assert result.exit_code == 0
+        assert result.output.strip() == "API key removed from OS keyring."
+
+    def test_auth_clear_auto_ignores_keyring_error_and_clears_file(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        def _raise_err() -> bool:
+            raise RuntimeError("No unlocked keyring backend.")
+
+        save_api_key("1234567890abcdef")
+        monkeypatch.setattr("pwned.cli_commands.keyring_available", lambda: True)
+        monkeypatch.setattr("pwned.cli_commands.clear_api_key_keyring", _raise_err)
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["auth", "clear"])
+        assert result.exit_code == 0
+        assert result.output.strip() == "API key removed."
+        assert not get_config_file().exists()
+
+    def test_auth_clear_explicit_file_backend(
+        self, isolated_env: Path, cli_runner: CliRunner
+    ) -> None:
+        save_api_key("1234567890abcdef")
+        app = _make_cli()
+        res_removed = cli_runner.invoke(app, ["auth", "clear", "--backend", "file"])
+        assert res_removed.exit_code == 0
+        assert res_removed.output.strip() == "API key removed."
+
+        res_missing = cli_runner.invoke(app, ["auth", "clear", "--backend", "file"])
+        assert res_missing.exit_code == 0
+        assert res_missing.output.strip() == "No stored API key found."
 
 
 class TestSearchCommand:
@@ -327,7 +426,7 @@ class TestSearchCommand:
     def test_search_missing_api_key(self, isolated_env: Path, cli_runner: CliRunner) -> None:
         app = _make_cli()
         result = cli_runner.invoke(app, ["search", "user@example.com"])
-        assert result.exit_code == 1
+        assert result.exit_code == 3
         assert "Invalid or missing API key" in result.output
 
     def test_search_fail_if_pwned_on_breaches(
@@ -342,7 +441,7 @@ class TestSearchCommand:
         result = cli_runner.invoke(
             app, ["--api-key", TEST_KEY, "search", "user@example.com", "--fail-if-pwned"]
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 8
         assert "Adobe" in result.output
 
     def test_search_fail_if_pwned_on_pastes(
@@ -357,7 +456,7 @@ class TestSearchCommand:
         result = cli_runner.invoke(
             app, ["--api-key", TEST_KEY, "search", "user@example.com", "--fail-if-pwned"]
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 8
         assert "Pastebin" in result.output
 
     def test_search_fail_if_pwned_on_stealer_logs(
@@ -381,7 +480,7 @@ class TestSearchCommand:
                 "--fail-if-pwned",
             ],
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 8
         assert "evil.example" in result.output
 
     def test_search_fail_if_pwned_clean(
@@ -444,7 +543,7 @@ class TestSearchCommand:
                 "--fail-if-pwned",
             ],
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 8
         diff_data = json.loads(result.output)
         assert diff_data == {
             "breaches": [{"Name": "LinkedIn"}],
@@ -512,7 +611,7 @@ class TestSearchCommand:
                 str(bad_file),
             ],
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 7
         assert "Baseline search result must be a JSON object" in result.output
 
     def test_search_notify_webhook_posts_before_fail_if_pwned(
@@ -544,7 +643,7 @@ class TestSearchCommand:
                 "--fail-if-pwned",
             ],
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 8
         assert json.loads(result.output)["breaches"] == [{"Name": "Adobe"}]
         webhook_reqs = [r for r in httpx_mock.get_requests() if r.method == "POST"]
         assert len(webhook_reqs) == 1
@@ -627,7 +726,7 @@ class TestAccountRangeCommand:
         assert result.exit_code == 0
         assert "No results found." in result.output
 
-    def test_account_range_fail_if_pwned_exits_one(
+    def test_account_range_fail_if_pwned_exits_eight(
         self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
     ) -> None:
         prefix, suffix = _email_sha1_parts("user@example.com")
@@ -639,13 +738,13 @@ class TestAccountRangeCommand:
         result = cli_runner.invoke(
             app, ["--api-key", TEST_KEY, "account-range", "user@example.com", "--fail-if-pwned"]
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 8
         assert "Adobe" in result.output
 
     def test_account_range_missing_api_key(self, isolated_env: Path, cli_runner: CliRunner) -> None:
         app = _make_cli()
         result = cli_runner.invoke(app, ["account-range", "user@example.com"])
-        assert result.exit_code == 1
+        assert result.exit_code == 3
         assert "Invalid or missing API key" in result.output
 
 
@@ -689,14 +788,26 @@ class TestDomainVerifyCommands:
             method="POST",
             url=f"{BASE}/domainVerification/verifyDnsToken",
             status_code=400,
-            json={"message": "TXT record not found"},
+            json={"message": "Domain has already been verified."},
         )
         app = _make_cli()
         result = cli_runner.invoke(
             app, ["--api-key", TEST_KEY, "domain-verify", "dns-check", "example.com"]
         )
-        assert result.exit_code == 1
-        assert "TXT record not found" in result.output
+        assert result.exit_code == 2
+        assert "Domain has already been verified." in result.output
+
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{BASE}/domainVerification/verifyDnsToken",
+            status_code=404,
+            json={"message": "No hibp-verify TXT records were found on the domain."},
+        )
+        res_404 = cli_runner.invoke(
+            app, ["--api-key", TEST_KEY, "domain-verify", "dns-check", "example.com"]
+        )
+        assert res_404.exit_code == 9
+        assert "No hibp-verify TXT records were found on the domain." in res_404.output
 
     def test_email_verification(
         self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
@@ -767,14 +878,26 @@ class TestDomainVerifyCommands:
             method="POST",
             url=f"{BASE}/domainVerification/verifyMetaTag",
             status_code=400,
-            json={"message": "Meta tag not found"},
+            json={"message": "Domain has already been verified."},
         )
         app = _make_cli()
         result = cli_runner.invoke(
             app, ["--api-key", TEST_KEY, "domain-verify", "meta-check", "example.com"]
         )
-        assert result.exit_code == 1
-        assert "Meta tag not found" in result.output
+        assert result.exit_code == 2
+        assert "Domain has already been verified." in result.output
+
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{BASE}/domainVerification/verifyMetaTag",
+            status_code=404,
+            json={"message": "Meta tag not found"},
+        )
+        res_404 = cli_runner.invoke(
+            app, ["--api-key", TEST_KEY, "domain-verify", "meta-check", "example.com"]
+        )
+        assert res_404.exit_code == 9
+        assert "Meta tag not found" in res_404.output
 
     def test_domain_verify_requires_api_key(
         self, isolated_env: Path, cli_runner: CliRunner
@@ -788,7 +911,7 @@ class TestDomainVerifyCommands:
             ["domain-verify", "meta-check", "example.com"],
         ):
             result = cli_runner.invoke(app, subcmd)
-            assert result.exit_code == 1
+            assert result.exit_code == 3
             assert "Invalid or missing API key" in result.output
 
 
@@ -871,7 +994,7 @@ class TestAuditCommand:
                 "--fail-if-pwned",
             ],
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 8
         data = json.loads(result.output)
         assert data["total_entries"] == 2
         assert data["compromised_entries"] == 1
@@ -912,7 +1035,7 @@ class TestAuditCommand:
             ["audit", str(db_file), "--source", "keepass"],
             input="masterpw\n",
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 7
         assert "KeePass master password" in result.output
         assert "optional 'keepass' dependency" in result.output
 
@@ -957,7 +1080,7 @@ class TestAuditCommand:
         bad_file.write_text("{not valid json", encoding="utf-8")
         app = _make_cli()
         result = cli_runner.invoke(app, ["audit", str(bad_file)])
-        assert result.exit_code == 1
+        assert result.exit_code == 7
         assert "Error:" in result.output
 
     def test_audit_bitwarden_encrypted_json_prompts_and_passes_password(
@@ -1163,7 +1286,7 @@ class TestAuditCommand:
                 "--fail-if-pwned",
             ],
         )
-        assert res_sha1.exit_code == 1
+        assert res_sha1.exit_code == 8
         data_sha1 = json.loads(res_sha1.output)
         assert data_sha1["compromised_entries"] == 2
         assert data_sha1["reused_groups"] == [
@@ -1383,7 +1506,7 @@ class TestAuditCommand:
                 "--fail-if-pwned",
             ],
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 8
         webhook_reqs = [r for r in httpx_mock.get_requests() if r.method == "POST"]
         assert len(webhook_reqs) == 1
         payload = json.loads(webhook_reqs[0].content)
@@ -1550,7 +1673,7 @@ class TestOfflineCommand:
         monkeypatch.setattr("pwned.cli_commands.download_offline_db", fake_download)
         app = _make_cli()
         result = cli_runner.invoke(app, ["offline", "download", str(isolated_env / "hashes.txt")])
-        assert result.exit_code == 1
+        assert result.exit_code == 6
         assert "HTTP 503 for prefix 00000" in result.output
 
 
@@ -1600,7 +1723,7 @@ class TestDomainReportCommand:
                 "--fail-if-pwned",
             ],
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 8
         data = json.loads(result.output)
         assert data["domain"] == "example.com"
         assert data["total_exposed_aliases"] == 2
@@ -1627,7 +1750,7 @@ class TestDomainReportCommand:
                 "--fail-if-pwned",
             ],
         )
-        assert res_stealer.exit_code == 1
+        assert res_stealer.exit_code == 8
 
         httpx_mock.add_response(url=f"{BASE}/breacheddomain/clean.example", status_code=404)
         res_clean = cli_runner.invoke(
@@ -1642,7 +1765,7 @@ class TestDomainReportCommand:
     ) -> None:
         app = _make_cli()
         res_no_key = cli_runner.invoke(app, ["domain-report", "example.com"])
-        assert res_no_key.exit_code == 1
+        assert res_no_key.exit_code == 3
         assert "Invalid or missing API key" in res_no_key.output
 
         httpx_mock.add_response(
@@ -1732,7 +1855,7 @@ class TestMonitorCommand:
             app,
             ["--api-key", TEST_KEY, "--format", "table", "monitor", "--config", str(cfg)],
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 8
         assert "Field" in result.output
         assert "new_exposures" in result.output
 
@@ -1744,13 +1867,13 @@ class TestMonitorCommand:
 
         app = _make_cli()
         res_bad = cli_runner.invoke(app, ["monitor", "--config", str(bad_cfg)])
-        assert res_bad.exit_code == 1
+        assert res_bad.exit_code == 7
         assert "at least one account or domain target" in res_bad.output
 
         valid_cfg = isolated_env / "valid.toml"
         valid_cfg.write_text('[[accounts]]\nemail = "a@b.com"\n', encoding="utf-8")
         res_no_key = cli_runner.invoke(app, ["monitor", "--config", str(valid_cfg)])
-        assert res_no_key.exit_code == 1
+        assert res_no_key.exit_code == 3
         assert "Invalid or missing API key" in res_no_key.output
 
     def test_monitor_save_baselines_webhook_override_and_invalid_webhook(
@@ -1788,7 +1911,7 @@ class TestMonitorCommand:
                 "--fail-if-pwned",
             ],
         )
-        assert res_ok.exit_code == 1
+        assert res_ok.exit_code == 8
         assert json.loads(res_ok.output)["webhook_sent"] is True
         assert (isolated_env / "baselines").is_dir()
 

@@ -31,6 +31,8 @@ from pwned.batch import (
 from pwned.cache import ResponseCache
 from pwned.cli_commands import register_extra_commands
 from pwned.cli_helpers import (
+    ExitCode,
+    FileOrStoreError,
     get_cache,
     get_output_format,
     render_output,
@@ -179,7 +181,7 @@ def _apply_baseline_diff[T](
         previous = load_baseline(baseline_path)
         return diff_fn(current, previous)
     except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise FileOrStoreError(str(exc)) from exc
 
 
 def _maybe_notify(
@@ -310,6 +312,20 @@ def _echo_status(message: str, *, fg: str) -> None:
         click.echo(message)
 
 
+def _render_search_result(
+    ctx: click.Context,
+    data: Any,
+    *,
+    was_not_found: bool,
+    clean_message: str,
+    allow_clean_text: bool = True,
+) -> None:
+    if was_not_found and allow_clean_text and get_output_format(ctx) == "text":
+        _echo_status(clean_message, fg="green")
+    else:
+        render_output(ctx, data)
+
+
 def _account_progress(idx: int, total: int, item: AccountBatchItem) -> None:
     click.echo(f"[{idx}/{total}] {item.account}: {item.status}", err=True)
 
@@ -348,8 +364,6 @@ def _run_account_single(
                 include_unverified=not no_include_unverified,
             )
         except NotFoundError:
-            if not (fail_if_pwned or baseline is not None or save_baseline_path is not None):
-                raise
             data = []
             was_not_found = True
 
@@ -365,10 +379,13 @@ def _run_account_single(
         save_baseline(save_baseline_path, data)
     data = _apply_baseline_diff(data, baseline, diff_breaches)
 
-    if was_not_found and fail_if_pwned and baseline is None and get_output_format(ctx) == "text":
-        _echo_status("Clean (not found in any breaches).", fg="green")
-    else:
-        render_output(ctx, data)
+    _render_search_result(
+        ctx,
+        data,
+        was_not_found=was_not_found,
+        clean_message="Clean (not found in any breaches).",
+        allow_clean_text=baseline is None,
+    )
     _maybe_notify(
         notify_webhook,
         webhook_format,
@@ -376,7 +393,7 @@ def _run_account_single(
         title=f"pwned Account Alert: {account}",
     )
     if fail_if_pwned and data:
-        sys.exit(1)
+        sys.exit(int(ExitCode.FINDINGS))
 
 
 @cli.command()
@@ -439,7 +456,7 @@ def _run_account_single(
 @click.option(
     "--fail-if-pwned",
     is_flag=True,
-    help="Exit with code 1 if any account is found in breaches.",
+    help="Exit with code 8 if any account is found in breaches.",
 )
 @click.option(
     "--notify-webhook",
@@ -549,7 +566,7 @@ def account(
         title="pwned Batch Account Alert",
     )
     if fail_if_pwned and any(r.status == "pwned" for r in results):
-        sys.exit(1)
+        sys.exit(int(ExitCode.FINDINGS))
 
 
 @cli.command("domain")
@@ -570,7 +587,7 @@ def account(
 @click.option(
     "--fail-if-pwned",
     is_flag=True,
-    help="Exit with code 1 if any domain aliases are found in breaches.",
+    help="Exit with code 8 if any domain aliases are found in breaches.",
 )
 @click.option(
     "--notify-webhook",
@@ -597,17 +614,23 @@ def domain_cmd(
     """Get breached email addresses for a domain. Requires API key."""
     s = ctx.obj["settings"]
     api_key = require_api_key(ctx)
+    was_not_found = False
     with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
         try:
             data = client.get_domain_breaches(domain)
         except NotFoundError:
-            if not (fail_if_pwned or baseline is not None or save_baseline_path is not None):
-                raise
             data = {}
+            was_not_found = True
     if save_baseline_path is not None:
         save_baseline(save_baseline_path, data)
     data = _apply_baseline_diff(data, baseline, diff_domain_breaches)
-    render_output(ctx, data)
+    _render_search_result(
+        ctx,
+        data,
+        was_not_found=was_not_found,
+        clean_message="Clean (no breached accounts found).",
+        allow_clean_text=baseline is None,
+    )
     _maybe_notify(
         notify_webhook,
         webhook_format,
@@ -615,7 +638,7 @@ def domain_cmd(
         title=f"pwned Domain Alert: {domain}",
     )
     if fail_if_pwned and data:
-        sys.exit(1)
+        sys.exit(int(ExitCode.FINDINGS))
 
 
 def _list_subscribed_domains(ctx: click.Context) -> None:
@@ -664,9 +687,19 @@ def pastes(ctx: click.Context, email: str) -> None:
     """Get pastes for an email address. Requires API key."""
     s = ctx.obj["settings"]
     api_key = require_api_key(ctx)
+    was_not_found = False
     with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
-        data = client.get_pastes(email)
-    render_output(ctx, data)
+        try:
+            data = client.get_pastes(email)
+        except NotFoundError:
+            data = []
+            was_not_found = True
+    _render_search_result(
+        ctx,
+        data,
+        was_not_found=was_not_found,
+        clean_message="Clean (not found in any pastes).",
+    )
 
 
 # --- Stealer log commands ---
@@ -685,9 +718,19 @@ def stealer_email(ctx: click.Context, email: str) -> None:
     """Get stealer log domains for an email address."""
     s = ctx.obj["settings"]
     api_key = require_api_key(ctx)
+    was_not_found = False
     with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
-        data = client.get_stealer_logs_by_email(email)
-    render_output(ctx, data)
+        try:
+            data = client.get_stealer_logs_by_email(email)
+        except NotFoundError:
+            data = []
+            was_not_found = True
+    _render_search_result(
+        ctx,
+        data,
+        was_not_found=was_not_found,
+        clean_message="Clean (no stealer log records found).",
+    )
 
 
 @stealer.command("website")
@@ -698,9 +741,19 @@ def stealer_website(ctx: click.Context, domain: str) -> None:
     """Get stealer log email addresses for a website domain."""
     s = ctx.obj["settings"]
     api_key = require_api_key(ctx)
+    was_not_found = False
     with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
-        data = client.get_stealer_logs_by_website_domain(domain)
-    render_output(ctx, data)
+        try:
+            data = client.get_stealer_logs_by_website_domain(domain)
+        except NotFoundError:
+            data = []
+            was_not_found = True
+    _render_search_result(
+        ctx,
+        data,
+        was_not_found=was_not_found,
+        clean_message="Clean (no stealer log records found).",
+    )
 
 
 @stealer.command("domain")
@@ -711,9 +764,19 @@ def stealer_domain(ctx: click.Context, domain: str) -> None:
     """Get stealer log email aliases for an email domain."""
     s = ctx.obj["settings"]
     api_key = require_api_key(ctx)
+    was_not_found = False
     with HIBPClient(api_key=api_key, user_agent=s.user_agent) as client:
-        data = client.get_stealer_logs_by_email_domain(domain)
-    render_output(ctx, data)
+        try:
+            data = client.get_stealer_logs_by_email_domain(domain)
+        except NotFoundError:
+            data = {}
+            was_not_found = True
+    _render_search_result(
+        ctx,
+        data,
+        was_not_found=was_not_found,
+        clean_message="Clean (no stealer log records found).",
+    )
 
 
 # --- Password command ---
@@ -753,7 +816,7 @@ def _check_single_password(
     else:
         render_output(ctx, {"count": count})
     if fail_if_pwned and count >= threshold:
-        sys.exit(1)
+        sys.exit(int(ExitCode.FINDINGS))
 
 
 async def _run_async_password_batch(
@@ -831,7 +894,7 @@ def _check_batch_passwords(
         )
     render_output(ctx, results)
     if fail_if_pwned and any(r.status == "pwned" for r in results):
-        sys.exit(1)
+        sys.exit(int(ExitCode.FINDINGS))
 
 
 @cli.command()
@@ -845,7 +908,12 @@ def _check_batch_passwords(
     help="Check passwords (one per line) from a file.",
 )
 @click.option("--ntlm", is_flag=True, help="Use NTLM hash instead of SHA-1.")
-@click.option("--pad", is_flag=True, help="Request padded responses.")
+@click.option(
+    "--pad/--no-pad",
+    default=True,
+    show_default=True,
+    help="Request padded responses to hide response length.",
+)
 @click.option(
     "--hashed",
     is_flag=True,
@@ -877,7 +945,7 @@ def _check_batch_passwords(
 @click.option(
     "--fail-if-pwned",
     is_flag=True,
-    help="Exit with code 1 if password count meets threshold.",
+    help="Exit with code 8 if password count meets threshold.",
 )
 @click.pass_context
 @handle_errors

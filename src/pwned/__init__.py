@@ -40,7 +40,9 @@ from pwned.batch import (
     format_batch_stats,
 )
 from pwned.cache import ResponseCache
+from pwned.cli_helpers import ExitCode
 from pwned.client import (
+    BadRequestError,
     ForbiddenError,
     HIBPClient,
     HIBPError,
@@ -130,6 +132,7 @@ __all__ = [
     "AuditFinding",
     "AuditSummary",
     "BREACH_SORT_KEYS",
+    "BadRequestError",
     "BatchStats",
     "Breach",
     "BreachExposureSummary",
@@ -143,6 +146,7 @@ __all__ = [
     "DomainReport",
     "DownloadStats",
     "EmailAlias",
+    "ExitCode",
     "ExportSource",
     "ForbiddenError",
     "HIBPClient",

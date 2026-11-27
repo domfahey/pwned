@@ -56,7 +56,7 @@ Key behaviors:
 # First run: save snapshot
 pwned domain example.com --save-baseline domain-baseline.json
 
-# Subsequent cron/CI runs: alert and exit 1 only on newly discovered exposures
+# Subsequent cron/CI runs: alert and exit 8 only on newly discovered exposures
 pwned domain example.com \
   --baseline domain-baseline.json \
   --save-baseline domain-baseline.json \

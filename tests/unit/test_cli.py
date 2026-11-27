@@ -193,8 +193,55 @@ class TestAccountCommands:
             cli,
             ["--api-key", TEST_KEY, "account", "nobody@example.com"],
         )
-        assert result.exit_code == 1
-        assert "Not found" in result.output
+        assert result.exit_code == 0
+        assert "Clean (not found in any breaches)." in result.output
+
+    def test_account_not_found_json(self, httpx_mock: HTTPXMock, cli_runner: CliRunner) -> None:
+        httpx_mock.add_response(status_code=404)
+        result = cli_runner.invoke(
+            cli,
+            ["--api-key", TEST_KEY, "--json", "account", "nobody@example.com"],
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.output) == []
+
+    def test_pastes_and_stealer_404_return_clean_exit_zero(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/clean%40example.com", status_code=404)
+        res_pastes = cli_runner.invoke(cli, ["--api-key", TEST_KEY, "pastes", "clean@example.com"])
+        assert res_pastes.exit_code == 0
+        assert "Clean (not found in any pastes)." in res_pastes.output
+
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/clean%40example.com", status_code=404)
+        res_pastes_json = cli_runner.invoke(
+            cli, ["--api-key", TEST_KEY, "--json", "pastes", "clean@example.com"]
+        )
+        assert res_pastes_json.exit_code == 0
+        assert json.loads(res_pastes_json.output) == []
+
+        httpx_mock.add_response(
+            url=f"{BASE}/stealerlogsbyemail/clean%40example.com", status_code=404
+        )
+        res_se = cli_runner.invoke(
+            cli, ["--api-key", TEST_KEY, "stealer", "email", "clean@example.com"]
+        )
+        assert res_se.exit_code == 0
+        assert "Clean (no stealer log records found)." in res_se.output
+
+        httpx_mock.add_response(url=f"{BASE}/stealerlogsbywebsitedomain/clean.com", status_code=404)
+        res_sw = cli_runner.invoke(
+            cli, ["--api-key", TEST_KEY, "--json", "stealer", "website", "clean.com"]
+        )
+        assert res_sw.exit_code == 0
+        assert json.loads(res_sw.output) == []
+
+        httpx_mock.add_response(url=f"{BASE}/stealerlogsbyemaildomain/clean.com", status_code=404)
+        res_sd = cli_runner.invoke(
+            cli, ["--api-key", TEST_KEY, "--json", "stealer", "domain", "clean.com"]
+        )
+        assert res_sd.exit_code == 0
+        assert json.loads(res_sd.output) == {}
 
     def test_account_unauthorized(self, httpx_mock: HTTPXMock, cli_runner: CliRunner) -> None:
         httpx_mock.add_response(status_code=401)
@@ -202,7 +249,7 @@ class TestAccountCommands:
             cli,
             ["--api-key", "badkey00000000000000000000000000", "account", "test@example.com"],
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 3
         assert "API key" in result.output
 
     @pytest.mark.parametrize(
@@ -225,7 +272,7 @@ class TestAccountCommands:
     ) -> None:
         """Missing API key fails locally without making any HTTP request."""
         result = cli_runner.invoke(cli, argv)
-        assert result.exit_code == 1
+        assert result.exit_code == 3
         assert "API key" in result.output
 
 
@@ -462,6 +509,28 @@ class TestPasswordCommand:
         assert request is not None
         assert request.headers["add-padding"] == "true"
 
+    def test_password_pads_by_default_and_respects_no_pad(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        prefix, suffix = _sha1_parts("password")
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{prefix}",
+            text=f"{suffix}:7\n",
+        )
+        res_default = cli_runner.invoke(cli, ["password", "password"])
+        assert res_default.exit_code == 0
+        req_default = httpx_mock.get_requests()[-1]
+        assert req_default.headers["add-padding"] == "true"
+
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{prefix}",
+            text=f"{suffix}:7\n",
+        )
+        res_no_pad = cli_runner.invoke(cli, ["password", "--no-pad", "password"])
+        assert res_no_pad.exit_code == 0
+        req_no_pad = httpx_mock.get_requests()[-1]
+        assert "add-padding" not in req_no_pad.headers
+
     def test_password_json_not_found(self, httpx_mock: HTTPXMock, cli_runner: CliRunner) -> None:
         prefix, _ = _sha1_parts("unique-pw")
         httpx_mock.add_response(
@@ -481,7 +550,7 @@ class TestPasswordCommand:
             status_code=500,
         )
         result = cli_runner.invoke(cli, ["password", "password"])
-        assert result.exit_code == 1
+        assert result.exit_code == 6
         assert "Error: HTTP 500" in result.output
 
     def test_password_interactive_prompt(
@@ -528,7 +597,7 @@ class TestErrorHandling:
                 headers={"retry-after": "0"},
             )
         result = cli_runner.invoke(cli, ["breaches"])
-        assert result.exit_code == 1
+        assert result.exit_code == 5
         assert "Error:" in result.output
 
     def test_network_error_handled_gracefully(
@@ -536,7 +605,7 @@ class TestErrorHandling:
     ) -> None:
         httpx_mock.add_exception(httpx.ConnectError("dns failure"), url=f"{BASE}/breaches")
         result = cli_runner.invoke(cli, ["breaches"])
-        assert result.exit_code == 1
+        assert result.exit_code == 6
         assert "Error: Request failed:" in result.output
 
     def test_forbidden_error_with_detail_through_cli(
@@ -548,7 +617,7 @@ class TestErrorHandling:
             json={"statusCode": 403, "message": "Domain not verified."},
         )
         result = cli_runner.invoke(cli, ["--api-key", TEST_KEY, "domain", "unverified.com"])
-        assert result.exit_code == 1
+        assert result.exit_code == 4
         assert "Error: Domain not verified." in result.output
 
     def test_not_found_and_unauthorized_details_through_cli(
@@ -564,7 +633,7 @@ class TestErrorHandling:
         res_404 = cli_runner.invoke(
             cli, ["--api-key", TEST_KEY, "domain-verify", "meta-check", "example.com"]
         )
-        assert res_404.exit_code == 1
+        assert res_404.exit_code == 9
         assert res_404.output.strip() == f"Not found: {detail}"
 
         httpx_mock.add_response(
@@ -574,10 +643,44 @@ class TestErrorHandling:
             headers={"content-type": "text/plain"},
         )
         res_401 = cli_runner.invoke(cli, ["breaches"])
-        assert res_401.exit_code == 1
+        assert res_401.exit_code == 3
         assert (
             res_401.output.strip() == "Error: Access denied due to improperly formed hibp-api-key."
         )
+
+    def test_bad_request_exits_2(self, httpx_mock: HTTPXMock, cli_runner: CliRunner) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            status_code=400,
+            json={"message": "Invalid domain parameter."},
+        )
+        result = cli_runner.invoke(cli, ["breaches"])
+        assert result.exit_code == 2
+        assert "Error: HTTP 400: Invalid domain parameter." in result.output
+
+    def test_os_error_exits_7(self, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise_os(*args: object, **kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("pwned.cli.HIBPClient.get_breaches", _raise_os)
+        result = cli_runner.invoke(cli, ["breaches"])
+        assert result.exit_code == 7
+        assert "Error: disk full" in result.output
+
+    def test_keyboard_interrupt_and_abort_exit_130(
+        self, cli_runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _raise_interrupt(*args: object, **kwargs: object) -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("pwned.cli.HIBPClient.get_breaches", _raise_interrupt)
+        res_sigint = cli_runner.invoke(cli, ["breaches"])
+        assert res_sigint.exit_code == 130
+        assert "Cancelled." in res_sigint.output
+
+        res_abort = cli_runner.invoke(cli, ["password"], input="")
+        assert res_abort.exit_code == 130
+        assert "Cancelled." in res_abort.output
 
     def test_validation_error_handled_gracefully(
         self, httpx_mock: HTTPXMock, cli_runner: CliRunner
@@ -644,7 +747,7 @@ class TestGlobalOptionGroup:
         assert request.headers["user-agent"] == "my-agent"
 
         res_empty = cli_runner.invoke(cli, ["subscription", "--api-key="])
-        assert res_empty.exit_code == 1
+        assert res_empty.exit_code == 3
         assert "API key" in res_empty.output
 
     def test_json_flag_after_subcommand(self, httpx_mock: HTTPXMock, cli_runner: CliRunner) -> None:
@@ -680,7 +783,7 @@ class TestGlobalOptionGroup:
         (tmp_path / ".env").write_text("HIBP_API_KEY=dotenvsecret\n", encoding="utf-8")
         monkeypatch.setenv("HIBP_API_KEY", "")
         result = cli_runner.invoke(cli, ["subscription"])
-        assert result.exit_code == 1
+        assert result.exit_code == 3
         assert "API key" in result.output
 
 
@@ -693,6 +796,19 @@ class TestPackageExports:
 
     def test_handle_errors_importable_from_cli(self) -> None:
         assert callable(handle_errors)
+
+    def test_exit_code_enum_values(self) -> None:
+        assert int(pwned.ExitCode.OK) == 0
+        assert int(pwned.ExitCode.ERROR) == 1
+        assert int(pwned.ExitCode.INVALID_USAGE) == 2
+        assert int(pwned.ExitCode.AUTH_ERROR) == 3
+        assert int(pwned.ExitCode.FORBIDDEN) == 4
+        assert int(pwned.ExitCode.RATE_LIMITED) == 5
+        assert int(pwned.ExitCode.NETWORK_ERROR) == 6
+        assert int(pwned.ExitCode.FILE_OR_STORE_ERROR) == 7
+        assert int(pwned.ExitCode.FINDINGS) == 8
+        assert int(pwned.ExitCode.NOT_FOUND) == 9
+        assert int(pwned.ExitCode.CANCELLED) == 130
 
 
 class TestGlobalFormatAndCacheOptions:
@@ -829,7 +945,7 @@ class TestAccountExtended:
         result = cli_runner.invoke(
             cli, ["--api-key", TEST_KEY, "account", "test@example.com", "--fail-if-pwned"]
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 8
         assert "Adobe" in result.output
 
     def test_account_single_fail_if_pwned_when_clean_text(
@@ -976,7 +1092,7 @@ class TestAccountExtended:
             ["--api-key", TEST_KEY, "account", "--stdin", "--fail-if-pwned"],
             input="a@example.com\nb@example.com\n",
         )
-        assert res_pwned.exit_code == 1
+        assert res_pwned.exit_code == 8
         assert "a@example.com" in res_pwned.output
 
         httpx_mock.add_response(
@@ -1083,7 +1199,7 @@ class TestPasswordExtended:
         res_meet = cli_runner.invoke(
             cli, ["password", "password", "--threshold", "10", "--fail-if-pwned"]
         )
-        assert res_meet.exit_code == 1
+        assert res_meet.exit_code == 8
         assert "10" in res_meet.output
 
     def test_password_stdin_multiline_batch_mode(
@@ -1104,7 +1220,7 @@ class TestPasswordExtended:
             ["--format", "json", "password", "--stdin", "--threshold", "10", "--fail-if-pwned"],
             input="pw1\npw2\n",
         )
-        assert result.exit_code == 1
+        assert result.exit_code == 8
         data = json.loads(result.output)
         assert data == [
             {"index": 1, "pwn_count": 15, "status": "pwned"},
@@ -1555,7 +1671,7 @@ class TestBaselineAndStats:
                 "--fail-if-pwned",
             ],
         )
-        assert res2.exit_code == 1
+        assert res2.exit_code == 8
         assert json.loads(res2.output) == [{"Name": "LinkedIn"}]
         assert json.loads(next_baseline.read_text(encoding="utf-8")) == [
             {"Name": "Adobe"},
@@ -1602,7 +1718,7 @@ class TestBaselineAndStats:
             ],
         )
         assert res_save.exit_code == 0
-        assert "No results found." in res_save.output
+        assert "Clean (not found in any breaches)." in res_save.output
         assert json.loads(out_baseline.read_text(encoding="utf-8")) == []
 
         httpx_mock.add_response(status_code=404)
@@ -1631,7 +1747,7 @@ class TestBaselineAndStats:
             cli,
             ["--api-key", TEST_KEY, "account", "test@example.com", "--baseline", str(bad_file)],
         )
-        assert res.exit_code == 1
+        assert res.exit_code == 7
         assert "Error:" in res.output
 
     def test_account_batch_baseline_and_stats(
@@ -1677,7 +1793,7 @@ class TestBaselineAndStats:
                 "--fail-if-pwned",
             ],
         )
-        assert res.exit_code == 1
+        assert res.exit_code == 8
         assert "Checked 2: 1 pwned, 1 clean, 0 error(s)" in res.output
         saved = json.loads(saved_file.read_text(encoding="utf-8"))
         assert saved == [
@@ -1711,7 +1827,7 @@ class TestBaselineAndStats:
                 str(bad_file),
             ],
         )
-        assert res.exit_code == 1
+        assert res.exit_code == 7
         assert "Error:" in res.output
 
     def test_domain_baseline_save_diff_and_fail_if_pwned(
@@ -1737,7 +1853,7 @@ class TestBaselineAndStats:
                 "--fail-if-pwned",
             ],
         )
-        assert res1.exit_code == 1
+        assert res1.exit_code == 8
         assert json.loads(baseline_file.read_text(encoding="utf-8")) == {"alice": ["Adobe"]}
 
         httpx_mock.add_response(
@@ -1759,7 +1875,7 @@ class TestBaselineAndStats:
                 "--fail-if-pwned",
             ],
         )
-        assert res2.exit_code == 1
+        assert res2.exit_code == 8
         assert json.loads(res2.output) == {"alice": ["LinkedIn"]}
         assert json.loads(next_file.read_text(encoding="utf-8")) == {"alice": ["Adobe", "LinkedIn"]}
 
@@ -1788,8 +1904,8 @@ class TestBaselineAndStats:
     ) -> None:
         httpx_mock.add_response(url=f"{BASE}/breacheddomain/clean.com", status_code=404)
         res_plain_404 = cli_runner.invoke(cli, ["--api-key", TEST_KEY, "domain", "clean.com"])
-        assert res_plain_404.exit_code == 1
-        assert "Not found" in res_plain_404.output
+        assert res_plain_404.exit_code == 0
+        assert "Clean (no breached accounts found)." in res_plain_404.output
 
         out_base = tmp_path / "clean_domain.json"
         httpx_mock.add_response(url=f"{BASE}/breacheddomain/clean.com", status_code=404)
@@ -1817,7 +1933,7 @@ class TestBaselineAndStats:
             cli,
             ["--api-key", TEST_KEY, "domain", "example.com", "--baseline", str(bad_file)],
         )
-        assert res_bad.exit_code == 1
+        assert res_bad.exit_code == 7
         assert "Error:" in res_bad.output
 
 
@@ -1906,7 +2022,7 @@ class TestPasswordHashedOfflineConcurrencyStats:
                 "--fail-if-pwned",
             ],
         )
-        assert res_batch.exit_code == 1
+        assert res_batch.exit_code == 8
         assert "Checked 2: 1 pwned, 0 clean, 1 error(s)" in res_batch.output
 
     def test_password_online_batch_concurrency_hashed_and_stats(
@@ -2125,7 +2241,7 @@ class TestWebhookNotifications:
                 "--fail-if-pwned",
             ],
         )
-        assert res.exit_code == 1
+        assert res.exit_code == 8
         assert "Adobe" in res.output
         requests = httpx_mock.get_requests()
         assert len(requests) == 2
@@ -2258,7 +2374,7 @@ class TestWebhookNotifications:
                 webhook_url,
             ],
         )
-        assert res_err.exit_code == 1
+        assert res_err.exit_code == 6
         assert "Webhook notification failed" in res_err.output
 
     def test_domain_notify_webhook_slack_and_clean_baseline_no_http(
