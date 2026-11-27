@@ -90,6 +90,33 @@ class TestBreachCommand:
         assert len(doc["runs"]) == 1
         assert len(doc["runs"][0]["results"]) >= 1
 
+    def test_outfile_and_force(self, tmp_path: Path) -> None:
+        out_file = tmp_path / "adobe.json"
+        runner = CliRunner()
+        env_override = {"HIBP_API_KEY": "", "HIBP_USER_AGENT": "pwned-e2e-test"}
+        with patch.dict(os.environ, env_override):
+            first = runner.invoke(
+                cli,
+                ["--json", "--outfile", str(out_file), "breach", "Adobe"],
+            )
+            assert first.exit_code == 0, first.output
+            assert first.stdout == ""
+            assert json.loads(out_file.read_text(encoding="utf-8"))["Name"] == "Adobe"
+
+            second = runner.invoke(
+                cli,
+                ["--json", "--outfile", str(out_file), "breach", "Adobe"],
+            )
+            assert second.exit_code == 7, second.output
+
+            third = runner.invoke(
+                cli,
+                ["--json", "--outfile", str(out_file), "--force", "breach", "Adobe"],
+            )
+            assert third.exit_code == 0, third.output
+            assert third.stdout == ""
+            assert json.loads(out_file.read_text(encoding="utf-8"))["Name"] == "Adobe"
+
 
 class TestBreachesCommand:
     def test_list_all(self) -> None:
@@ -375,6 +402,23 @@ class TestAccountCommand:
         assert code == 0
         assert "Clean" in out
 
+    def test_account_full_and_fail_if_found_aliases(self) -> None:
+        code, out = _run(
+            "--json",
+            "--api-key",
+            TEST_KEY,
+            "account",
+            f"account-exists@{DOMAIN}",
+            "--full",
+            "--fail-if-found",
+        )
+        assert code == 8, out
+        data = json.loads(out)
+        assert isinstance(data, list)
+        assert len(data) >= 1
+        assert "Domain" in data[0]
+        assert "DataClasses" in data[0]
+
     def test_account_markdown_and_html(self) -> None:
         md = _run_ok(
             "--format",
@@ -520,6 +564,37 @@ class TestPasswordCommand:
             assert cache_files[0].stat().st_mtime_ns == mtime_before
         assert isinstance(first, dict) and first["count"] > 0
         assert first == second
+
+
+class TestPasswordRangeCommand:
+    def test_password_range_sha1_and_alias(self) -> None:
+        hex_upper = frozenset("0123456789ABCDEF")
+        pw_suffix = "1E4C9B93F3F0682250B6CF8331B7EE68FD8"
+        for cmd in ("password-range", "pr"):
+            data = _run_json(cmd, "5BAA6")
+            assert isinstance(data, dict)
+            assert len(data) > 0
+            assert all(
+                isinstance(k, str)
+                and len(k) == 35
+                and set(k) <= hex_upper
+                and isinstance(v, int)
+                and not isinstance(v, bool)
+                and v > 0
+                for k, v in data.items()
+            )
+            assert pw_suffix in data
+            assert data[pw_suffix] > 0
+
+    def test_password_range_ntlm_and_fail_if_found(self) -> None:
+        code, out = _run("--json", "password-range", "8846F", "--ntlm", "--fail-if-found")
+        assert code == 8, out
+        data = json.loads(out)
+        assert isinstance(data, dict)
+        assert len(data) > 0
+
+    def test_password_range_invalid_prefix_exits_two(self) -> None:
+        _run_exit(2, "password-range", "ZZZZZ")
 
 
 # ── Audit & MCP commands (free, no auth) ─────────────────────────────

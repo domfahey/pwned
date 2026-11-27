@@ -33,6 +33,7 @@ from pwned.cli_commands import register_extra_commands
 from pwned.cli_helpers import (
     ExitCode,
     FileOrStoreError,
+    emit_text,
     get_cache,
     get_output_format,
     render_output,
@@ -44,7 +45,7 @@ from pwned.cli_helpers import (
 from pwned.client import HIBPClient, NotFoundError
 from pwned.config import load_settings
 from pwned.filtering import BREACH_SORT_KEYS, BreachSortKey, filter_breaches
-from pwned.formatting import OUTPUT_FORMATS, OutputFormat, should_use_color
+from pwned.formatting import OUTPUT_FORMATS, OutputFormat
 from pwned.models import Breach, DataClassDescription
 from pwned.notify import WEBHOOK_FORMATS, WebhookFormat, send_webhook_notification
 from pwned.offline import OfflinePasswordsClient
@@ -54,10 +55,11 @@ from pwned.passwords import AsyncPwnedPasswordsClient, PwnedPasswordsClient
 class _GlobalOptionGroup(click.Group):
     """Allow global options to appear after subcommands and resolve short aliases."""
 
-    _VALUE_OPTIONS = ("--api-key", "--user-agent", "--format")
-    _FLAG_OPTIONS = ("--json", "--cache", "--no-cache")
+    _VALUE_OPTIONS = ("--api-key", "--user-agent", "--format", "--outfile")
+    _FLAG_OPTIONS = ("--json", "--cache", "--no-cache", "--force")
     _ALIASES: dict[str, str] = {
         "pw": "password",
+        "pr": "password-range",
         "ba": "account",
         "bar": "account-range",
         "pa": "pastes",
@@ -126,6 +128,17 @@ class _GlobalOptionGroup(click.Group):
     default=False,
     help="Cache public endpoint responses locally.",
 )
+@click.option(
+    "--outfile",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write formatted UTF-8 output to a file in an existing directory.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Overwrite an existing --outfile.",
+)
 @click.pass_context
 def cli(
     ctx: click.Context,
@@ -134,6 +147,8 @@ def cli(
     output_format: OutputFormat | None,
     use_json: bool,
     use_cache: bool,
+    outfile: Path | None,
+    force: bool,
 ) -> None:
     """CLI for the Have I Been Pwned API v3."""
     if output_format is not None and use_json and output_format != "json":
@@ -146,6 +161,8 @@ def cli(
     ctx.obj["fmt"] = fmt
     ctx.obj["use_json"] = fmt == "json"
     ctx.obj["use_cache"] = use_cache
+    ctx.obj["outfile"] = outfile
+    ctx.obj["force"] = force
 
 
 def _apply_breach_filters(
@@ -305,13 +322,6 @@ def _is_stderr_tty() -> bool:
     return sys.stderr.isatty()
 
 
-def _echo_status(message: str, *, fg: str) -> None:
-    if should_use_color(is_tty=_is_stdout_tty()):
-        click.echo(click.style(message, fg=fg))
-    else:
-        click.echo(message)
-
-
 def _render_search_result(
     ctx: click.Context,
     data: Any,
@@ -321,7 +331,7 @@ def _render_search_result(
     allow_clean_text: bool = True,
 ) -> None:
     if was_not_found and allow_clean_text and get_output_format(ctx) == "text":
-        _echo_status(clean_message, fg="green")
+        emit_text(ctx, clean_message, fg="green", is_tty=_is_stdout_tty())
     else:
         render_output(ctx, data)
 
@@ -398,7 +408,9 @@ def _run_account_single(
 
 @cli.command()
 @click.argument("account", required=False)
-@click.option("--no-truncate", is_flag=True, help="Return full breach model.")
+@click.option(
+    "--no-truncate", "--full", "no_truncate", is_flag=True, help="Return full breach model."
+)
 @click.option("--domain", default=None, help="Filter by domain.")
 @click.option("--no-include-unverified", is_flag=True, help="Exclude unverified breaches.")
 @click.option("--since", default=None, help="Filter breaches on or after YYYY-MM-DD.")
@@ -455,6 +467,8 @@ def _run_account_single(
 )
 @click.option(
     "--fail-if-pwned",
+    "--fail-if-found",
+    "fail_if_pwned",
     is_flag=True,
     help="Exit with code 8 if any account is found in breaches.",
 )
@@ -586,6 +600,8 @@ def account(
 )
 @click.option(
     "--fail-if-pwned",
+    "--fail-if-found",
+    "fail_if_pwned",
     is_flag=True,
     help="Exit with code 8 if any domain aliases are found in breaches.",
 )
@@ -683,6 +699,8 @@ def subscribed_domains_remove(ctx: click.Context, domain: str) -> None:
 @click.argument("email")
 @click.option(
     "--fail-if-pwned",
+    "--fail-if-found",
+    "fail_if_pwned",
     is_flag=True,
     help="Exit with code 8 if any pastes are found.",
 )
@@ -721,6 +739,8 @@ def stealer() -> None:
 @click.argument("email")
 @click.option(
     "--fail-if-pwned",
+    "--fail-if-found",
+    "fail_if_pwned",
     is_flag=True,
     help="Exit with code 8 if any stealer logs are found.",
 )
@@ -751,6 +771,8 @@ def stealer_email(ctx: click.Context, email: str, fail_if_pwned: bool) -> None:
 @click.argument("domain")
 @click.option(
     "--fail-if-pwned",
+    "--fail-if-found",
+    "fail_if_pwned",
     is_flag=True,
     help="Exit with code 8 if any stealer logs are found.",
 )
@@ -781,6 +803,8 @@ def stealer_website(ctx: click.Context, domain: str, fail_if_pwned: bool) -> Non
 @click.argument("domain")
 @click.option(
     "--fail-if-pwned",
+    "--fail-if-found",
+    "fail_if_pwned",
     is_flag=True,
     help="Exit with code 8 if any stealer logs are found.",
 )
@@ -838,9 +862,19 @@ def _check_single_password(
             raise click.UsageError(str(exc)) from exc
     if get_output_format(ctx) == "text":
         if count > 0:
-            _echo_status(f"Password found {count:,} times in data breaches!", fg="red")
+            emit_text(
+                ctx,
+                f"Password found {count:,} times in data breaches!",
+                fg="red",
+                is_tty=_is_stdout_tty(),
+            )
         else:
-            _echo_status("Password not found in any data breaches.", fg="green")
+            emit_text(
+                ctx,
+                "Password not found in any data breaches.",
+                fg="green",
+                is_tty=_is_stdout_tty(),
+            )
     else:
         render_output(ctx, {"count": count})
     if fail_if_pwned and count >= threshold:
@@ -972,6 +1006,8 @@ def _check_batch_passwords(
 )
 @click.option(
     "--fail-if-pwned",
+    "--fail-if-found",
+    "fail_if_pwned",
     is_flag=True,
     help="Exit with code 8 if password count meets threshold.",
 )

@@ -101,6 +101,76 @@ class TestInputValidation:
             asyncio.run(run())
 
 
+class TestOverwriteBehavior:
+    def test_overwrite_false_raises_when_output_exists_without_http_or_side_effects(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        output = tmp_path / "existing.txt"
+        output.write_text("original content", encoding="utf-8")
+        work_dir = output.parent / f".{output.name}.part"
+        marker = work_dir / "marker.txt"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("keep", encoding="utf-8")
+
+        async def run() -> None:
+            await download_offline_db(
+                output,
+                start_prefix=0,
+                end_prefix=2,
+                resume=False,
+                overwrite=False,
+            )
+
+        with pytest.raises(
+            FileExistsError,
+            match=r"Output file already exists:.*--overwrite",
+        ):
+            asyncio.run(run())
+
+        assert httpx_mock.get_requests() == []
+        assert output.read_text(encoding="utf-8") == "original content"
+        assert marker.read_text(encoding="utf-8") == "keep"
+
+    def test_overwrite_false_succeeds_when_output_does_not_exist(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(url=f"{BASE_URL}/range/00000", text=f"{'A' * 35}:5\n")
+        output = tmp_path / "fresh.txt"
+
+        async def run() -> DownloadStats:
+            return await download_offline_db(
+                output,
+                start_prefix=0,
+                end_prefix=1,
+                overwrite=False,
+            )
+
+        stats = asyncio.run(run())
+        assert stats.prefixes_downloaded == 1
+        assert stats.hashes_written == 1
+        assert output.read_bytes() == f"00000{'A' * 35}:5\r\n".encode("ascii")
+
+    def test_overwrite_true_replaces_existing_file(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(url=f"{BASE_URL}/range/00000", text=f"{'B' * 35}:9\n")
+        output = tmp_path / "existing.txt"
+        output.write_text("stale content", encoding="utf-8")
+
+        async def run() -> DownloadStats:
+            return await download_offline_db(
+                output,
+                start_prefix=0,
+                end_prefix=1,
+                overwrite=True,
+            )
+
+        stats = asyncio.run(run())
+        assert stats.prefixes_downloaded == 1
+        assert stats.hashes_written == 1
+        assert output.read_bytes() == f"00000{'B' * 35}:9\r\n".encode("ascii")
+
+
 class TestBasicDownloadAndOfflineIntegration:
     def test_sha1_download_sorts_normalizes_and_works_with_offline_client(
         self, tmp_path: Path, httpx_mock: HTTPXMock
@@ -549,6 +619,120 @@ class TestRetriesErrorsAndConcurrency:
         asyncio.run(run())
         assert max_seen <= 2
         assert max_seen == 2
+
+    def test_bounded_worker_pool_spawns_only_concurrency_tasks(self, tmp_path: Path) -> None:
+        in_flight = 0
+        max_seen = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal in_flight, max_seen
+            in_flight += 1
+            max_seen = max(max_seen, in_flight)
+            prefix = request.url.path.rsplit("/", 1)[-1]
+            prefix_int = int(prefix, 16)
+            await asyncio.sleep(0)
+            in_flight -= 1
+            return httpx.Response(200, text=f"{prefix_int:035X}:{prefix_int + 1}\n")
+
+        transport = httpx.MockTransport(handler)
+        output = tmp_path / "pool.txt"
+        progress_events: list[tuple[int, int]] = []
+
+        async def run() -> tuple[DownloadStats, int]:
+            async with httpx.AsyncClient(base_url=BASE_URL, transport=transport) as ext_client:
+                with patch.object(
+                    asyncio, "create_task", wraps=asyncio.create_task
+                ) as spy_create_task:
+                    stats = await download_offline_db(
+                        output,
+                        start_prefix=0,
+                        end_prefix=16,
+                        concurrency=2,
+                        client=ext_client,
+                        on_progress=lambda done, total: progress_events.append((done, total)),
+                    )
+                    return stats, spy_create_task.call_count
+
+        stats, task_count = asyncio.run(run())
+        assert task_count == 2
+        assert max_seen <= 2
+        assert stats.prefixes_total == 16
+        assert stats.prefixes_downloaded == 16
+        assert stats.prefixes_cached == 0
+        assert stats.hashes_written == 16
+        assert progress_events == [(i, 16) for i in range(1, 17)]
+
+        expected_lines = [f"{i:05X}{i:035X}:{i + 1}" for i in range(16)]
+        assert output.read_bytes() == ("\r\n".join(expected_lines) + "\r\n").encode("ascii")
+
+    def test_bounded_worker_pool_caps_workers_to_total_prefixes(self, tmp_path: Path) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text=f"{'A' * 35}:1\n")
+
+        transport = httpx.MockTransport(handler)
+        output = tmp_path / "small.txt"
+
+        async def run() -> tuple[DownloadStats, int]:
+            async with httpx.AsyncClient(base_url=BASE_URL, transport=transport) as ext_client:
+                with patch.object(
+                    asyncio, "create_task", wraps=asyncio.create_task
+                ) as spy_create_task:
+                    stats = await download_offline_db(
+                        output,
+                        start_prefix=0,
+                        end_prefix=3,
+                        concurrency=32,
+                        client=ext_client,
+                    )
+                    return stats, spy_create_task.call_count
+
+        stats, task_count = asyncio.run(run())
+        assert task_count == 3
+        assert stats.prefixes_total == 3
+        assert stats.prefixes_downloaded == 3
+        assert stats.hashes_written == 3
+
+    def test_worker_error_cancels_sibling_workers_and_stops_remaining_prefixes(
+        self, tmp_path: Path
+    ) -> None:
+        requested_prefixes: list[str] = []
+        sibling_cancelled = False
+        output = tmp_path / "cancelled.txt"
+
+        async def run() -> None:
+            nonlocal sibling_cancelled
+            sibling_started = asyncio.Event()
+
+            async def handler(request: httpx.Request) -> httpx.Response:
+                nonlocal sibling_cancelled
+                prefix = request.url.path.rsplit("/", 1)[-1]
+                requested_prefixes.append(prefix)
+                if prefix == "00001":
+                    sibling_started.set()
+                    try:
+                        await asyncio.sleep(10)
+                    except asyncio.CancelledError:
+                        sibling_cancelled = True
+                        raise
+                await sibling_started.wait()
+                return httpx.Response(400)
+
+            transport = httpx.MockTransport(handler)
+            async with httpx.AsyncClient(base_url=BASE_URL, transport=transport) as ext_client:
+                await download_offline_db(
+                    output,
+                    start_prefix=0,
+                    end_prefix=16,
+                    concurrency=2,
+                    client=ext_client,
+                )
+
+        with pytest.raises(HIBPError, match="HTTP 400"):
+            asyncio.run(run())
+
+        assert sibling_cancelled is True
+        assert set(requested_prefixes) == {"00000", "00001"}
+        assert not output.exists()
 
     def test_task_cancellation_when_one_prefix_fails(
         self, tmp_path: Path, httpx_mock: HTTPXMock

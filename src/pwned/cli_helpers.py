@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import contextlib
+import os
 import sys
+import tempfile
 from collections.abc import Callable
 from enum import IntEnum
 from functools import wraps
+from pathlib import Path
 from typing import Any
 
 import click
@@ -18,7 +22,7 @@ from pwned.client import (
     RateLimitError,
     UnauthorizedError,
 )
-from pwned.formatting import OutputFormat, format_output
+from pwned.formatting import OutputFormat, format_output, should_use_color
 
 
 class ExitCode(IntEnum):
@@ -73,6 +77,8 @@ def handle_errors[**P, R](f: Callable[P, R]) -> Callable[P, R]:
         except HIBPError as e:
             click.echo(f"Error: {e}", err=True)
             sys.exit(int(ExitCode.NETWORK_ERROR))
+        except BrokenPipeError:
+            raise
         except OSError as e:
             click.echo(f"Error: {e}", err=True)
             sys.exit(int(ExitCode.FILE_OR_STORE_ERROR))
@@ -95,10 +101,52 @@ def get_output_format(ctx: click.Context) -> OutputFormat:
     return fmt
 
 
+def write_output_file(path: Path, content: str, *, force: bool = False) -> None:
+    """Atomically write UTF-8 text to *path*, refusing to clobber unless *force* is set."""
+    if path.is_dir():
+        raise FileOrStoreError(f"Output path is a directory: {path}")
+    if not path.parent.exists():
+        raise FileOrStoreError(f"Output directory does not exist: {path.parent}")
+    if path.exists() and not force:
+        raise FileOrStoreError(f"Output file already exists: {path} (use --force to overwrite)")
+    payload = f"{content}\n" if content and not content.endswith("\n") else content
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+
+
 def render_output(ctx: click.Context, data: Any) -> None:
-    formatted = format_output(data, fmt=get_output_format(ctx))
-    if formatted or get_output_format(ctx) in ("json", "text", "table"):
+    fmt = get_output_format(ctx)
+    formatted = format_output(data, fmt=fmt)
+    outfile: Path | None = ctx.obj.get("outfile")
+    if outfile is not None:
+        write_output_file(outfile, formatted, force=bool(ctx.obj.get("force", False)))
+        return
+    if formatted or fmt in ("json", "text", "table"):
         click.echo(formatted)
+
+
+def emit_text(
+    ctx: click.Context,
+    message: str,
+    *,
+    fg: str | None = None,
+    is_tty: bool = False,
+) -> None:
+    outfile: Path | None = ctx.obj.get("outfile")
+    if outfile is not None:
+        write_output_file(outfile, message, force=bool(ctx.obj.get("force", False)))
+        return
+    if fg is not None and should_use_color(is_tty=is_tty):
+        click.echo(click.style(message, fg=fg))
+    else:
+        click.echo(message)
 
 
 def get_cache(ctx: click.Context) -> ResponseCache | None:
