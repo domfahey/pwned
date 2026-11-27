@@ -1069,8 +1069,8 @@ class TestAuditCommand:
         )
         assert result.exit_code == 0
         assert captured == {"source": "keepass", "master_password": "secret-master"}
-        assert "KeePass master password" in result.output
-        data = json.loads(result.output[result.output.index("{") :])
+        assert "KeePass master password" in result.stderr
+        data = json.loads(result.stdout)
         assert data["compromised_entries"] == 1
 
     def test_audit_invalid_export_raises_click_exception(
@@ -1116,8 +1116,8 @@ class TestAuditCommand:
             "source": "bitwarden-encrypted-json",
             "master_password": "export-pw",
         }
-        assert "Bitwarden export password" in result.output
-        data = json.loads(result.output[result.output.index("{") :])
+        assert "Bitwarden export password" in result.stderr
+        data = json.loads(result.stdout)
         assert data["compromised_entries"] == 1
 
     @pytest.mark.parametrize(

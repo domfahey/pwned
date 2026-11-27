@@ -108,7 +108,9 @@ def auth() -> None:
 @handle_errors
 def auth_set(api_key: str | None, backend: str) -> None:
     """Store the HIBP API key in the OS keyring or user config file."""
-    key = api_key if api_key is not None else click.prompt("HIBP API key", hide_input=True)
+    key = (
+        api_key if api_key is not None else click.prompt("HIBP API key", hide_input=True, err=True)
+    )
     if backend == "keyring":
         try:
             save_api_key_keyring(key)
@@ -368,7 +370,12 @@ def domain_verify_meta_check(ctx: click.Context, domain: str) -> None:
     help="Password manager export format.",
 )
 @click.option("--ntlm", is_flag=True, help="Use NTLM hashes instead of SHA-1.")
-@click.option("--no-pad", is_flag=True, default=False, help="Disable response padding.")
+@click.option(
+    "--pad/--no-pad",
+    default=True,
+    show_default=True,
+    help="Request padded responses to hide response length.",
+)
 @click.option(
     "--threshold",
     type=click.IntRange(min=1),
@@ -418,7 +425,7 @@ def audit(
     path: Path | None,
     source: str,
     ntlm: bool,
-    no_pad: bool,
+    pad: bool,
     threshold: int,
     check_reuse: bool,
     check_strength: bool,
@@ -437,9 +444,9 @@ def audit(
 
     master_password: str | None = None
     if source == "keepass":
-        master_password = click.prompt("KeePass master password", hide_input=True)
+        master_password = click.prompt("KeePass master password", hide_input=True, err=True)
     elif source == "bitwarden-encrypted-json":
-        master_password = click.prompt("Bitwarden export password", hide_input=True)
+        master_password = click.prompt("Bitwarden export password", hide_input=True, err=True)
     try:
         entries = load_export(
             path,
@@ -458,7 +465,7 @@ def audit(
                 offline_client,
                 threshold=threshold,
                 ntlm=effective_ntlm,
-                pad=not no_pad,
+                pad=pad,
                 check_reuse=check_reuse,
                 check_strength=check_strength,
             )
@@ -474,7 +481,7 @@ def audit(
                     pw_client,
                     threshold=threshold,
                     ntlm=effective_ntlm,
-                    pad=not no_pad,
+                    pad=pad,
                     check_reuse=check_reuse,
                     check_strength=check_strength,
                     concurrency=concurrency,

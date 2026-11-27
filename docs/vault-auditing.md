@@ -69,5 +69,5 @@ pwned audit --source gopass --check-reuse
 
 - Use `--cache` during online audits to cache 5-character `/range/{prefix}` buckets locally across repeated runs.
 - Tune `--concurrency` (default `10`) for large vaults.
-- Response padding (`Add-Padding: true`) is **enabled by default** on `pwned audit` (disable only if needed via `--no-pad`).
+- Response padding (`Add-Padding: true`) is **enabled by default** on `pwned audit` via `--pad/--no-pad` (disable only if needed via `--no-pad`).
 - Delete any plaintext CSV/JSON vault exports immediately after auditing; prefer `bitwarden-encrypted-json`, `keepass`, `pass`, `gopass`, or `pwdump` whenever possible.

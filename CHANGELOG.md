@@ -9,10 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Exported `ExitCode` (`IntEnum` mirroring official HIBP CLI codes `0`–`9` and `130`) and `BadRequestError` (HTTP `400` subclass of `HIBPError`) from `pwned`.
+- Added `--fail-if-pwned` (exit `8`) to `pwned pastes` and `pwned stealer email|website|domain` for consistent CI scripting across all search commands.
 
 ### Changed
 - Mirrored official Have I Been Pwned CLI (`hibp`) exit codes: `0` success/clean search, `1` unexpected/schema failure, `2` invalid usage or HTTP `400` (`BadRequestError`), `3` missing/rejected API key (`401`), `4` permission/plan restriction (`403`), `5` rate limit exhausted (`429`), `6` network/timeout/upstream failure (`5xx`), `7` file/config/vault/credential-store failure, `8` findings with `--fail-if-pwned` (previously `1`), `9` missing resource or failed domain verification (`404`), and `130` cancelled (`Ctrl+C`/prompt abort).
-- Enabled response padding (`Add-Padding: true`) by default on `pwned password` via `--pad/--no-pad`, matching `pwned audit` and `pwned mcp`.
+- Enabled response padding (`Add-Padding: true`) by default on `pwned password`, `pwned audit` (`--pad/--no-pad`), and `PwnedPasswordsClient` / `AsyncPwnedPasswordsClient` (`pad: bool = True`).
+- Routed all interactive CLI prompts (`password`, `auth set`, `audit` KeePass/Bitwarden) to `stderr` (`err=True`) so piped `--json`/`--format` stdout stays clean.
 - Changed `pwned auth set` and `pwned auth clear` `--backend` default from `file` to `auto` (prefers OS Keychain when `pwned[keyring]` is installed and usable, falling back to `0600` `~/.config/pwned/.env`).
 - Changed no-match (`404`) search responses on `account`, `domain`, `pastes`, and `stealer` to exit `0` with clean status text (or empty `[]` / `{}` in JSON), reserving non-zero exits for `--fail-if-pwned`, unknown catalog breaches (`breach`), failed domain verification, and errors.
 - Switched `README.md` zero-install `uvx` Quickstart to a pinned, zero-secret public lookup (`@v0.4.1 pwned breach Adobe`) and pinned `uv tool install` examples.

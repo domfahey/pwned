@@ -372,6 +372,25 @@ class TestPastesCommand:
         assert result.exit_code == 0
         assert "Pastebin" in result.output
 
+    def test_pastes_fail_if_pwned(self, httpx_mock: HTTPXMock, cli_runner: CliRunner) -> None:
+        httpx_mock.add_response(
+            json=[{"Source": "Pastebin", "Id": "abc", "EmailCount": 10}],
+        )
+        res_found = cli_runner.invoke(
+            cli,
+            ["--api-key", TEST_KEY, "pastes", "test@example.com", "--fail-if-pwned"],
+        )
+        assert res_found.exit_code == 8
+        assert "Pastebin" in res_found.output
+
+        httpx_mock.add_response(status_code=404)
+        res_clean = cli_runner.invoke(
+            cli,
+            ["--api-key", TEST_KEY, "pastes", "clean@example.com", "--fail-if-pwned"],
+        )
+        assert res_clean.exit_code == 0
+        assert "Clean (not found in any pastes)." in res_clean.output
+
 
 class TestStealerCommands:
     def test_stealer_email(self, httpx_mock: HTTPXMock, cli_runner: CliRunner) -> None:
@@ -406,6 +425,48 @@ class TestStealerCommands:
         )
         assert result.exit_code == 0
         assert "andy" in result.output
+
+    def test_stealer_fail_if_pwned_found_and_clean(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(json=["netflix.com"])
+        res_email = cli_runner.invoke(
+            cli, ["--api-key", TEST_KEY, "stealer", "email", "t@e.com", "--fail-if-pwned"]
+        )
+        assert res_email.exit_code == 8
+        assert "netflix.com" in res_email.output
+
+        httpx_mock.add_response(status_code=404)
+        res_email_clean = cli_runner.invoke(
+            cli, ["--api-key", TEST_KEY, "stealer", "email", "clean@e.com", "--fail-if-pwned"]
+        )
+        assert res_email_clean.exit_code == 0
+
+        httpx_mock.add_response(json=["test@example.com"])
+        res_web = cli_runner.invoke(
+            cli, ["--api-key", TEST_KEY, "stealer", "website", "netflix.com", "--fail-if-pwned"]
+        )
+        assert res_web.exit_code == 8
+        assert "test@example.com" in res_web.output
+
+        httpx_mock.add_response(status_code=404)
+        res_web_clean = cli_runner.invoke(
+            cli, ["--api-key", TEST_KEY, "stealer", "website", "clean.com", "--fail-if-pwned"]
+        )
+        assert res_web_clean.exit_code == 0
+
+        httpx_mock.add_response(json={"andy": ["netflix.com"]})
+        res_dom = cli_runner.invoke(
+            cli, ["--api-key", TEST_KEY, "stealer", "domain", "example.com", "--fail-if-pwned"]
+        )
+        assert res_dom.exit_code == 8
+        assert "andy" in res_dom.output
+
+        httpx_mock.add_response(status_code=404)
+        res_dom_clean = cli_runner.invoke(
+            cli, ["--api-key", TEST_KEY, "stealer", "domain", "clean.com", "--fail-if-pwned"]
+        )
+        assert res_dom_clean.exit_code == 0
 
     def test_stealer_group_without_subcommand_shows_help(self, cli_runner: CliRunner) -> None:
         result = cli_runner.invoke(cli, ["stealer"])
@@ -561,9 +622,10 @@ class TestPasswordCommand:
             url=f"https://api.pwnedpasswords.com/range/{prefix}",
             text=f"{suffix}:999\n",
         )
-        result = cli_runner.invoke(cli, ["password"], input="password\n")
+        result = cli_runner.invoke(cli, ["--json", "password"], input="password\n")
         assert result.exit_code == 0
-        assert "999" in result.output
+        assert "Password:" in result.stderr
+        assert json.loads(result.stdout) == {"count": 999}
 
 
 class TestSubscriptionCommand:
@@ -1975,10 +2037,12 @@ class TestPasswordHashedOfflineConcurrencyStats:
             url=f"https://api.pwnedpasswords.com/range/{sha1_hex[:5]}",
             text=f"{sha1_hex[5:]}:9\n",
         )
-        res_prompt = cli_runner.invoke(cli, ["password", "--hashed"], input=f"{sha1_hex}\n")
+        res_prompt = cli_runner.invoke(
+            cli, ["--json", "password", "--hashed"], input=f"{sha1_hex}\n"
+        )
         assert res_prompt.exit_code == 0
-        assert "Hash:" in res_prompt.output
-        assert "9" in res_prompt.output
+        assert "Hash:" in res_prompt.stderr
+        assert json.loads(res_prompt.stdout) == {"count": 9}
 
         res_bad = cli_runner.invoke(cli, ["password", "--hashed", "not-a-hash"])
         assert res_bad.exit_code == 2

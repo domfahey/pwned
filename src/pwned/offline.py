@@ -124,7 +124,7 @@ class OfflinePasswordsClient:
         password: str,
         *,
         ntlm: bool | None = None,
-        pad: bool = False,
+        pad: bool = True,
     ) -> int:
         """Return the breach prevalence count for a password (0 if not found)."""
         _ = pad
@@ -137,7 +137,7 @@ class OfflinePasswordsClient:
         hash_hex: str,
         *,
         ntlm: bool | None = None,
-        pad: bool = False,
+        pad: bool = True,
     ) -> int:
         """Return the breach prevalence count for a precomputed hash (0 if not found)."""
         _ = pad
@@ -151,7 +151,7 @@ class OfflinePasswordsClient:
         *,
         threshold: int = 1,
         ntlm: bool | None = None,
-        pad: bool = False,
+        pad: bool = True,
     ) -> bool:
         """Return True if password appears at least `threshold` times in the dump."""
         _validate_threshold(threshold)
@@ -163,7 +163,7 @@ class OfflinePasswordsClient:
         *,
         threshold: int = 1,
         ntlm: bool | None = None,
-        pad: bool = False,
+        pad: bool = True,
     ) -> bool:
         """Return True if hash appears at least `threshold` times in the dump."""
         _validate_threshold(threshold)

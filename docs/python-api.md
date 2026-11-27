@@ -76,17 +76,17 @@ from pwned import (
     ResponseCache,
 )
 
-# Sync online with optional range caching and response padding
+# Sync online with default response padding (Add-Padding: true) and optional range caching
 with PwnedPasswordsClient(cache=ResponseCache()) as pw:
-    count = pw.check_password("hunter2", pad=True)
-    compromised = pw.is_pwned("hunter2", threshold=10, pad=True)
+    count = pw.check_password("hunter2")
+    compromised = pw.is_pwned("hunter2", threshold=10)
     ntlm_count = pw.check_hash("31D6CFE0D16AE931B73C59D7E0C089C0", ntlm=True)
     suffix_map = pw.get_password_range("5BAA6")
 
 # Async online
 async def check_async() -> int:
     async with AsyncPwnedPasswordsClient(cache=ResponseCache()) as pw:
-        return await pw.check_password("hunter2", pad=True)
+        return await pw.check_password("hunter2")
 
 asyncio.run(check_async())
 

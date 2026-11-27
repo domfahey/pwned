@@ -681,9 +681,14 @@ def subscribed_domains_remove(ctx: click.Context, domain: str) -> None:
 
 @cli.command()
 @click.argument("email")
+@click.option(
+    "--fail-if-pwned",
+    is_flag=True,
+    help="Exit with code 8 if any pastes are found.",
+)
 @click.pass_context
 @handle_errors
-def pastes(ctx: click.Context, email: str) -> None:
+def pastes(ctx: click.Context, email: str, fail_if_pwned: bool) -> None:
     """Get pastes for an email address. Requires API key."""
     s = ctx.obj["settings"]
     api_key = require_api_key(ctx)
@@ -700,6 +705,8 @@ def pastes(ctx: click.Context, email: str) -> None:
         was_not_found=was_not_found,
         clean_message="Clean (not found in any pastes).",
     )
+    if fail_if_pwned and data:
+        sys.exit(int(ExitCode.FINDINGS))
 
 
 # --- Stealer log commands ---
@@ -712,9 +719,14 @@ def stealer() -> None:
 
 @stealer.command("email")
 @click.argument("email")
+@click.option(
+    "--fail-if-pwned",
+    is_flag=True,
+    help="Exit with code 8 if any stealer logs are found.",
+)
 @click.pass_context
 @handle_errors
-def stealer_email(ctx: click.Context, email: str) -> None:
+def stealer_email(ctx: click.Context, email: str, fail_if_pwned: bool) -> None:
     """Get stealer log domains for an email address."""
     s = ctx.obj["settings"]
     api_key = require_api_key(ctx)
@@ -731,13 +743,20 @@ def stealer_email(ctx: click.Context, email: str) -> None:
         was_not_found=was_not_found,
         clean_message="Clean (no stealer log records found).",
     )
+    if fail_if_pwned and data:
+        sys.exit(int(ExitCode.FINDINGS))
 
 
 @stealer.command("website")
 @click.argument("domain")
+@click.option(
+    "--fail-if-pwned",
+    is_flag=True,
+    help="Exit with code 8 if any stealer logs are found.",
+)
 @click.pass_context
 @handle_errors
-def stealer_website(ctx: click.Context, domain: str) -> None:
+def stealer_website(ctx: click.Context, domain: str, fail_if_pwned: bool) -> None:
     """Get stealer log email addresses for a website domain."""
     s = ctx.obj["settings"]
     api_key = require_api_key(ctx)
@@ -754,13 +773,20 @@ def stealer_website(ctx: click.Context, domain: str) -> None:
         was_not_found=was_not_found,
         clean_message="Clean (no stealer log records found).",
     )
+    if fail_if_pwned and data:
+        sys.exit(int(ExitCode.FINDINGS))
 
 
 @stealer.command("domain")
 @click.argument("domain")
+@click.option(
+    "--fail-if-pwned",
+    is_flag=True,
+    help="Exit with code 8 if any stealer logs are found.",
+)
 @click.pass_context
 @handle_errors
-def stealer_domain(ctx: click.Context, domain: str) -> None:
+def stealer_domain(ctx: click.Context, domain: str, fail_if_pwned: bool) -> None:
     """Get stealer log email aliases for an email domain."""
     s = ctx.obj["settings"]
     api_key = require_api_key(ctx)
@@ -777,6 +803,8 @@ def stealer_domain(ctx: click.Context, domain: str) -> None:
         was_not_found=was_not_found,
         clean_message="Clean (no stealer log records found).",
     )
+    if fail_if_pwned and data:
+        sys.exit(int(ExitCode.FINDINGS))
 
 
 # --- Password command ---
@@ -1022,9 +1050,9 @@ def password(
         single_password = lines[0]
     elif password is None:
         single_password = (
-            click.prompt("Hash", hide_input=False)
+            click.prompt("Hash", hide_input=False, err=True)
             if hashed
-            else click.prompt("Password", hide_input=True)
+            else click.prompt("Password", hide_input=True, err=True)
         )
     else:
         single_password = password

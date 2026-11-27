@@ -145,7 +145,7 @@ Check breaches for an email/username or batch via `--file`/`--stdin`.
 Composite lookup across breaches, pastes, and optionally stealer logs (`--include-stealer-logs`, `--no-truncate`, `--domain`, `--no-include-unverified`, `--baseline`, `--save-baseline`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned`).
 
 #### `pwned pastes EMAIL` (`pa`)
-List pastes containing an email address.
+List pastes containing an email address (`--fail-if-pwned` exits `8` if found).
 
 #### `pwned domain DOMAIN` (`bd`)
 List breached aliases for a verified domain (`--baseline`, `--save-baseline`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned`).
@@ -174,9 +174,9 @@ Query email breaches via 6-character SHA-1 *k*-anonymity prefix without transmit
 ### Pro Tier
 
 #### `pwned stealer email|website|domain TARGET`
-- `pwned stealer email <email>` — Website domains captured in stealer logs for an email address.
-- `pwned stealer website <domain>` — Email addresses captured against a verified website domain.
-- `pwned stealer domain <domain>` — Breached email aliases and website domains for a verified email domain.
+- `pwned stealer email <email>` — Website domains captured in stealer logs for an email address (`--fail-if-pwned` exits `8` if found).
+- `pwned stealer website <domain>` — Email addresses captured against a verified website domain (`--fail-if-pwned` exits `8` if found).
+- `pwned stealer domain <domain>` — Breached email aliases and website domains for a verified email domain (`--fail-if-pwned` exits `8` if found).
 
 #### `pwned domain-verify <subcommand>`
 - `dns-token <domain>` — Generate DNS TXT verification token.
