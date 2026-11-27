@@ -241,7 +241,7 @@ Use the official composite GitHub Action to audit repositories or credential exp
 ```yaml
 steps:
   - uses: actions/checkout@v4
-  - uses: domfahey/pwned@main
+  - uses: domfahey/pwned@v0.4.1
     with:
       args: audit --source bitwarden-json --fail-if-pwned vault.json
       api-key: ${{ secrets.HIBP_API_KEY }}

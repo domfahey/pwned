@@ -12,13 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Comprehensive documentation guides in `docs/` (`cli-reference.md`, `hibp-api-coverage.md`, `python-api.md`, `vault-auditing.md`, `monitoring-and-ci.md`, `offline-and-mcp.md`, `roadmap.md`).
 - Hosted MkDocs Material documentation site deployed to GitHub Pages (`mkdocs.yml`, `.github/workflows/docs.yml`) with `make docs` / `make docs-serve` targets.
+- GitHub Marketplace `branding` (`shield` / `blue`) in `action.yml` and self-documenting `Makefile` targets (`help`, `install-all`, `build`, `clean`, enhanced `doctor`).
 
 ### Changed
 - Organized repository root layout: moved community health files (`SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`) into `.github/`, moved `todos.md` to `docs/roadmap.md`, moved Homebrew formula template to `packaging/homebrew/pwned.rb`, and renamed `.env.sample` to `.env.example`.
+- Defaulted `action.yml` `version` input to `github.action_ref` (falling back to `main`) so pinned workflow tags execute the matching `pwned` version.
 
 ### Fixed
 - Configured `Settings` with `extra="ignore"` so unrelated keys in local `.env` files do not cause validation failures.
 - Switched container release workflow from deprecated `qemu-user-static` to `qemu-user-binfmt` for Ubuntu 26.04 runners and added `workflow_dispatch` support.
+- Removed `.clusterfuzzlite` from `.dockerignore` so ClusterFuzzLite PR fuzzing builds cleanly.
 - Updated historical `CHANGELOG.md` link for `packaging/homebrew/pwned.rb`.
 
 ## [0.4.0] - 2026-11-26
