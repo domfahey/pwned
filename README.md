@@ -8,7 +8,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-An unofficial command-line tool and typed Python SDK for querying Troy Hunt's [Have I Been Pwned](https://haveibeenpwned.com/) service (API v3) — with offline password auditing, declarative breach monitoring, and a local stdio MCP server.
+An unofficial command-line tool and typed Python SDK for querying [Troy Hunt](https://www.troyhunt.com)'s [Have I Been Pwned](https://haveibeenpwned.com/) service (API v3) — with offline password auditing, declarative breach monitoring, and a local stdio MCP server.
 
 - **100% HIBP API v3 parity** — all 21 / 21 endpoints across sync/async clients and the CLI ([coverage matrix](docs/hibp-api-coverage.md)).
 - **Privacy-first password checks** — *k*-anonymity (SHA-1 & NTLM, 5-char prefix only) or air-gapped `O(log N)` offline hash dumps; plaintext passwords never leave your machine.
