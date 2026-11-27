@@ -11,6 +11,17 @@ A command-line tool and typed Python client for the [Have I Been Pwned](https://
 
 Check email addresses against data breaches, search for compromised passwords, query stealer logs, audit password vaults, perform offline hash checks, and more — all from the terminal or Python.
 
+## Documentation
+
+Full guides live in [`docs/`](docs/README.md):
+
+- [CLI Reference](docs/cli-reference.md) — Commands, aliases, flags, output formats, and exit codes
+- [HIBP API v3 Coverage](docs/hibp-api-coverage.md) — Complete 21 / 21 endpoint, model, and protocol parity matrix
+- [Python Library Guide](docs/python-api.md) — Sync/async clients, caching, batching, and framework validators
+- [Vault & Active Directory Auditing](docs/vault-auditing.md) — 16 vault/browser/`pwdump`/`pass`/`gopass` formats, Argon2id, reuse & strength scoring
+- [Monitoring, Webhooks & CI/CD](docs/monitoring-and-ci.md) — `pwned.toml`, baselines, Slack/Discord webhooks, SARIF/Markdown/HTML, GitHub Action, and Docker
+- [Offline Lookups & Local MCP Server](docs/offline-and-mcp.md) — Resumable dump downloads and zero-dependency `pwned mcp` server
+
 ## Installation
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
