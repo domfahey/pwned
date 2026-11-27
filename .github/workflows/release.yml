@@ -4,12 +4,19 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish container image for (e.g. v0.4.0)"
+        required: true
+        type: string
 
 permissions: {}
 
 jobs:
   release:
     name: build and release
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -73,6 +80,7 @@ jobs:
   container:
     name: Build and Push Container Image
     needs: release
+    if: always() && (needs.release.result == 'success' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -82,6 +90,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
       - name: Log in to GitHub Container Registry
         env:
@@ -90,10 +99,12 @@ jobs:
           echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
       - name: Build and push multi-arch container image
         id: push
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-user-static
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-user-binfmt
           IMAGE_NAME="ghcr.io/${GITHUB_REPOSITORY,,}"
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           docker buildx create --name pwned-builder --use
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
