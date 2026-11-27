@@ -30,7 +30,7 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 - [x] **Document `uvx` zero-install usage** in `README.md` (`uvx --from git+https://github.com/domfahey/pwned.git pwned password`).
 - [x] **Group CLI commands by HIBP plan tier** in `README.md` (Free / Core / Pro / High RPM).
 - [x] **Dismiss false-positive CodeQL alerts** in GitHub Security tab (SHA-1 required by Pwned Passwords *k*-anonymity + test URL substring assertions).
-- [x] **Homebrew formula template (`Formula/pwned.rb`)** — valid template pointing to the GitHub Release tarball for publishing via a `homebrew-tap` repo.
+- [x] **Homebrew formula template (`packaging/homebrew/pwned.rb`)** — valid template pointing to the GitHub Release tarball for publishing via a `homebrew-tap` repo.
 - [x] **ClusterFuzzLite fuzzing (`.github/workflows/cifuzz.yml`)** — Atheris fuzz target covering `_md4`, `_parse_range_response`, `strip_html`, and `parse_input_lines`.
 
 ## Completed (v0.3.0)
