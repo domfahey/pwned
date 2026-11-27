@@ -12,13 +12,16 @@ associated with stealer logs or subscription-free breaches).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
 
+from pwned._parsers import _md4
 from pwned.cli import cli
 
 TEST_KEY = "00000000000000000000000000000000"
@@ -116,6 +119,24 @@ class TestBreachesCommand:
         assert len(data) > 0
         assert all(b["IsVerified"] is True for b in data)
 
+    def test_client_side_filter_and_sort(self) -> None:
+        data = _run_json(
+            "breaches",
+            "--since",
+            "2020-01-01",
+            "--verified-only",
+            "--exclude-retired",
+            "--sort",
+            "pwn-count",
+        )
+        assert isinstance(data, list)
+        assert len(data) > 0
+        assert all(b["BreachDate"] >= "2020-01-01" for b in data)
+        assert all(b["IsVerified"] is True for b in data)
+        assert all(b["IsRetired"] is False for b in data)
+        counts = [b["PwnCount"] for b in data]
+        assert counts == sorted(counts, reverse=True)
+
 
 class TestLatestBreachCommand:
     def test_latest(self) -> None:
@@ -167,6 +188,16 @@ class TestDataclassesCommand:
         assert lines[0] == "value"
         assert "Email addresses" in lines
 
+    def test_dataclasses_with_cache(self, tmp_path: Path) -> None:
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": str(tmp_path)}):
+            first = _run_json("--cache", "dataclasses")
+            cache_files = list((tmp_path / "pwned").glob("*.json"))
+            assert len(cache_files) >= 1
+            mtime_before = cache_files[0].stat().st_mtime_ns
+            second = _run_json("--cache", "dataclasses")
+            assert cache_files[0].stat().st_mtime_ns == mtime_before
+        assert first == second
+
 
 # ── Account breaches (test API key) ──────────────────────────────────
 
@@ -196,6 +227,17 @@ class TestAccountCommand:
         data = _run_json("--api-key", TEST_KEY, "account", f"multiple-breaches@{DOMAIN}")
         assert isinstance(data, list)
         assert len(data) >= 3
+
+    def test_account_domain_filter(self) -> None:
+        data = _run_json(
+            "--api-key",
+            TEST_KEY,
+            "account",
+            f"multiple-breaches@{DOMAIN}",
+            "--domain",
+            "adobe.com",
+        )
+        assert data == [{"Name": "Adobe"}]
 
     def test_spam_list_only(self) -> None:
         data = _run_json(
@@ -332,6 +374,54 @@ class TestAccountCommand:
         assert code == 0
         assert "Clean" in out
 
+    def test_account_markdown_and_html(self) -> None:
+        md = _run_ok(
+            "--format",
+            "markdown",
+            "--api-key",
+            TEST_KEY,
+            "account",
+            f"account-exists@{DOMAIN}",
+        )
+        assert "|" in md
+        assert "Adobe" in md
+
+        html = _run_ok(
+            "--format",
+            "html",
+            "--api-key",
+            TEST_KEY,
+            "account",
+            f"account-exists@{DOMAIN}",
+        )
+        assert "<!DOCTYPE html>" in html
+        assert "Have I Been Pwned" in html
+
+    def test_account_baseline_save_and_diff(self, tmp_path: Path) -> None:
+        baseline = tmp_path / "baseline.json"
+        _run_ok(
+            "--api-key",
+            TEST_KEY,
+            "account",
+            f"account-exists@{DOMAIN}",
+            "--save-baseline",
+            str(baseline),
+        )
+        assert baseline.exists()
+
+        code, out = _run(
+            "--json",
+            "--api-key",
+            TEST_KEY,
+            "account",
+            f"account-exists@{DOMAIN}",
+            "--baseline",
+            str(baseline),
+            "--fail-if-pwned",
+        )
+        assert code == 0
+        assert json.loads(out) == []
+
 
 # ── Password command (free, no auth) ─────────────────────────────────
 
@@ -389,6 +479,139 @@ class TestPasswordCommand:
         assert code == 0
         assert "not found" in out.lower()
 
+    def test_hashed_sha1_and_ntlm(self) -> None:
+        sha1_hex = hashlib.sha1(b"password").hexdigest().upper()
+        ntlm_hex = _md4("password".encode("utf-16-le")).upper()
+        sha1_data = _run_json("password", sha1_hex, "--hashed")
+        ntlm_data = _run_json("password", ntlm_hex, "--hashed", "--ntlm")
+        assert isinstance(sha1_data, dict) and sha1_data["count"] > 0
+        assert isinstance(ntlm_data, dict) and ntlm_data["count"] > 0
+
+    def test_file_batch_with_stats(self, tmp_path: Path) -> None:
+        pw_file = tmp_path / "passwords.txt"
+        pw_file.write_text("password\nxK9#mL2$vQ7@nR4!pW8&jF5*hT3^bY6\n", encoding="utf-8")
+        runner = CliRunner()
+        env_override = {"HIBP_API_KEY": "", "HIBP_USER_AGENT": "pwned-e2e-test"}
+        with patch.dict(os.environ, env_override):
+            result = runner.invoke(cli, ["--json", "password", "--file", str(pw_file), "--stats"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.stdout)
+        assert isinstance(data, list)
+        assert len(data) == 2
+        assert data[0]["pwn_count"] > 0
+        assert data[0]["status"] == "pwned"
+        assert data[1]["pwn_count"] == 0
+        assert data[1]["status"] == "clean"
+        assert "pwned" in result.stderr.lower()
+
+    def test_range_cache(self, tmp_path: Path) -> None:
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": str(tmp_path)}):
+            first = _run_json("--cache", "password", "password")
+            cache_files = list((tmp_path / "pwned").glob("*.json"))
+            assert len(cache_files) >= 1
+            mtime_before = cache_files[0].stat().st_mtime_ns
+            second = _run_json("--cache", "password", "password")
+            assert cache_files[0].stat().st_mtime_ns == mtime_before
+        assert isinstance(first, dict) and first["count"] > 0
+        assert first == second
+
+
+# ── Audit & MCP commands (free, no auth) ─────────────────────────────
+
+
+class TestAuditCommand:
+    def test_audit_csv_reuse_and_strength(self, tmp_path: Path) -> None:
+        vault = tmp_path / "vault.csv"
+        vault.write_text(
+            "name,username,password,url\n"
+            "SiteA,alice@example.com,password,https://a.example\n"
+            "SiteB,bob@example.com,password,https://b.example\n"
+            "SiteC,carol@example.com,xK9#mL2$vQ7@nR4!pW8&jF5*hT3^bY6,https://c.example\n",
+            encoding="utf-8",
+        )
+        code, out = _run(
+            "--json",
+            "audit",
+            str(vault),
+            "--source",
+            "csv",
+            "--check-reuse",
+            "--check-strength",
+            "--fail-if-pwned",
+        )
+        assert code == 1
+        data = json.loads(out)
+        assert data["total_entries"] == 3
+        assert data["compromised_entries"] == 2
+        assert len(data["reused_groups"]) == 1
+        assert data["reused_groups"][0]["count"] == 2
+        assert data["weak_entries"] >= 2
+        assert data["risk_score"] is not None
+
+    def test_audit_pwdump_ntlm(self, tmp_path: Path) -> None:
+        ntlm_pw = _md4("password".encode("utf-16-le")).lower()
+        empty_lm = "aad3b435b51404eeaad3b435b51404ee"
+        dump = tmp_path / "ntds.pwdump"
+        dump.write_text(
+            f"CORP\\alice:1001:{empty_lm}:{ntlm_pw}:::\nCORP\\bob:1002:{empty_lm}:{ntlm_pw}:::\n",
+            encoding="utf-8",
+        )
+        code, out = _run(
+            "--json",
+            "audit",
+            str(dump),
+            "--source",
+            "pwdump",
+            "--check-reuse",
+            "--fail-if-pwned",
+        )
+        assert code == 1
+        data = json.loads(out)
+        assert data["total_entries"] == 2
+        assert data["compromised_entries"] == 2
+        assert len(data["reused_groups"]) == 1
+
+
+class TestMcpCommand:
+    def test_mcp_live_stdio_roundtrip(self) -> None:
+        sha1_hex = hashlib.sha1(b"password").hexdigest().upper()
+        requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "lookup_breach", "arguments": {"name": "Adobe"}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "check_password_hash", "arguments": {"hash_hex": sha1_hex}},
+            },
+        ]
+        stdin_payload = "\n".join(json.dumps(req) for req in requests) + "\n"
+        runner = CliRunner()
+        env_override = {"HIBP_API_KEY": "", "HIBP_USER_AGENT": "pwned-e2e-test"}
+        with patch.dict(os.environ, env_override):
+            result = runner.invoke(cli, ["mcp"], input=stdin_payload)
+        assert result.exit_code == 0, result.output
+        responses = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        assert len(responses) == 3
+        assert responses[0]["id"] == 1
+        assert responses[0]["result"]["protocolVersion"] == "2024-11-05"
+
+        breach_resp = responses[1]["result"]
+        assert breach_resp.get("isError") is not True
+        breach_payload = json.loads(breach_resp["content"][0]["text"])
+        assert breach_payload["Name"] == "Adobe"
+
+        pw_resp = responses[2]["result"]
+        assert pw_resp.get("isError") is not True
+        pw_payload = json.loads(pw_resp["content"][0]["text"])
+        assert pw_payload["pwned"] is True
+        assert pw_payload["count"] > 0
+
 
 # ── Error handling ───────────────────────────────────────────────────
 
@@ -398,3 +621,16 @@ class TestErrorHandling:
         """Account lookup without any API key fails with auth error."""
         out = _run_fail("account", f"account-exists@{DOMAIN}")
         assert "API key" in out or "Unauthorized" in out
+
+    def test_malformed_api_key_diagnostic(self) -> None:
+        out = _run_fail("--api-key", "not-a-valid-key", "account", f"account-exists@{DOMAIN}")
+        assert "improperly formed" in out
+
+    def test_invalid_hex_api_key_diagnostic(self) -> None:
+        out = _run_fail(
+            "--api-key",
+            "11111111111111111111111111111111",
+            "account",
+            "test@example.com",
+        )
+        assert "invalid" in out.lower()
