@@ -10,7 +10,7 @@ build
 tests
 Formula
 .clusterfuzzlite
-todos.md
+docs
 .env
 .env.*
 *.pyc

@@ -16,6 +16,8 @@ Complete user and developer documentation for `pwned` — the command-line inter
 ## Project References
 
 - [README](../README.md) — Quickstart, installation, and feature overview
+- [Roadmap](roadmap.md) — Completed milestones and backlog
 - [CHANGELOG](../CHANGELOG.md) — Release history
-- [SECURITY](../SECURITY.md) — Vulnerability reporting and security design
-- [CONTRIBUTING](../CONTRIBUTING.md) — Local development setup and testing workflow
+- [Security Policy](../.github/SECURITY.md) — Vulnerability reporting and security design
+- [Contributing](../.github/CONTRIBUTING.md) — Local development setup and testing workflow
+- [Code of Conduct](../.github/CODE_OF_CONDUCT.md) — Community standards

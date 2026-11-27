@@ -67,7 +67,6 @@ exclude = [
     "/Formula",
     "/Makefile",
     "/action.yml",
-    "/todos.md",
 ]
 
 [dependency-groups]
