@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Release assets now include a CycloneDX SBOM (`pwned-<version>.cdx.json`) and the Sigstore-signed build provenance bundle (`pwned-<version>.sigstore.json`), verifiable with `gh attestation verify <file> --bundle pwned-<version>.sigstore.json --repo domfahey/pwned`.
+
 ## [0.5.0] - 2026-11-27
 
 ### Added
