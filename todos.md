@@ -60,7 +60,13 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 - [x] **Reusable GitHub Action / `pre-commit` hook** — composite `action.yml` for scheduled domain/account breach monitoring in CI.
 - [x] **Meta-tag domain verification (`domain-verify meta-tag|meta-check`)** — verify and support HIBP HTML `<meta>` tag verification endpoints alongside DNS TXT and email verification.
 
-## Completed (Unreleased — v0.4.0)
+## Completed (v0.4.0)
+
+### Full HIBP API v3 Parity
+- [x] **Remove subscribed domain (`DELETE /subscribedDomains/{domain}`)** — `HIBPClient.remove_subscribed_domain()`, `AsyncHIBPClient.remove_subscribed_domain()`, and `pwned subscribed-domains remove <domain>` (retaining backwards-compatible `pwned subscribed-domains` / `pwned sd` listing alongside `subscribed-domains list`).
+- [x] **Exclude unverified breaches on `GET /breaches`** — `include_unverified=False` (`?includeUnverified=false`) in sync/async clients and `pwned breaches --no-include-unverified`.
+- [x] **Spec-compliant error body parsing (`401`, `404`, JSON strings, `text/plain`)** — parse JSON objects, JSON strings, and `text/plain` bodies while ignoring HTML/binary error pages, surfacing `verifyMetaTag` 404 and API-key 401 diagnostics.
+- [x] **Complete HIBP test-account integration coverage & CC BY 4.0 attribution** — cover all 16 documented `hibp-integration-tests.com` aliases and document HIBP CC BY 4.0 data attribution in `README.md`.
 
 ### Enterprise & Active Directory Credential Auditing
 - [x] **`ntds` / `secretsdump` / `pwdump` hash-dump auditing (`pwned audit --source pwdump`)** — parse `domain\user:RID:LM:NT:::` dumps directly, check NTLM hashes via async k-anonymity (`?mode=ntlm`) or `--offline-db`, and detect shared NTLM hashes across domain accounts (`--check-reuse`) without plaintext passwords.
@@ -79,7 +85,7 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 - [x] **Domain exposure risk summary (`pwned domain-report <domain>`)** — cross-reference a verified domain's breached aliases (and optional stealer logs) with cached breach metadata to summarize top breaches, recency, and counts by compromised `DataClasses`.
 
 ### Ecosystem & Distribution
-- [x] **Local stdio MCP server extra (`pwned mcp` / `pwned[mcp]`)** — local-only privacy tools complementing HIBP's remote MCP server for workflows that shouldn't cross a chat prompt: local k-anonymity/offline password checks, local vault auditing, and baseline diffing.
+- [x] **Local stdio MCP server (`pwned mcp`, built-in zero-dependency)** — local-only privacy tools complementing HIBP's remote MCP server for workflows that shouldn't cross a chat prompt: local k-anonymity/offline password checks, local vault auditing, and baseline diffing.
 - [x] **Container image (`ghcr.io/domfahey/pwned`)** — publish a minimal distroless/alpine image via `release.yml` for air-gapped, Kubernetes CronJob, and non-Python CI environments.
 - [x] **Async account batching (`async_batch_check_accounts`) + retry jitter** — mirror `async_batch_check_passwords` for async applications, with jittered 429 backoff.
 

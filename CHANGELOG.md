@@ -7,31 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-26
+
 ### Added
 - **Full HIBP API v3 Parity**:
   - `DELETE /subscribedDomains/{domain}` via `HIBPClient.remove_subscribed_domain()`, `AsyncHIBPClient.remove_subscribed_domain()`, and `pwned subscribed-domains remove <domain>` (retaining backwards-compatible `pwned subscribed-domains` / `pwned sd` listing alongside `subscribed-domains list`).
   - `includeUnverified=false` server-side filtering on `GET /breaches` via `get_breaches(include_unverified=False)` and `pwned breaches --no-include-unverified`.
-- Live integration test coverage for `breaches --no-include-unverified`, `opt-out-breach`, and `paste-sensitive-breach` test accounts, plus CC BY 4.0 HIBP data attribution in `README.md`.
-
-- **Enterprise & Active Directory Auditing (`v0.4.0`)**:
+  - Live integration test coverage for `breaches --no-include-unverified`, `opt-out-breach`, and `paste-sensitive-breach` test accounts, plus CC BY 4.0 HIBP data attribution in `README.md`.
+- **Enterprise & Active Directory Auditing**:
   - `pwdump` / `secretsdump` / `NTDS` hash dump auditing (`pwned audit --source pwdump`) parsing NTLM hashes with `--check-reuse` support.
   - Built-in resumable Pwned Passwords dump downloader (`pwned offline download <output>`) supporting `--ntlm`, `--concurrency`, `--resume`, and ETag caching.
-  - Bitwarden Argon2id encrypted JSON support (`kdfType=1`) using `cryptography`.
-
-- **Vault & Password Hygiene (`v0.4.0`)**:
+  - Bitwarden Argon2id encrypted JSON support (`kdfType=1`) using `cryptography>=44.0`.
+- **Vault & Password Hygiene**:
   - Expanded password manager and browser support: LastPass CSV, Dashlane CSV, Proton Pass CSV, and live Unix `pass` / `gopass` store auditing.
-  - Combined strength and risk scoring (`--check-strength`) utilizing heuristic rules or optional `zxcvbn` (`strength` extra).
+  - Combined strength and risk scoring (`--check-strength`) utilizing zero-dependency heuristics or optional `zxcvbn` (`strength` extra).
   - Opt-in `--cache` support for Pwned Passwords range prefix queries (`/range/{prefix}`).
-
-- **Monitoring, Reporting & Alerting (`v0.4.0`)**:
+- **Monitoring, Reporting & Alerting**:
   - Markdown (`--format markdown`) and standalone HTML (`--format html`) report generation.
   - Declarative TOML exposure monitoring engine (`pwned monitor --config pwned.toml`).
   - Webhook notifications (`--notify-webhook <url>`, `--webhook-format auto|slack|discord|generic`) on newly discovered exposures.
   - Domain exposure risk summary (`pwned domain-report <domain>`).
-
-- **Ecosystem & Distribution (`v0.4.0`)**:
-  - Local privacy-first stdio Model Context Protocol server (`pwned mcp` / `pwned[mcp]`).
-  - Async account batch checks (`async_batch_check_accounts`) with jittered 429 backoff.
+- **Ecosystem & Distribution**:
+  - Built-in zero-dependency local privacy-first stdio Model Context Protocol server (`pwned mcp`).
+  - Async account batch checks (`async_batch_check_accounts`) with jittered 429 backoff (`retry_jitter`).
   - Multi-architecture container images published to GitHub Container Registry (`ghcr.io/domfahey/pwned`).
 
 ### Fixed
@@ -115,7 +113,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured error hierarchy (`HIBPError`, `NotFoundError`, `UnauthorizedError`, `ForbiddenError`, `RateLimitError`) and automatic 429 retry with capped `Retry-After`
 - Strict `mypy`, `ruff` (including Bandit `S` rules), GitHub Actions CI, and unit + integration test suites
 
-[Unreleased]: https://github.com/domfahey/pwned/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/domfahey/pwned/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/domfahey/pwned/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/domfahey/pwned/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/domfahey/pwned/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/domfahey/pwned/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/domfahey/pwned/releases/tag/v0.1.0
