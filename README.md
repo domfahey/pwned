@@ -8,137 +8,177 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-A command-line tool and typed Python client for the [Have I Been Pwned](https://haveibeenpwned.com/) API v3.
+A command-line tool, typed Python SDK, offline password auditor, declarative breach monitor, and local stdio MCP server for the [Have I Been Pwned](https://haveibeenpwned.com/) API v3.
 
-Check email addresses against data breaches, search for compromised passwords, query stealer logs, audit password vaults, perform offline hash checks, and more — all from the terminal or Python.
+- **100% HIBP API v3 parity** — all 21 / 21 endpoints across sync/async clients and the CLI ([coverage matrix](docs/hibp-api-coverage.md)).
+- **Privacy-first password checks** — *k*-anonymity (SHA-1 & NTLM, 5-char prefix only) or air-gapped `O(log N)` offline hash dumps; plaintext passwords never leave your machine.
+- **16 vault & Active Directory audit sources** — Bitwarden (JSON, PBKDF2/Argon2id encrypted JSON, CSV), 1Password (CSV, 1PUX), LastPass, Dashlane, Proton Pass, Chrome/Edge, Firefox, Apple Passwords, KeePass `.kdbx`, AD `pwdump`/`secretsdump`, and live Unix `pass`/`gopass`.
+- **CI/CD & reporting ready** — `text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, and standalone `html` outputs, declarative `pwned.toml` monitoring, baseline diffing, Slack/Discord/generic webhooks, GitHub Action, and multi-arch container images.
 
-## Documentation
+## Quickstart
 
-Read the hosted documentation at **[domfahey.github.io/pwned](https://domfahey.github.io/pwned/)** or browse [`docs/`](docs/README.md):
+Check a password without installing anything (free, no API key required):
 
-- [CLI Reference](docs/cli-reference.md) — Commands, aliases, flags, output formats, and exit codes
-- [HIBP API v3 Coverage](docs/hibp-api-coverage.md) — Complete 21 / 21 endpoint, model, and protocol parity matrix
-- [Python Library Guide](docs/python-api.md) — Sync/async clients, caching, batching, and framework validators
-- [Vault & Active Directory Auditing](docs/vault-auditing.md) — 16 vault/browser/`pwdump`/`pass`/`gopass` formats, Argon2id, reuse & strength scoring
-- [Monitoring, Webhooks & CI/CD](docs/monitoring-and-ci.md) — `pwned.toml`, baselines, Slack/Discord webhooks, SARIF/Markdown/HTML, GitHub Action, and Docker
-- [Offline Lookups & Local MCP Server](docs/offline-and-mcp.md) — Resumable dump downloads and zero-dependency `pwned mcp` server
-
-## Installation
-
-Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
-
-### Zero-install with `uvx`
-Run without installing:
 ```bash
 uvx --from git+https://github.com/domfahey/pwned.git pwned password
 ```
 
-### Global tool installation
+Common workflows once installed:
+
+```bash
+# Audit a password manager export locally for breaches, reuse, and weak passwords
+pwned audit vault.json --source bitwarden-json --check-reuse --check-strength
+
+# Check an account for breaches, pastes, and stealer logs (requires HIBP API key)
+pwned auth set
+pwned search user@example.com --include-stealer-logs --format table
+
+# Generate a standalone HTML domain exposure risk report
+pwned domain-report example.com --cache --format html > report.html
+```
+
+## Documentation
+
+Read the hosted docs at **[domfahey.github.io/pwned](https://domfahey.github.io/pwned/)** or browse [`docs/`](docs/README.md):
+
+| Guide | Topics |
+|---|---|
+| [CLI Reference](docs/cli-reference.md) | Commands, short aliases, global flags, output formats, credential precedence, exit codes |
+| [HIBP API v3 Coverage](docs/hibp-api-coverage.md) | 21 / 21 endpoint parity matrix, response models, rate limiting, error handling, test accounts |
+| [Python Library Guide](docs/python-api.md) | Sync/async clients, caching, retry jitter, batching, Pydantic/FastAPI/Django validators |
+| [Vault & Active Directory Auditing](docs/vault-auditing.md) | 16 vault/browser/`pwdump`/`pass`/`gopass` sources, Argon2id, reuse & strength scoring |
+| [Monitoring, Webhooks & CI/CD](docs/monitoring-and-ci.md) | `pwned.toml`, baselines, webhooks, SARIF/Markdown/HTML, GitHub Action, pre-commit, Docker |
+| [Offline Lookups & Local MCP Server](docs/offline-and-mcp.md) | Resumable offline dump downloads, `OfflinePasswordsClient`, and `pwned mcp` |
+| [Roadmap](docs/roadmap.md) | Completed milestones and planned `v0.5.0` improvements |
+
+## Installation
+
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/) (or Docker/Podman for container usage).
+
+### Global CLI (`uv tool`)
+
 ```bash
 uv tool install git+https://github.com/domfahey/pwned.git
-```
 
-With optional extras (KeePass vault support, OS Keychain credential storage, Bitwarden encrypted JSON / Argon2id decryption, or optional `zxcvbn` password strength boost):
-```bash
+# With all optional extras (KeePass, OS Keychain, Bitwarden encryption, zxcvbn)
 uv tool install "pwned[all] @ git+https://github.com/domfahey/pwned.git"
 ```
-Available optional extras:
-- `keepass` (`pykeepass`)
-- `keyring` (`keyring` for OS Keychain storage)
-- `crypto` (`cryptography>=44.0` for Bitwarden PBKDF2 & Argon2id encrypted JSON)
-- `strength` (`zxcvbn` optional password strength boost)
-- `all` (installs all optional dependencies)
 
-### Development setup
+Optional extras: `keepass` (`pykeepass`), `keyring` (OS Keychain), `crypto` (`cryptography>=44.0` for Bitwarden PBKDF2 & Argon2id encrypted JSON), `strength` (`zxcvbn`), or `all`.
+
+### Python Library Dependency
+
+```bash
+uv add "pwned @ git+https://github.com/domfahey/pwned.git"
+```
+
+### Container Image (`ghcr.io/domfahey/pwned`)
+
+Multi-arch (`linux/amd64`, `linux/arm64`) non-root (`65532:65532`) images with SLSA provenance attestations:
+
+```bash
+# Attach stdin (-i) when piping passwords
+docker run --rm -i ghcr.io/domfahey/pwned password --stdin < passwords.txt
+
+# Mount local vault exports read-only (:ro)
+docker run --rm -v "$(pwd):/data:ro" ghcr.io/domfahey/pwned \
+  audit /data/vault.json --source bitwarden-json --check-reuse --format markdown
+```
+
+### Local Development
+
 ```bash
 git clone https://github.com/domfahey/pwned.git && cd pwned
 make install
 ```
 
-When running from a local clone, prefix commands with `uv run pwned ...`. Examples below assume `pwned` is on your `PATH`.
+When running from a local clone, prefix commands with `uv run pwned ...`.
 
 ## Configuration
 
-Some commands require an [HIBP API key](https://haveibeenpwned.com/API/Key). Manage stored credentials with `pwned auth`:
+Authenticated endpoints require an [HIBP API key](https://haveibeenpwned.com/API/Key). Manage credentials securely via `pwned auth`:
 
-- `pwned auth set` — Interactively prompt for and store your API key in `~/.config/pwned/.env` (with secure `0600` file permissions) or OS Keychain via `--backend keyring`.
-- `pwned auth show` — Display masked API key status, storage backend, and configuration path.
-- `pwned auth clear` — Remove the stored API key from file or keychain storage.
+```bash
+pwned auth set                      # Store in ~/.config/pwned/.env (mode 0600)
+pwned auth set --backend keyring    # Store in OS Keychain (requires pwned[keyring])
+pwned auth show                     # Show masked key status and active source
+pwned auth clear                    # Remove stored key
+```
 
-### API Key Precedence
-Configuration is resolved in the following order (highest precedence first):
-1. `--api-key` CLI flag
-2. `HIBP_API_KEY` environment variable
-3. Current working directory `.env` file
-4. User XDG config file (`~/.config/pwned/.env`)
-5. OS Keychain backend (`keyring`)
+API key precedence (highest first): `--api-key` CLI flag > `HIBP_API_KEY` env var > CWD `.env` (see [.env.example](.env.example)) > `~/.config/pwned/.env` > OS Keychain.
 
-## CLI Usage (by HIBP Plan Tier)
+## CLI Overview
 
-`pwned` implements **100% of the official HIBP API v3 specification (21 / 21 endpoints)** across sync/async clients and the CLI. See [docs/hibp-api-coverage.md](docs/hibp-api-coverage.md) for the complete endpoint, parameter, model, and protocol parity matrix.
+Commands grouped by HIBP subscription tier (see [CLI Reference](docs/cli-reference.md) for all flags and examples):
 
-### Free / No API key
-- `password` — Check password exposure (supports `--stdin`, `--file`, `--hashed`, `--offline-db`, `--concurrency`, `--stats`, `--ntlm`, `--pad`, `--threshold`, `--cache`, `--fail-if-pwned`)
-- `audit` — Audit local password manager, browser, or Active Directory exports (Bitwarden JSON/Encrypted-JSON/CSV, 1Password CSV/1PUX, LastPass CSV, Dashlane CSV, Proton Pass CSV, Chrome/Firefox/Apple CSV, generic CSV, KeePass `.kdbx`, Active Directory `pwdump`/`secretsdump`, Unix `pass`/`gopass`, `--check-reuse`, `--check-strength`, `--cache`, `--notify-webhook`, `--concurrency`, `--offline-db`, `--fail-if-pwned`)
-- `offline download <output>` — Built-in resumable offline Pwned Passwords dump downloader (supports `--ntlm`, `--concurrency`, `--resume`, `--etag-cache`)
-- `mcp` — Local privacy-first stdio Model Context Protocol server (`--offline-db`, `--ntlm`, `--cache`)
-- `breach` — Get details for a specific breach
-- `breaches` — List all known breaches (supports `--domain`, `--spam-list`, `--no-spam-list`, `--no-include-unverified`, `--since`, `--data-class`, `--verified-only`, `--exclude-retired`, `--sort pwn-count|date|name`)
-- `latest-breach` — Get the most recently added breach
-- `dataclasses` — List tracked data classes (supports `--descriptions`)
-- `cache clear` — Clear local response cache
-- `auth set|show|clear` — Manage stored API key credentials (`--backend file|keyring`)
-- `completion` — Generate shell tab-completion scripts (`completion bash|zsh|fish`)
-
-### Core / Pro / High RPM
-- `account` — Check email or username breaches (supports `--file`, `--stdin`, `--rpm`, `--fail-if-pwned`, `--no-truncate`, `--domain`, `--no-include-unverified`, `--baseline`, `--save-baseline`, `--notify-webhook`, `--webhook-format`, `--stats`)
-- `search` — Composite search for breaches, pastes, and stealer logs (`--include-stealer-logs`, `--baseline`, `--save-baseline`, `--notify-webhook`, `--webhook-format`)
-- `pastes` — Get pastes for an email address
-- `subscription` — View HIBP subscription status and rate limits
-- `domain` — Get breached email addresses for a domain (supports `--baseline`, `--save-baseline`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned`)
-- `domain-report <domain>` — Comprehensive domain exposure risk summary cross-referencing breach counts, stealer logs, and data classes (`--include-stealer-logs`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned`)
-- `monitor` — Declarative TOML exposure monitoring (`--config pwned.toml`, `--save-baselines`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned`)
-- `subscribed-domains` / `subscribed-domains list` — List subscribed domains
-
-### Pro / High RPM
-- `account-range <email>` — Query breach status via 6-character SHA-1 email prefix (*k*-anonymity)
-
-### Pro
-- `stealer email|website|domain` — Query stealer log records by email address, website domain, or email domain
-- `domain-verify dns-token|dns-check|meta-tag|meta-check|email` — Manage domain ownership verification via DNS TXT records, HTML meta tags, or email aliases
-- `subscribed-domains remove <domain>` — Remove a subscribed domain from your account
-
-### Short Command Aliases
-For convenience, ergonomic short aliases are available:
-- `pw` (`password`)
-- `ba` (`account`)
-- `bar` (`account-range`)
-- `pa` (`pastes`)
-- `bd` (`domain`)
-- `sd` (`subscribed-domains`)
-- `lb` (`latest-breach`)
-- `dc` (`dataclasses`)
+| Plan Tier | Commands |
+|---|---|
+| **Free / No API key** | `password` (`pw`), `audit`, `offline download`, `mcp`, `breach`, `breaches`, `latest-breach` (`lb`), `dataclasses` (`dc`), `cache clear`, `auth set\|show\|clear`, `completion` |
+| **Core / Pro / High RPM** | `account` (`ba`), `search`, `pastes` (`pa`), `subscription`, `domain` (`bd`), `domain-report`, `monitor`, `subscribed-domains` (`sd`) |
+| **Pro / High RPM** | `account-range` (`bar`) |
+| **Pro** | `stealer email\|website\|domain`, `domain-verify dns-token\|dns-check\|meta-tag\|meta-check\|email`, `subscribed-domains remove` |
 
 ### Global Options
+
+Global flags are accepted before or after subcommands (`pwned --json --cache breach Adobe` or `pwned breach Adobe --format html > report.html`):
 
 | Flag | Description |
 |---|---|
 | `--api-key TEXT` | HIBP API key override |
-| `--user-agent TEXT` | Custom User-Agent string override (default `pwned-cli`) |
-| `--format TEXT` | Output format: `text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, or `html` |
+| `--user-agent TEXT` | Custom `User-Agent` header override (default `pwned-cli`) |
+| `--format TEXT` | Output format: `text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, `html` |
 | `--json` | Shorthand for `--format json` |
-| `--cache / --no-cache` | Cache public endpoint and range responses locally |
+| `--cache / --no-cache` | Cache public endpoints and password range lookups locally |
 | `--version` | Show CLI version and exit |
 
-Global flags can appear before or after subcommands:
-```bash
-pwned --json --cache breach Adobe
-pwned breach Adobe --format html > report.html
+## Python Library Usage
+
+`pwned` ships PEP 561 type annotations (`py.typed`) with sync, async, offline, and framework validator APIs. See [Python Library Guide](docs/python-api.md) for full details.
+
+```python
+import asyncio
+from pathlib import Path
+from typing import Annotated
+from pydantic import AfterValidator, BaseModel
+from pwned import (
+    AsyncHIBPClient,
+    AsyncPwnedPasswordsClient,
+    HIBPClient,
+    OfflinePasswordsClient,
+    PwnedPasswordsClient,
+    ResponseCache,
+    make_password_validator,
+)
+
+# Sync password & account checks
+with PwnedPasswordsClient() as pw:
+    compromised = pw.is_pwned("hunter2", threshold=1)
+
+with HIBPClient(api_key="your_api_key", user_agent="my-app", cache=ResponseCache()) as client:
+    breaches = client.get_account_breaches("user@example.com", truncate=False)
+
+# Async clients
+async def check_async() -> None:
+    async with AsyncPwnedPasswordsClient() as pw:
+        count = await pw.check_password("hunter2", pad=True)
+    async with AsyncHIBPClient(api_key="your_api_key") as client:
+        status = await client.get_subscription_status()
+
+# Offline O(log N) lookup against official sorted dumps
+with OfflinePasswordsClient(Path("/path/to/pwned-passwords-sha1.txt")) as offline:
+    count = offline.check_password("hunter2")
+
+# Pydantic / FastAPI password validator
+SafePassword = Annotated[str, AfterValidator(make_password_validator(threshold=1))]
+
+class SignupForm(BaseModel):
+    username: str
+    password: SafePassword
 ```
 
-## Declarative Monitoring (`pwned.toml`)
+## Monitoring, CI/CD & GitHub Action
 
-Automate continuous exposure checks across accounts and domains using a declarative TOML configuration file:
+### Declarative Monitoring (`pwned.toml`)
 
 ```toml
 [monitor]
@@ -154,101 +194,43 @@ format = "auto"
 [[accounts]]
 email = "security@example.com"
 include_stealer_logs = true
-include_unverified = false
 
 [[domains]]
 domain = "example.com"
 include_stealer_logs = true
 ```
 
-Run monitoring with:
 ```bash
 pwned monitor --config pwned.toml --save-baselines
 ```
 
-## Container Usage
-
-For air-gapped environments, CI pipelines, or non-Python systems, run `pwned` via Docker or Podman:
-
-```bash
-docker run --rm ghcr.io/domfahey/pwned password --stdin < passwords.txt
-docker run --rm -v $(pwd):/data ghcr.io/domfahey/pwned audit --source bitwarden-json /data/vault.json --format markdown
-```
-
-## Python Library Usage
-
-`pwned` provides both synchronous and asynchronous typed clients (`py.typed` / PEP 561 compliant).
-
-### Synchronous Clients
-```python
-from pwned import HIBPClient, PwnedPasswordsClient, ResponseCache
-
-# Password checks with k-anonymity
-with PwnedPasswordsClient() as pw:
-    is_compromised = pw.is_pwned("hunter2", threshold=1)
-    suffix_map = pw.get_password_range("5BAA6")
-
-# HIBP API requests (with optional public-endpoint & range caching)
-with HIBPClient(api_key="your_api_key", user_agent="my-app", cache=ResponseCache()) as client:
-    breaches = client.get_account_breaches("user@example.com", truncate=False)
-    search_res = client.search_account("user@example.com", include_stealer_logs=True)
-```
-
-### Asynchronous Clients (`asyncio` / `httpx.AsyncClient`)
-```python
-import asyncio
-from pwned import AsyncHIBPClient, AsyncPwnedPasswordsClient
-
-async def main():
-    async with AsyncPwnedPasswordsClient() as pw:
-        count = await pw.check_password("hunter2", pad=True)
-
-    async with AsyncHIBPClient(api_key="your_api_key") as client:
-        sub = await client.get_subscription_status()
-        print(sub)
-
-asyncio.run(main())
-```
-
-### Offline Password DB Lookups
-For high-scale or air-gapped password auditing against official Pwned Passwords SHA-1/NTLM hash dumps:
-```python
-from pathlib import Path
-from pwned import OfflinePasswordsClient
-
-with OfflinePasswordsClient(Path("/path/to/pwned-passwords-sha1.txt")) as offline:
-    count = offline.check_password("hunter2")
-    print(f"Compromised {count} times")
-```
-
-### Framework Password Validators (Pydantic / FastAPI / Django)
-```python
-from typing import Annotated
-from pydantic import AfterValidator, BaseModel
-from pwned import make_password_validator
-
-SafePassword = Annotated[str, AfterValidator(make_password_validator(threshold=1))]
-
-class SignupForm(BaseModel):
-    username: str
-    password: SafePassword
-```
-
-## CI/CD Integrations & Pre-commit
-
 ### GitHub Action
-Use the official composite GitHub Action to audit repositories or credential exports in CI:
+
+Run scheduled exposure monitoring or local vault/hash audits in GitHub Actions with `domfahey/pwned@v0.4.1`:
+
 ```yaml
 steps:
   - uses: actions/checkout@v4
   - uses: domfahey/pwned@v0.4.1
     with:
-      args: audit --source bitwarden-json --fail-if-pwned vault.json
+      args: monitor --config pwned.toml --save-baselines --fail-if-pwned
       api-key: ${{ secrets.HIBP_API_KEY }}
 ```
 
+*(Commands like `password` and `audit` use the free k-anonymity API and do not require `api-key`.)*
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `args` | Yes | — | CLI arguments passed to `pwned` |
+| `api-key` | No | `""` | HIBP API key (injected via `HIBP_API_KEY` env var) |
+| `version` | No | Action ref (`main` fallback) | Git ref, tag, or branch of `domfahey/pwned` to execute |
+| `output-file` | No | `""` | Optional file path to redirect stdout (e.g. `pwned.sarif`) |
+| `python-version` | No | `"3.12"` | Python version set up via `astral-sh/setup-uv` |
+
 ### Pre-commit Hook
-Add `pwned` to your `.pre-commit-config.yaml`:
+
+Add `pwned-audit` to `.pre-commit-config.yaml`:
+
 ```yaml
 repos:
   - repo: https://github.com/domfahey/pwned
@@ -257,31 +239,15 @@ repos:
       - id: pwned-audit
 ```
 
-## Model Context Protocol (MCP) Servers
+`pwned-audit` defaults to `stages: [manual]` so vault files are audited on demand:
 
-`pwned` supports both HIBP's official remote MCP server and a local privacy-first stdio MCP server for AI clients:
-
-### 1. HIBP Official Remote MCP Server
-To query Have I Been Pwned directly via AI chat clients:
-- **Endpoint & docs:** `https://haveibeenpwned.com/mcp`
-- **Public tools (no auth):** breach metadata, latest breach, data classes, and Pwned Passwords range lookup
-- **Authenticated tools (subscription required):** account breaches, pastes, verified domain management, and stealer logs
-
-Example HTTP MCP client configuration:
-```json
-{
-  "HIBP": {
-    "type": "http",
-    "url": "https://haveibeenpwned.com/mcp",
-    "headers": {
-      "hibp-api-key": "YOUR_HIBP_API_KEY"
-    }
-  }
-}
+```bash
+pre-commit run pwned-audit --hook-stage manual --files vault.json
 ```
 
-### 2. Local Privacy-First Stdio MCP Server (`pwned mcp`)
-For offline or local workflows where plaintext passwords or internal vaults must never cross an AI chat prompt, `pwned` includes a built-in, zero-dependency local stdio Model Context Protocol server (`check_password_hash`, `audit_vault`, `diff_baseline`, `lookup_breach`, `check_account_range`):
+## Model Context Protocol (MCP)
+
+`pwned` complements HIBP's official remote MCP server (`https://haveibeenpwned.com/mcp`) with a built-in, zero-dependency **local stdio MCP server** (`pwned mcp`) for workflows where plaintext passwords or internal vaults must never leave your machine (`check_password_hash`, `audit_vault`, `diff_baseline`, `lookup_breach`, `check_account_range`):
 
 ```json
 {
@@ -294,64 +260,75 @@ For offline or local workflows where plaintext passwords or internal vaults must
 }
 ```
 
+See [Offline Lookups & Local MCP Server](docs/offline-and-mcp.md) for both local stdio and HIBP remote HTTP MCP configurations.
+
 ## Development
 
+Run `make` (or `make help`) to list all targets:
+
 ```bash
-make install          # Set up venv and install deps
-make test             # Run unit tests (default; integration excluded)
-make test-integration # Run integration tests (hits live API)
-make coverage         # Run unit tests with coverage report
-make lint             # Check code style
-make format           # Auto-fix lint/formatting
+make install          # Install runtime and development dependencies
+make install-all      # Install all optional extras and dependency groups
+make doctor           # Verify uv, Python, deps, extras, and API key source
+make test             # Run unit tests (integration excluded by default)
+make test-integration # Run live HIBP API integration tests (uses HIBP test key)
+make coverage         # Run unit tests with branch coverage report
+make lint             # Check code style and formatting with ruff
+make format           # Auto-fix lint issues and format code with ruff
 make type             # Run mypy strict type checking
-make doctor           # Verify environment and dependencies
-make check            # Run lint + type + test (non-mutating, CI-safe)
+make check            # Run lint + type + test (CI-safe)
+make docs             # Build MkDocs Material site with --strict
+make docs-serve       # Serve docs locally with live reload
+make build            # Build sdist and wheel distributions
+make clean            # Remove build, test, docs, and cache artifacts
 ```
 
-### Project structure
+<details>
+<summary>Project structure</summary>
 
-```
+```text
 src/pwned/
 ├── __init__.py         # Public library API exports
-├── _parsers.py         # Zero-dependency stdlib parsers (MD4, range response, HTML stripper, input lines)
+├── _parsers.py         # Zero-dependency stdlib parsers (MD4, range, HTML, pwdump, input lines)
 ├── async_client.py     # Async HIBP API client (httpx.AsyncClient)
-├── audit.py            # Password manager vault auditing & reused password detection
+├── audit.py            # Vault, browser, AD pwdump, and pass/gopass auditing
 ├── baseline.py         # Exposure baseline snapshotting and diffing
-├── batch.py            # Batch processing & rate limiting for accounts/passwords
-├── cache.py            # File-based TTL response caching for public endpoints & ranges
+├── batch.py            # Sync & async batching with RPM pacing and stats
+├── cache.py            # File-based XDG TTL response caching
 ├── cli.py              # Click command groups and global option parser
-├── cli_commands.py     # Additional command modules (auth, search, audit, cache, completion, etc.)
-├── cli_helpers.py      # CLI error handling, output rendering, and validation helpers
+├── cli_commands.py     # Additional CLI commands (auth, search, audit, offline, monitor, mcp, ...)
+├── cli_helpers.py      # CLI output rendering, error handling, and validation helpers
 ├── client.py           # Sync HIBP API client (haveibeenpwned.com)
-├── config.py           # pydantic-settings configuration & XDG / keyring credential storage
+├── config.py           # pydantic-settings config with XDG fallback and OS Keychain
 ├── filtering.py        # Breach filtering and sorting helpers
 ├── formatting.py       # Output formatters (text, json, jsonl, csv, table, sarif, markdown, html)
-├── mcp_server.py       # Local privacy-first stdio Model Context Protocol server
-├── models.py           # Pydantic v2 models for API responses
-├── monitor.py          # Declarative TOML exposure monitoring engine
-├── notify.py           # Webhook notification client (Slack, Discord, generic JSON)
+├── mcp_server.py       # Local privacy-first stdio MCP server
+├── models.py           # Pydantic v2 response models
+├── monitor.py          # Declarative TOML monitoring engine
+├── notify.py           # HTTPS webhook notifications (Slack, Discord, generic JSON)
 ├── offline.py          # Offline sorted hash file lookups (OfflinePasswordsClient)
 ├── offline_download.py # Resumable official Pwned Passwords dump downloader
-├── passwords.py        # Sync & async Pwned Passwords client (api.pwnedpasswords.com)
+├── passwords.py        # Sync & async Pwned Passwords clients (k-anonymity)
 ├── py.typed            # PEP 561 type marker
 ├── reporting.py        # Domain exposure risk summary reporting
-├── strength.py         # Password strength heuristics & zxcvbn integration
-└── validators.py       # Framework password validation helpers
+├── strength.py         # Password strength heuristics & optional zxcvbn integration
+└── validators.py       # Framework password validators (Pydantic / FastAPI / Django)
 
 tests/
-├── unit/               # Fast tests with mocked HTTP
-└── integration/        # Live API tests using HIBP test accounts
+├── unit/               # Fast unit tests with mocked HTTP (100% branch coverage)
+└── integration/        # Live API tests against hibp-integration-tests.com test accounts
 ```
 
-### Running integration tests
+</details>
 
-Integration tests use the [HIBP test API key](https://haveibeenpwned.com/API/v3#TestAccounts) (`00000000000000000000000000000000`) and test accounts on `hibp-integration-tests.com`. They hit the live API and require network access.
+## Contributing & Security
 
-```bash
-make test-integration
-```
+- [Changelog](CHANGELOG.md) — Release history
+- [Contributing Guide](.github/CONTRIBUTING.md) — Development workflow and PR checklist
+- [Security Policy](.github/SECURITY.md) — Vulnerability reporting and security design
+- [Code of Conduct](.github/CODE_OF_CONDUCT.md) — Community standards
 
-## See Also
+### See Also
 
 Direct Have I Been Pwned CLIs in other ecosystems:
 
