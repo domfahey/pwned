@@ -89,7 +89,37 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 - [x] **Container image (`ghcr.io/domfahey/pwned`)** — publish a minimal distroless/alpine image via `release.yml` for air-gapped, Kubernetes CronJob, and non-Python CI environments.
 - [x] **Async account batching (`async_batch_check_accounts`) + retry jitter** — mirror `async_batch_check_passwords` for async applications, with jittered 429 backoff.
 
+## Completed (v0.4.1)
+
+- [x] **Hosted MkDocs Material docs site (`domfahey.github.io/pwned`)** — comprehensive `docs/` guides deployed via SHA-pinned GitHub Pages workflow (`.github/workflows/docs.yml`) with locked `docs` dependency group.
+- [x] **Repository & developer workflow polish** — organized `.github/` community health files, `packaging/homebrew/pwned.rb`, `.env.example`, self-documenting `Makefile` + enhanced `make doctor`, `Settings` `extra="ignore"` fix, and `action.yml` GitHub Marketplace branding + ref pinning.
+
+## Planned (v0.5.0)
+
+Prioritized from cross-ecosystem research (`DSInternals`, `easybill/easypwned`, `ScottHelme/when-pwned-passwords-bloom`, `alexbrazier/pwned-bloom`, `HaveIBeenPwned/PwnedPasswordsCloudflareWorker`, `Keyguard`, `1Password`/`Bitwarden` CLIs, `brycx/checkpwn`, and `wneessen/go-hibp`).
+
+### Active Directory & Enterprise Credential Hygiene
+- [ ] **Extended AD `pwdump` quality checks** — detect empty NTLM hashes (`31D6CFE0D16AE931B73C59D7E0C089C0`), present legacy LM hashes, username-as-password matches (local MD4 of `SamAccountName` and case variants), and add `--exclude-machines` filtering for `$` computer accounts.
+- [ ] **Custom organizational wordlist support (`--custom-wordlist <file>`)** — check passwords and NTLM dumps against company-specific banned dictionaries (brand names, seasonal patterns, default onboarding passwords) alongside HIBP.
+
+### Watchtower-Style Vault Auditing & Live CLI Connectors
+- [ ] **Live cloud vault CLI connectors (`--source bitwarden-cli` / `1password-cli`)** — audit unlocked `bw` / `rbw` and `op` vaults directly in memory without writing plaintext exports to disk (mirroring existing `pass` / `gopass` support).
+- [ ] **Vault breach & stealer-log correlation (`pwned audit --check-breaches`)** — cross-reference vault entry emails and login domains against HIBP breaches and stealer logs to flag accounts on compromised sites even when the password itself has not yet appeared in Pwned Passwords.
+
+### Offline Scale & Self-Hosted Infrastructure
+- [ ] **Self-hosted k-anonymity HTTP server / caching proxy (`pwned serve`)** — expose a drop-in `/range/{prefix}` endpoint, `/healthz`, and optional Prometheus `/metrics` backed by `--offline-db` or an upstream TTL cache for air-gapped services and high-QPS auth backends.
+- [ ] **Compact offline hash indexes (`pwned offline build-bloom` / `compact`)** — build sub-1 GB mmap-able Bloom filters for RAM-resident checks in containers/CI runners, plus a fixed-width binary prefix-indexed format (~50% smaller than ASCII dumps with `O(1)` prefix jump).
+
+### Continuous Monitoring, History & Alerting
+- [ ] **SQLite exposure history & remediation tracking (`monitor --db`)** — persist first-seen and resolved exposure timestamps in a stdlib `sqlite3` store to track breach trends and rotated credentials across runs, feeding trend summaries into `domain-report`, `--format markdown`, and `--format html`.
+- [ ] **Expanded alert destinations** — add Microsoft Teams (Adaptive Cards), PagerDuty (Events API v2), SMTP email, and GitHub Issue auto-creation/commenting for CI monitoring pipelines.
+
+### CLI UX & End-User Diagnostics
+- [ ] **End-user `pwned doctor` CLI subcommand** — verify HIBP API connectivity, subscription tier/RPM, active credential source, keyring availability, cache size, and offline DB integrity directly from installed `pwned` binaries.
+
 ## Backlog / External
 
 - [ ] **PyPI publishing (optional)** — pick a non-colliding distribution name (since `pwned` is already taken on PyPI) while keeping the `pwned` CLI entrypoint, and configure OIDC Trusted Publishing in `.github/workflows/release.yml`.
+- [ ] **Homebrew tap (`domfahey/homebrew-tap`)** — publish `packaging/homebrew/pwned.rb` and automate formula URL/SHA256 updates on release tags.
+- [ ] **GitHub Marketplace Action listing** — check **Publish this Action to the GitHub Marketplace** on the `v0.4.1` release UI after accepting the GitHub Marketplace Developer Agreement.
 - [ ] **OpenSSF Best Practices badge** — manual web registration on `bestpractices.dev`.
