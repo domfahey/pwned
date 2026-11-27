@@ -69,6 +69,17 @@ def _load_etags(path: Path) -> dict[str, str]:
     return {str(k): v for k, v in raw.items() if isinstance(v, str)}
 
 
+def _save_etags(path: Path, etags: dict[str, str]) -> None:
+    """Atomically persist a prefix -> ETag mapping as JSON."""
+    with _atomic_open(path) as handle:
+        handle.write(json.dumps(etags, sort_keys=True, indent=2))
+
+
+def _retry_delay(attempt: int) -> float:
+    """Compute capped exponential backoff delay without floating-point overflow."""
+    return min(0.5 * (1 << min(attempt, 5)), 10.0)
+
+
 @contextlib.contextmanager
 def _atomic_open(target: Path) -> Iterator[IO[str]]:
     """Open a sibling temp file for writing and atomically replace `target` on success."""
@@ -149,6 +160,7 @@ async def download_offline_db(
     )
 
     index_path: Path | None
+    dir_index: Path | None = None
     if directory:
         if output_path.exists() and not output_path.is_dir():
             raise FileExistsError(f"Output path is an existing file: {output_path}")
@@ -166,6 +178,7 @@ async def download_offline_db(
                 "(use --overwrite to replace)"
             )
         index_path = resolved_index
+        dir_index = resolved_index
     else:
         if output_path.is_dir():
             raise IsADirectoryError(f"Output path is a directory: {output_path}")
@@ -184,6 +197,8 @@ async def download_offline_db(
         etags: dict[str, str] = {}
     else:
         etags = _load_etags(index_path) if index_path is not None else {}
+    if dir_index is not None and not dir_index.exists():
+        _save_etags(dir_index, etags)
     params: dict[str, str] = {"mode": "ntlm"} if ntlm else {}
     total_prefixes = end_prefix - start_prefix
 
@@ -229,7 +244,7 @@ async def download_offline_db(
                     )
                 except httpx.RequestError as exc:
                     if max_retries is None or attempt < max_retries:
-                        await sleep(min(0.5 * (2**attempt), 10.0))
+                        await sleep(_retry_delay(attempt))
                         attempt += 1
                         continue
                     raise HIBPError(f"Request failed for prefix {prefix}: {exc}") from exc
@@ -239,7 +254,7 @@ async def download_offline_db(
                     break
                 if resp.status_code == 429 or resp.status_code >= 500:
                     if max_retries is None or attempt < max_retries:
-                        await sleep(min(0.5 * (2**attempt), 10.0))
+                        await sleep(_retry_delay(attempt))
                         attempt += 1
                         continue
                     raise HIBPError(f"HTTP {resp.status_code} for prefix {prefix}")
@@ -247,7 +262,7 @@ async def download_offline_db(
                     raise HIBPError(f"HTTP {resp.status_code} for prefix {prefix}")
 
                 shard_path.parent.mkdir(parents=True, exist_ok=True)
-                shard_path.write_text(resp.text, encoding="utf-8")
+                shard_path.write_text(resp.text, encoding="utf-8", newline="")
                 new_etag = resp.headers.get("etag")
                 if new_etag:
                     etags[prefix] = new_etag
@@ -277,6 +292,8 @@ async def download_offline_db(
     finally:
         if owns_client:
             await active_client.aclose()
+        if index_path is not None:
+            _save_etags(index_path, etags)
 
     if directory:
         hashes_written = sum(
@@ -290,10 +307,7 @@ async def download_offline_db(
     else:
         hashes_written = _merge_shards(output_path, work_dir, start_prefix, end_prefix)
 
-    if index_path is not None:
-        with _atomic_open(index_path) as handle:
-            handle.write(json.dumps(etags, sort_keys=True, indent=2))
-    else:
+    if index_path is None:
         # Without ETag revalidation, shards are no longer needed once merged.
         shutil.rmtree(work_dir)
 

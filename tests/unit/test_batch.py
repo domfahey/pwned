@@ -145,7 +145,7 @@ class TestLoadInputFile:
 
     def test_loads_file_preserving_blank_lines_when_skip_empty_false(self, tmp_path: Path) -> None:
         path = tmp_path / "blanks.txt"
-        path.write_text("pw1\n\n  \npw2\r\n", encoding="utf-8")
+        path.write_bytes(b"pw1\n\n  \npw2\r\n")
 
         assert load_input_file(
             path,
