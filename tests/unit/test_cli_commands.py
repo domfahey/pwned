@@ -32,6 +32,7 @@ def _make_cli() -> click.Group:
     @click.option("--json", "use_json", is_flag=True)
     @click.option("--cache", "use_cache", is_flag=True)
     @click.option("--outfile", type=click.Path(dir_okay=False, path_type=Path), default=None)
+    @click.option("--force", is_flag=True)
     @click.pass_context
     def group(
         ctx: click.Context,
@@ -41,6 +42,7 @@ def _make_cli() -> click.Group:
         use_json: bool,
         use_cache: bool,
         outfile: Path | None,
+        force: bool,
     ) -> None:
         resolved_fmt = "json" if use_json else fmt
         ctx.ensure_object(dict)
@@ -50,6 +52,7 @@ def _make_cli() -> click.Group:
         ctx.obj["use_json"] = use_json
         ctx.obj["use_cache"] = use_cache
         ctx.obj["outfile"] = outfile
+        ctx.obj["force"] = force
 
     register_extra_commands(group)
     return group
@@ -1063,6 +1066,38 @@ class TestPasswordRangeCommand:
         assert result.exit_code == 2
         assert "5 hexadecimal characters" in result.output
 
+    def test_password_range_mode_ntlm_and_short_flag(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{PASSWORDS_BASE}/range/8846F?mode=ntlm",
+            text="7EAEE8FB117AD06BDD830B7586C:42\n",
+        )
+        httpx_mock.add_response(
+            url=f"{PASSWORDS_BASE}/range/8846F?mode=ntlm",
+            text="7EAEE8FB117AD06BDD830B7586C:99\n",
+        )
+        app = _make_cli()
+
+        res_mode = cli_runner.invoke(
+            app, ["--json", "password-range", "8846f", "--mode", "ntlm", "--no-pad"]
+        )
+        assert res_mode.exit_code == 0
+        assert json.loads(res_mode.output) == {"7EAEE8FB117AD06BDD830B7586C": 42}
+
+        res_short = cli_runner.invoke(
+            app, ["--json", "password-range", "8846f", "--mode", "sha1", "-n", "--no-pad"]
+        )
+        assert res_short.exit_code == 0
+        assert json.loads(res_short.output) == {"7EAEE8FB117AD06BDD830B7586C": 99}
+
+        reqs = httpx_mock.get_requests()
+        assert len(reqs) == 2
+        assert all(req.url.params["mode"] == "ntlm" for req in reqs)
+
+        res_bad_mode = cli_runner.invoke(app, ["password-range", "8846f", "--mode", "md5"])
+        assert res_bad_mode.exit_code == 2
+
 
 class TestDomainVerifyCommands:
     def test_dns_token(
@@ -1876,6 +1911,133 @@ class TestAuditCommand:
         assert result.exit_code == 2
         assert "https scheme" in result.output
 
+    def test_audit_mode_ntlm_short_flag_and_parallelism_aliases(
+        self,
+        isolated_env: Path,
+        httpx_mock: HTTPXMock,
+        monkeypatch: pytest.MonkeyPatch,
+        cli_runner: CliRunner,
+    ) -> None:
+        from pwned.audit import async_audit_entries as real_async_audit
+
+        export_file = isolated_env / "mode.csv"
+        export_file.write_text("name,username,password\nSite,u1,pwmode\n", encoding="utf-8")
+        ntlm_hex = _ntlm_hash("pwmode")
+        httpx_mock.add_response(
+            url=f"{PASSWORDS_BASE}/range/{ntlm_hex[:5]}?mode=ntlm",
+            text=f"{ntlm_hex[5:]}:11\n",
+        )
+        httpx_mock.add_response(
+            url=f"{PASSWORDS_BASE}/range/{ntlm_hex[:5]}?mode=ntlm",
+            text=f"{ntlm_hex[5:]}:22\n",
+        )
+
+        seen_concurrency: list[int] = []
+
+        async def spy_async_audit(*args: Any, **kwargs: Any) -> Any:
+            seen_concurrency.append(kwargs["concurrency"])
+            return await real_async_audit(*args, **kwargs)
+
+        monkeypatch.setattr("pwned.cli_commands.async_audit_entries", spy_async_audit)
+
+        app = _make_cli()
+        res_mode = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "audit",
+                str(export_file),
+                "--source",
+                "csv",
+                "--mode",
+                "ntlm",
+                "-p",
+                "4",
+            ],
+        )
+        assert res_mode.exit_code == 0
+        assert json.loads(res_mode.output)["findings"] == [
+            {"name": "Site", "username": "u1", "pwn_count": 11}
+        ]
+
+        res_short = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "audit",
+                str(export_file),
+                "--source",
+                "csv",
+                "--mode",
+                "sha1",
+                "-n",
+                "--parallelism",
+                "6",
+            ],
+        )
+        assert res_short.exit_code == 0
+        assert json.loads(res_short.output)["findings"] == [
+            {"name": "Site", "username": "u1", "pwn_count": 22}
+        ]
+        assert seen_concurrency == [4, 6]
+
+    def test_audit_offline_db_per_prefix_directory(
+        self, isolated_env: Path, cli_runner: CliRunner
+    ) -> None:
+        export_file = isolated_env / "dir_vault.csv"
+        export_file.write_text(
+            "name,username,password\nSiteA,a@x.com,password\nSiteB,b@x.com,safe!pw99\n",
+            encoding="utf-8",
+        )
+
+        sha1_dir = isolated_env / "sha1_ranges"
+        sha1_dir.mkdir()
+        sha1_prefix, sha1_suffix = _sha1_parts("password")
+        (sha1_dir / f"{sha1_prefix}.txt").write_text(f"{sha1_suffix}:321\r\n", encoding="utf-8")
+
+        app = _make_cli()
+        res_sha1 = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "audit",
+                str(export_file),
+                "--source",
+                "csv",
+                "--offline-db",
+                str(sha1_dir),
+                "--fail-if-pwned",
+            ],
+        )
+        assert res_sha1.exit_code == 8
+        data_sha1 = json.loads(res_sha1.output)
+        assert data_sha1["compromised_entries"] == 1
+        assert data_sha1["findings"] == [{"name": "SiteA", "username": "a@x.com", "pwn_count": 321}]
+
+        ntlm_dir = isolated_env / "ntlm_ranges"
+        ntlm_dir.mkdir()
+        ntlm_hex = _ntlm_hash("safe!pw99")
+        (ntlm_dir / f"{ntlm_hex[:5]}.txt").write_text(f"{ntlm_hex[5:]}:42\r\n", encoding="utf-8")
+
+        res_ntlm = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "audit",
+                str(export_file),
+                "--source",
+                "csv",
+                "--offline-db",
+                str(ntlm_dir),
+                "--mode",
+                "ntlm",
+            ],
+        )
+        assert res_ntlm.exit_code == 0
+        data_ntlm = json.loads(res_ntlm.output)
+        assert data_ntlm["compromised_entries"] == 1
+        assert data_ntlm["findings"] == [{"name": "SiteB", "username": "b@x.com", "pwn_count": 42}]
+
 
 class TestCompletionCommand:
     @pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
@@ -1922,20 +2084,24 @@ class TestOfflineCommand:
             output_path: Path,
             *,
             ntlm: bool = False,
+            directory: bool = False,
             concurrency: int = 32,
             resume: bool = True,
+            force: bool = False,
             overwrite: bool = True,
             etag_cache_path: Path | None = None,
             user_agent: str = "pwned-cli",
-            max_retries: int = 3,
+            max_retries: int | None = None,
             on_progress: Any = None,
         ) -> DownloadStats:
             captured.append(
                 {
                     "output_path": output_path,
                     "ntlm": ntlm,
+                    "directory": directory,
                     "concurrency": concurrency,
                     "resume": resume,
+                    "force": force,
                     "overwrite": overwrite,
                     "etag_cache_path": etag_cache_path,
                     "user_agent": user_agent,
@@ -1951,28 +2117,36 @@ class TestOfflineCommand:
                 elapsed_seconds=1.25,
                 output_path=str(output_path),
                 ntlm=ntlm,
+                directory=directory,
             )
 
         monkeypatch.setattr("pwned.cli_commands.download_offline_db", fake_download)
+        out_dir = isolated_env / "ranges"
+        out_dir.mkdir()
         out_file = isolated_env / "hashes.txt"
         etag_file = isolated_env / "etags.json"
         app = _make_cli()
 
-        res_default = cli_runner.invoke(app, ["--json", "offline", "download", str(out_file)])
+        res_default = cli_runner.invoke(app, ["--json", "offline", "download", str(out_dir)])
         assert res_default.exit_code == 0
-        assert json.loads(res_default.output)["prefixes_total"] == 16
+        default_data = json.loads(res_default.output)
+        assert default_data["prefixes_total"] == 16
+        assert default_data["directory"] is True
 
         res_opts = cli_runner.invoke(
             app,
             [
                 "--user-agent",
                 "custom-ua",
+                "--force",
                 "--json",
                 "offline",
                 "download",
                 str(out_file),
-                "--ntlm",
-                "--concurrency",
+                "--single",
+                "--mode",
+                "ntlm",
+                "--parallelism",
                 "8",
                 "--no-resume",
                 "--etag-cache",
@@ -1983,7 +2157,9 @@ class TestOfflineCommand:
             ],
         )
         assert res_opts.exit_code == 0
-        assert json.loads(res_opts.output)["ntlm"] is True
+        opts_data = json.loads(res_opts.output)
+        assert opts_data["ntlm"] is True
+        assert opts_data["directory"] is False
 
         res_short = cli_runner.invoke(
             app,
@@ -1992,30 +2168,41 @@ class TestOfflineCommand:
                 "offline",
                 "download",
                 str(out_file),
+                "-s",
+                "--mode",
+                "sha1",
+                "-n",
+                "-p",
+                "8",
                 "--max-retries",
-                "5",
+                "0",
                 "-o",
             ],
         )
         assert res_short.exit_code == 0
+        assert json.loads(res_short.output)["ntlm"] is True
 
         assert captured == [
             {
-                "output_path": out_file,
+                "output_path": out_dir,
                 "ntlm": False,
+                "directory": True,
                 "concurrency": 32,
                 "resume": True,
+                "force": False,
                 "overwrite": False,
                 "etag_cache_path": None,
                 "user_agent": "pwned-cli",
-                "max_retries": 3,
+                "max_retries": None,
                 "on_progress": None,
             },
             {
                 "output_path": out_file,
                 "ntlm": True,
+                "directory": False,
                 "concurrency": 8,
                 "resume": False,
+                "force": True,
                 "overwrite": True,
                 "etag_cache_path": etag_file,
                 "user_agent": "custom-ua",
@@ -2024,13 +2211,15 @@ class TestOfflineCommand:
             },
             {
                 "output_path": out_file,
-                "ntlm": False,
-                "concurrency": 32,
+                "ntlm": True,
+                "directory": False,
+                "concurrency": 8,
                 "resume": True,
+                "force": False,
                 "overwrite": True,
                 "etag_cache_path": None,
                 "user_agent": "pwned-cli",
-                "max_retries": 5,
+                "max_retries": 0,
                 "on_progress": None,
             },
         ]
@@ -2469,3 +2658,21 @@ class TestMcpCommand:
         assert s2._offline_db == db_file
         assert s2._ntlm is True
         assert isinstance(s2._cache, ResponseCache)
+
+    def test_mcp_offline_db_directory_and_short_ntlm(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        served: list[Any] = []
+        monkeypatch.setattr("pwned.cli_commands.serve_stdio", served.append)
+
+        db_dir = isolated_env / "ranges_dir"
+        db_dir.mkdir()
+        prefix, suffix = _sha1_parts("password")
+        (db_dir / f"{prefix}.txt").write_text(f"{suffix}:1\n", encoding="utf-8")
+
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["mcp", "--offline-db", str(db_dir), "-n"])
+        assert result.exit_code == 0
+        assert len(served) == 1
+        assert served[0]._offline_db == db_dir
+        assert served[0]._ntlm is True

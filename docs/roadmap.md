@@ -107,7 +107,7 @@ Prioritized from cross-ecosystem research (official `HaveIBeenPwned.Cli` / `have
 - [ ] **Vault breach & stealer-log correlation (`pwned audit --check-breaches`)** — cross-reference vault entry emails and login domains against HIBP breaches and stealer logs to flag accounts on compromised sites even when the password itself has not yet appeared in Pwned Passwords.
 
 ### Offline Scale & Self-Hosted Infrastructure
-- [ ] **Per-prefix offline dump directory interop (`00000.txt`–`FFFFF.txt`)** — support directory-per-prefix downloads with ETag index refreshes (`--force` / `--overwrite`) alongside single-file exports in `pwned offline download`, and `O(1)` directory lookups in `OfflinePasswordsClient` for direct interoperability with official `HaveIBeenPwned.Cli` (`hibp password download`).
+- [x] **Per-prefix offline dump directory interop (`00000.txt`–`FFFFF.txt`)** — support directory-per-prefix downloads with ETag index refreshes (`--force` / `--overwrite`) alongside single-file exports in `pwned offline download`, and `O(1)` directory lookups in `OfflinePasswordsClient` for direct interoperability with official `HaveIBeenPwned.Cli` (`hibp password download`).
 - [ ] **Self-hosted k-anonymity HTTP server / caching proxy (`pwned serve`)** — expose a drop-in `/range/{prefix}` endpoint, `/healthz`, and optional Prometheus `/metrics` backed by `--offline-db` or an upstream TTL cache for air-gapped services and high-QPS auth backends.
 - [ ] **Compact offline hash indexes (`pwned offline build-bloom` / `compact`)** — build sub-1 GB mmap-able Bloom filters for RAM-resident checks in containers/CI runners, plus a fixed-width binary prefix-indexed format (~50% smaller than ASCII dumps with `O(1)` prefix jump).
 

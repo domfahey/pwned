@@ -51,12 +51,14 @@ from pwned.notify import WEBHOOK_FORMATS, WebhookFormat, send_webhook_notificati
 from pwned.offline import OfflinePasswordsClient
 from pwned.passwords import AsyncPwnedPasswordsClient, PwnedPasswordsClient
 
+_HASH_MODES = ("sha1", "ntlm")
+
 
 class _GlobalOptionGroup(click.Group):
     """Allow global options to appear after subcommands and resolve short aliases."""
 
     _VALUE_OPTIONS = ("--api-key", "--user-agent", "--format", "--outfile")
-    _FLAG_OPTIONS = ("--json", "--cache", "--no-cache", "--force")
+    _FLAG_OPTIONS = ("--json", "--markdown", "--cache", "--no-cache", "--force")
     _ALIASES: dict[str, str] = {
         "pw": "password",
         "pr": "password-range",
@@ -123,6 +125,12 @@ class _GlobalOptionGroup(click.Group):
     help="Output raw JSON (shorthand for --format json).",
 )
 @click.option(
+    "--markdown",
+    "use_markdown",
+    is_flag=True,
+    help="Output Markdown (shorthand for --format markdown).",
+)
+@click.option(
     "--cache/--no-cache",
     "use_cache",
     default=False,
@@ -137,7 +145,7 @@ class _GlobalOptionGroup(click.Group):
 @click.option(
     "--force",
     is_flag=True,
-    help="Overwrite an existing --outfile.",
+    help="Overwrite an existing --outfile (or ignore cached ETags on offline download).",
 )
 @click.pass_context
 def cli(
@@ -146,14 +154,21 @@ def cli(
     user_agent: str | None,
     output_format: OutputFormat | None,
     use_json: bool,
+    use_markdown: bool,
     use_cache: bool,
     outfile: Path | None,
     force: bool,
 ) -> None:
     """CLI for the Have I Been Pwned API v3."""
+    if use_json and use_markdown:
+        raise click.UsageError("Cannot combine --json and --markdown.")
     if output_format is not None and use_json and output_format != "json":
         raise click.UsageError("Cannot combine --json with a non-json --format.")
-    fmt: OutputFormat = "json" if use_json else (output_format or "text")
+    if output_format is not None and use_markdown and output_format != "markdown":
+        raise click.UsageError("Cannot combine --markdown with a non-markdown --format.")
+    fmt: OutputFormat = (
+        "json" if use_json else ("markdown" if use_markdown else (output_format or "text"))
+    )
     settings = load_settings(api_key=api_key, user_agent=user_agent)
     ctx.ensure_object(dict)
     ctx.obj["settings"] = settings
@@ -969,7 +984,19 @@ def _check_batch_passwords(
     default=None,
     help="Check passwords (one per line) from a file.",
 )
-@click.option("--ntlm", is_flag=True, help="Use NTLM hash instead of SHA-1.")
+@click.option(
+    "--mode",
+    type=click.Choice(_HASH_MODES),
+    default="sha1",
+    show_default=True,
+    help="Hash algorithm: sha1 or ntlm.",
+)
+@click.option(
+    "--ntlm",
+    "-n",
+    is_flag=True,
+    help="Use NTLM hash instead of SHA-1 (overrides --mode).",
+)
 @click.option(
     "--pad/--no-pad",
     default=True,
@@ -983,12 +1010,18 @@ def _check_batch_passwords(
 )
 @click.option(
     "--offline-db",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    type=click.Path(exists=True, dir_okay=True, path_type=Path),
     default=None,
-    help="Query a local sorted HIBP password hash dump instead of the network API.",
+    help=(
+        "Query a local sorted HIBP dump file or per-prefix range directory "
+        "instead of the network API."
+    ),
 )
 @click.option(
     "--concurrency",
+    "--parallelism",
+    "-p",
+    "concurrency",
     type=click.IntRange(min=1),
     default=10,
     help="Maximum concurrent requests in online batch mode.",
@@ -1018,6 +1051,7 @@ def password(
     password: str | None,
     from_stdin: bool,
     input_file: Path | None,
+    mode: str,
     ntlm: bool,
     pad: bool,
     hashed: bool,
@@ -1033,6 +1067,7 @@ def password(
     Using --stdin, --file, or the interactive prompt avoids exposing the password in the
     process table.
     """
+    effective_ntlm = ntlm or mode == "ntlm"
     sources: list[str] = []
     if password is not None:
         sources.append("PASSWORD argument")
@@ -1045,14 +1080,18 @@ def password(
 
     if input_file is not None:
         passwords = load_input_file(
-            input_file, strip=False, ignore_comments=False, deduplicate=False
+            input_file,
+            strip=False,
+            ignore_comments=False,
+            deduplicate=False,
+            skip_empty=False,
         )
         if not passwords:
             raise click.UsageError("No passwords provided.")
         _check_batch_passwords(
             ctx,
             passwords,
-            ntlm=ntlm,
+            ntlm=effective_ntlm,
             pad=pad,
             threshold=threshold,
             fail_if_pwned=fail_if_pwned,
@@ -1072,7 +1111,7 @@ def password(
             _check_batch_passwords(
                 ctx,
                 lines,
-                ntlm=ntlm,
+                ntlm=effective_ntlm,
                 pad=pad,
                 threshold=threshold,
                 fail_if_pwned=fail_if_pwned,
@@ -1096,7 +1135,7 @@ def password(
     _check_single_password(
         ctx,
         single_password,
-        ntlm=ntlm,
+        ntlm=effective_ntlm,
         pad=pad,
         threshold=threshold,
         fail_if_pwned=fail_if_pwned,

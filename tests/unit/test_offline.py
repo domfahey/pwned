@@ -33,6 +33,25 @@ def _write_dump(
     return path
 
 
+def _write_range_dir(
+    directory: Path,
+    entries: list[tuple[str, int]],
+    *,
+    newline: str = "\n",
+) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    grouped: dict[str, list[tuple[str, int]]] = {}
+    for digest, count in entries:
+        prefix = digest[:5].upper()
+        suffix = digest[5:].upper()
+        grouped.setdefault(prefix, []).append((suffix, count))
+    for prefix, items in grouped.items():
+        items.sort(key=lambda item: item[0])
+        body = newline.join(f"{suffix}:{count}" for suffix, count in items) + newline
+        (directory / f"{prefix}.txt").write_text(body, encoding="utf-8")
+    return directory
+
+
 class TestLifecycleAndErrors:
     def test_context_manager_and_close(self, tmp_path: Path) -> None:
         h = _sha1_hex("password")
@@ -40,6 +59,7 @@ class TestLifecycleAndErrors:
 
         with OfflinePasswordsClient(dump) as client:
             assert client.ntlm is False
+            assert client.is_directory is False
             assert client.path == dump
             assert client.check_password("password") == 42
 
@@ -51,6 +71,7 @@ class TestLifecycleAndErrors:
         dump = _write_dump(tmp_path / "sha1.txt", [(h, 7)])
 
         client = OfflinePasswordsClient(str(dump))
+        assert client.is_directory is False
         assert client.check_hash(h) == 7
         client.close()
         client.close()  # idempotent
@@ -62,9 +83,163 @@ class TestLifecycleAndErrors:
         with pytest.raises(FileNotFoundError):
             OfflinePasswordsClient(tmp_path / "missing.txt")
 
-    def test_directory_path_raises_os_error(self, tmp_path: Path) -> None:
-        with pytest.raises(IsADirectoryError):
-            OfflinePasswordsClient(tmp_path)
+
+class TestDirectoryMode:
+    def test_context_manager_and_close_on_directory(self, tmp_path: Path) -> None:
+        h = _sha1_hex("password")
+        dump_dir = _write_range_dir(tmp_path / "ranges", [(h, 42)])
+
+        with OfflinePasswordsClient(dump_dir) as client:
+            assert client.is_directory is True
+            assert client.ntlm is False
+            assert client.path == dump_dir
+            assert client.check_password("password") == 42
+
+        client_str = OfflinePasswordsClient(str(dump_dir))
+        assert client_str.is_directory is True
+        assert client_str.check_hash(h) == 42
+        client_str.close()
+        client_str.close()  # idempotent no-op
+
+    def test_sha1_directory_lookups(self, tmp_path: Path) -> None:
+        pw_hit = "password"
+        pw_miss_same_prefix = "miss-same-prefix"
+        pw_miss_other_prefix = "correct-horse-battery-staple"
+        h_hit = _sha1_hex(pw_hit)
+        h_same_prefix_miss = f"{h_hit[:5]}{'0' * 35}"
+        if h_same_prefix_miss == h_hit:
+            h_same_prefix_miss = f"{h_hit[:5]}{'1' * 35}"
+        h_other_prefix_miss = _sha1_hex(pw_miss_other_prefix)
+
+        dump_dir = _write_range_dir(
+            tmp_path / "sha1_dir",
+            [
+                (h_hit, 3861493),
+                (f"{h_hit[:5]}{'F' * 35}", 12),
+                (_sha1_hex("second-hit"), 77),
+            ],
+            newline="\r\n",
+        )
+
+        with OfflinePasswordsClient(dump_dir) as client:
+            checker: PasswordChecker = client
+            assert client.is_directory is True
+            assert checker.check_password(pw_hit) == 3861493
+            assert checker.check_hash(h_hit) == 3861493
+            assert client.check_password("second-hit") == 77
+            assert client.check_password(pw_miss_same_prefix) == 0
+            assert client.check_password(pw_miss_other_prefix) == 0
+            assert client.check_hash(h_hit.lower()) == 3861493
+            assert client.check_hash(f"  {h_hit.lower()}  ") == 3861493
+            assert client.check_hash(h_same_prefix_miss) == 0
+            assert client.check_hash(h_other_prefix_miss) == 0
+
+            assert client.is_pwned(pw_hit) is True
+            assert client.is_pwned(pw_hit, threshold=3861493) is True
+            assert client.is_pwned(pw_hit, threshold=3861494) is False
+            assert client.is_pwned(pw_miss_other_prefix) is False
+
+            assert client.is_hash_pwned(h_hit) is True
+            assert client.is_hash_pwned(h_hit, threshold=3861493) is True
+            assert client.is_hash_pwned(h_hit, threshold=3861494) is False
+            assert client.is_hash_pwned(h_same_prefix_miss) is False
+            assert client.is_hash_pwned(h_other_prefix_miss) is False
+
+            with pytest.raises(ValueError, match="ntlm"):
+                client.check_password(pw_hit, ntlm=True)
+
+    def test_ntlm_directory_lookups(self, tmp_path: Path) -> None:
+        pw_hit = "Password123!"
+        pw_miss = "not-in-ntlm-dir"
+        h_hit = _ntlm_hex(pw_hit)
+        h_same_prefix_miss = f"{h_hit[:5]}{'A' * 27}"
+        if h_same_prefix_miss == h_hit:
+            h_same_prefix_miss = f"{h_hit[:5]}{'B' * 27}"
+        h_miss = _ntlm_hex(pw_miss)
+
+        dump_dir = _write_range_dir(
+            tmp_path / "ntlm_dir",
+            [
+                (h_hit, 150),
+                (_ntlm_hex("other-ntlm"), 9),
+            ],
+        )
+
+        with OfflinePasswordsClient(dump_dir, ntlm=True) as client:
+            assert client.is_directory is True
+            assert client.ntlm is True
+            assert client.check_password(pw_hit) == 150
+            assert client.check_password("other-ntlm") == 9
+            assert client.check_password(pw_miss) == 0
+            assert client.check_hash(h_hit.lower()) == 150
+            assert client.check_hash(h_same_prefix_miss) == 0
+            assert client.check_hash(h_miss) == 0
+
+            assert client.is_pwned(pw_hit) is True
+            assert client.is_pwned(pw_hit, threshold=150) is True
+            assert client.is_pwned(pw_hit, threshold=151) is False
+            assert client.is_pwned(pw_miss) is False
+
+            assert client.is_hash_pwned(h_hit) is True
+            assert client.is_hash_pwned(h_hit, threshold=150) is True
+            assert client.is_hash_pwned(h_hit, threshold=151) is False
+            assert client.is_hash_pwned(h_same_prefix_miss) is False
+            assert client.is_hash_pwned(h_miss) is False
+
+            with pytest.raises(ValueError, match="ntlm"):
+                client.check_password(pw_hit, ntlm=False)
+
+    def test_empty_directory_and_missing_prefix_file_returns_zero(self, tmp_path: Path) -> None:
+        empty_dir = tmp_path / "empty_ranges"
+        empty_dir.mkdir()
+
+        with OfflinePasswordsClient(empty_dir) as client:
+            assert client.is_directory is True
+            assert client.check_password("password") == 0
+            assert client.check_hash(_sha1_hex("password")) == 0
+            assert client.is_pwned("password") is False
+            assert client.is_hash_pwned(_sha1_hex("password")) is False
+
+    def test_prefix_path_that_is_subdirectory_returns_zero(self, tmp_path: Path) -> None:
+        h = _sha1_hex("password")
+        dump_dir = tmp_path / "subdir_prefix"
+        (dump_dir / f"{h[:5]}.txt").mkdir(parents=True)
+
+        with OfflinePasswordsClient(dump_dir) as client:
+            assert client.check_hash(h) == 0
+
+    def test_padded_zero_count_entries_ignored(self, tmp_path: Path) -> None:
+        h_padded = _sha1_hex("padded-only")
+        h_real = f"{h_padded[:5]}{'B' * 35}"
+        dump_dir = _write_range_dir(
+            tmp_path / "padded_dir",
+            [
+                (h_padded, 0),
+                (h_real, 5),
+            ],
+        )
+
+        with OfflinePasswordsClient(dump_dir) as client:
+            assert client.check_password("padded-only") == 0
+            assert client.check_hash(h_padded) == 0
+            assert client.is_pwned("padded-only") is False
+            assert client.is_hash_pwned(h_padded) is False
+            assert client.check_hash(h_real) == 5
+
+    def test_case_insensitive_suffixes_and_malformed_lines(self, tmp_path: Path) -> None:
+        h = _sha1_hex("mixed-case-entry")
+        dump_dir = tmp_path / "mixed_case_dir"
+        dump_dir.mkdir()
+        prefix_file = dump_dir / f"{h[:5]}.txt"
+        prefix_file.write_text(
+            f"not-a-valid-line\n:12\n{h[5:].lower()}:99\n{'A' * 35}:notanint\n",
+            encoding="utf-8",
+        )
+
+        with OfflinePasswordsClient(dump_dir) as client:
+            assert client.check_password("mixed-case-entry") == 99
+            assert client.check_hash(h) == 99
+            assert client.check_hash(f"{h[:5]}{'A' * 35}") == 0
 
 
 class TestEmptyAndSingleLineFiles:

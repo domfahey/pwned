@@ -12,10 +12,15 @@ from click.testing import CliRunner
 from pytest_httpx import HTTPXMock
 
 import pwned
-from pwned.batch import AccountBatchItem, batch_check_accounts
+from pwned.batch import (
+    AccountBatchItem,
+    PasswordBatchItem,
+    async_batch_check_passwords,
+    batch_check_accounts,
+)
 from pwned.cli import cli, handle_errors
 from pwned.client import HIBPClient
-from pwned.passwords import _ntlm_hash
+from pwned.passwords import AsyncPwnedPasswordsClient, _ntlm_hash
 
 BASE = "https://haveibeenpwned.com/api/v3"
 TEST_KEY = "00000000000000000000000000000000"
@@ -1314,7 +1319,7 @@ class TestPasswordExtended:
         self, httpx_mock: HTTPXMock, cli_runner: CliRunner, tmp_path: Path
     ) -> None:
         empty_file = tmp_path / "empty.txt"
-        empty_file.write_text("\n\n", encoding="utf-8")
+        empty_file.write_text("", encoding="utf-8")
         res_empty = cli_runner.invoke(cli, ["password", "--file", str(empty_file)])
         assert res_empty.exit_code == 2
         assert "No passwords provided." in res_empty.output
@@ -2118,6 +2123,180 @@ class TestPasswordHashedOfflineConcurrencyStats:
         assert res.exit_code == 0
         assert "Checked 2: 1 pwned, 1 clean, 0 error(s)" in res.output
 
+    def test_password_mode_ntlm_and_short_flag_override(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        digest = _ntlm_hash("password")
+        ntlm_url = httpx.URL(
+            f"https://api.pwnedpasswords.com/range/{digest[:5]}",
+            params={"mode": "ntlm"},
+        )
+
+        httpx_mock.add_response(url=ntlm_url, text=f"{digest[5:]}:11\n")
+        res_mode = cli_runner.invoke(cli, ["--json", "password", "--mode", "ntlm", "password"])
+        assert res_mode.exit_code == 0
+        assert json.loads(res_mode.output) == {"count": 11}
+
+        httpx_mock.add_response(url=ntlm_url, text=f"{digest[5:]}:22\n")
+        res_short = cli_runner.invoke(cli, ["--json", "password", "-n", "password"])
+        assert res_short.exit_code == 0
+        assert json.loads(res_short.output) == {"count": 22}
+
+        httpx_mock.add_response(url=ntlm_url, text=f"{digest[5:]}:33\n")
+        res_override = cli_runner.invoke(
+            cli, ["--json", "password", "--mode", "sha1", "-n", "password"]
+        )
+        assert res_override.exit_code == 0
+        assert json.loads(res_override.output) == {"count": 33}
+
+        pw_file = tmp_path / "ntlm_batch.txt"
+        pw_file.write_text("password\n", encoding="utf-8")
+        httpx_mock.add_response(url=ntlm_url, text=f"{digest[5:]}:44\n")
+        res_batch = cli_runner.invoke(
+            cli, ["--json", "password", "--mode", "ntlm", "--file", str(pw_file)]
+        )
+        assert res_batch.exit_code == 0
+        assert json.loads(res_batch.output) == [{"index": 1, "pwn_count": 44, "status": "pwned"}]
+
+    def test_password_batch_parallelism_aliases(
+        self,
+        httpx_mock: HTTPXMock,
+        cli_runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        pw_file = tmp_path / "batch.txt"
+        pw_file.write_text("alpha\nbeta\n", encoding="utf-8")
+        p1_prefix, p1_suffix = _sha1_parts("alpha")
+        p2_prefix, _ = _sha1_parts("beta")
+        seen_concurrency: list[int] = []
+
+        async def spy_async_batch(
+            passwords: list[str],
+            client: AsyncPwnedPasswordsClient,
+            *,
+            threshold: int = 1,
+            ntlm: bool = False,
+            pad: bool = True,
+            hashed: bool = False,
+            concurrency: int = 10,
+            on_progress: Callable[[int, int, PasswordBatchItem], None] | None = None,
+        ) -> list[PasswordBatchItem]:
+            seen_concurrency.append(concurrency)
+            return await async_batch_check_passwords(
+                passwords,
+                client,
+                threshold=threshold,
+                ntlm=ntlm,
+                pad=pad,
+                hashed=hashed,
+                concurrency=concurrency,
+                on_progress=on_progress,
+            )
+
+        monkeypatch.setattr("pwned.cli.async_batch_check_passwords", spy_async_batch)
+
+        for flag_args in (["-p", "4"], ["--parallelism", "4"]):
+            httpx_mock.add_response(
+                url=f"https://api.pwnedpasswords.com/range/{p1_prefix}",
+                text=f"{p1_suffix}:8\n",
+            )
+            httpx_mock.add_response(
+                url=f"https://api.pwnedpasswords.com/range/{p2_prefix}",
+                text="",
+            )
+            res = cli_runner.invoke(
+                cli,
+                ["--json", "password", "--file", str(pw_file), *flag_args],
+            )
+            assert res.exit_code == 0
+            assert json.loads(res.output) == [
+                {"index": 1, "pwn_count": 8, "status": "pwned"},
+                {"index": 2, "pwn_count": 0, "status": "clean"},
+            ]
+
+        assert seen_concurrency == [4, 4]
+
+    def test_password_offline_db_directory(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+        range_dir = tmp_path / "ranges"
+        range_dir.mkdir()
+        prefix, suffix = _sha1_parts("password")
+        assert prefix == "5BAA6"
+        (range_dir / f"{prefix}.txt").write_text(f"{suffix}:3861493\n", encoding="utf-8")
+
+        res_found = cli_runner.invoke(
+            cli, ["--json", "password", "--offline-db", str(range_dir), "password"]
+        )
+        assert res_found.exit_code == 0
+        assert json.loads(res_found.output) == {"count": 3861493}
+
+        res_clean = cli_runner.invoke(
+            cli, ["--json", "password", "--offline-db", str(range_dir), "cleanpw"]
+        )
+        assert res_clean.exit_code == 0
+        assert json.loads(res_clean.output) == {"count": 0}
+
+        pw_file = tmp_path / "passwords.txt"
+        pw_file.write_text("password\ncleanpw\n", encoding="utf-8")
+        res_batch = cli_runner.invoke(
+            cli,
+            ["--json", "password", "--offline-db", str(range_dir), "--file", str(pw_file)],
+        )
+        assert res_batch.exit_code == 0
+        assert json.loads(res_batch.output) == [
+            {"index": 1, "pwn_count": 3861493, "status": "pwned"},
+            {"index": 2, "pwn_count": 0, "status": "clean"},
+        ]
+
+    def test_password_file_preserves_blank_lines_and_exact_indices(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        pw_file = tmp_path / "with_blank.txt"
+        pw_file.write_text("password\n\ncleanpw\n", encoding="utf-8")
+
+        p1_prefix, p1_suffix = _sha1_parts("password")
+        empty_prefix, _ = _sha1_parts("")
+        p3_prefix, _ = _sha1_parts("cleanpw")
+
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p1_prefix}",
+            text=f"{p1_suffix}:10\n",
+        )
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{empty_prefix}",
+            text="",
+        )
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p3_prefix}",
+            text="",
+        )
+        res_file = cli_runner.invoke(cli, ["--json", "password", "--file", str(pw_file)])
+        assert res_file.exit_code == 0
+        assert json.loads(res_file.output) == [
+            {"index": 1, "pwn_count": 10, "status": "pwned"},
+            {"index": 2, "pwn_count": 0, "status": "clean"},
+            {"index": 3, "pwn_count": 0, "status": "clean"},
+        ]
+
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p1_prefix}",
+            text=f"{p1_suffix}:10\n",
+        )
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p3_prefix}",
+            text="",
+        )
+        res_stdin = cli_runner.invoke(
+            cli,
+            ["--json", "password", "--stdin"],
+            input="password\n\ncleanpw\n",
+        )
+        assert res_stdin.exit_code == 0
+        assert json.loads(res_stdin.output) == [
+            {"index": 1, "pwn_count": 10, "status": "pwned"},
+            {"index": 2, "pwn_count": 0, "status": "clean"},
+        ]
+
 
 class TestSarifFormatEndToEnd:
     def test_sarif_breaches_account_and_domain(
@@ -2204,6 +2383,61 @@ class TestMarkdownHtmlAndHelp:
         assert "<!DOCTYPE html>" in res_html.output
         assert "<table>" in res_html.output
         assert "Adobe" in res_html.output
+
+    def test_markdown_shorthand_before_and_after_subcommand(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        expected_table = "| Field | Value |\n| --- | --- |\n| Name | Adobe |\n| Title | Adobe |\n"
+
+        httpx_mock.add_response(
+            url=f"{BASE}/breach/Adobe",
+            json={"Name": "Adobe", "Title": "Adobe"},
+        )
+        res_before = cli_runner.invoke(cli, ["--markdown", "breach", "Adobe"])
+        assert res_before.exit_code == 0
+        assert res_before.output == expected_table
+
+        httpx_mock.add_response(
+            url=f"{BASE}/breach/Adobe",
+            json={"Name": "Adobe", "Title": "Adobe"},
+        )
+        res_after = cli_runner.invoke(cli, ["breach", "Adobe", "--markdown"])
+        assert res_after.exit_code == 0
+        assert res_after.output == expected_table
+
+    def test_markdown_format_compatibility_and_conflicts(
+        self, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breach/Adobe",
+            json={"Name": "Adobe", "Title": "Adobe"},
+        )
+        res_compat = cli_runner.invoke(
+            cli, ["--markdown", "--format", "markdown", "breach", "Adobe"]
+        )
+        assert res_compat.exit_code == 0
+        assert "| Name | Adobe |" in res_compat.output
+
+        res_conflict_fmt = cli_runner.invoke(
+            cli, ["--markdown", "--format", "json", "breach", "Adobe"]
+        )
+        assert res_conflict_fmt.exit_code == 2
+        assert "Cannot combine --markdown with a non-markdown --format." in res_conflict_fmt.output
+
+        res_conflict_json = cli_runner.invoke(cli, ["--json", "--markdown", "breach", "Adobe"])
+        assert res_conflict_json.exit_code == 2
+        assert "Cannot combine --json and --markdown." in res_conflict_json.output
+
+        res_conflict_after = cli_runner.invoke(cli, ["breach", "Adobe", "--json", "--markdown"])
+        assert res_conflict_after.exit_code == 2
+        assert "Cannot combine --json and --markdown." in res_conflict_after.output
+
+    def test_force_help_mentions_offline_download(self, cli_runner: CliRunner) -> None:
+        result = cli_runner.invoke(cli, ["--help"])
+        assert result.exit_code == 0
+        normalized = " ".join(result.output.split())
+        expected = "Overwrite an existing --outfile (or ignore cached ETags on offline download)."
+        assert expected in normalized
 
 
 class TestPasswordCache:

@@ -38,6 +38,7 @@ def parse_input_lines(
     strip: bool = True,
     ignore_comments: bool = True,
     deduplicate: bool = True,
+    skip_empty: bool = True,
 ) -> list[str]:
     """Normalize, filter, and optionally deduplicate input lines while preserving order."""
     seen: set[str] = set()
@@ -46,7 +47,7 @@ def parse_input_lines(
         value = raw.rstrip("\r\n")
         if strip:
             value = value.strip()
-        if not value:
+        if skip_empty and not value:
             continue
         if ignore_comments and value.lstrip().startswith("#"):
             continue

@@ -68,6 +68,7 @@ _AUDIT_SOURCES = (
 )
 _AUTH_BACKENDS = ("auto", "file", "keyring")
 _COMPLETION_SHELLS = ("bash", "zsh", "fish")
+_HASH_MODES = ("sha1", "ntlm")
 
 
 def _authed_client(ctx: click.Context) -> HIBPClient:
@@ -345,7 +346,19 @@ def account_range(ctx: click.Context, target: str, fail_if_pwned: bool) -> None:
 
 @click.command("password-range")
 @click.argument("prefix")
-@click.option("--ntlm", is_flag=True, help="Use NTLM hash mode instead of SHA-1.")
+@click.option(
+    "--mode",
+    type=click.Choice(_HASH_MODES),
+    default="sha1",
+    show_default=True,
+    help="Hash algorithm: sha1 or ntlm.",
+)
+@click.option(
+    "--ntlm",
+    "-n",
+    is_flag=True,
+    help="Use NTLM hash mode instead of SHA-1 (overrides --mode).",
+)
 @click.option(
     "--pad/--no-pad",
     default=True,
@@ -364,15 +377,17 @@ def account_range(ctx: click.Context, target: str, fail_if_pwned: bool) -> None:
 def password_range(
     ctx: click.Context,
     prefix: str,
+    mode: str,
     ntlm: bool,
     pad: bool,
     fail_if_pwned: bool,
 ) -> None:
     """Fetch compromised password hash suffixes for a 5-character hex prefix."""
     settings = ctx.obj["settings"]
+    effective_ntlm = ntlm or mode == "ntlm"
     with PwnedPasswordsClient(user_agent=settings.user_agent, cache=get_cache(ctx)) as client:
         try:
-            results = client.get_password_range(prefix, ntlm=ntlm, pad=pad)
+            results = client.get_password_range(prefix, ntlm=effective_ntlm, pad=pad)
         except ValueError as exc:
             raise click.UsageError(str(exc)) from exc
     render_output(ctx, results)
@@ -450,7 +465,19 @@ def domain_verify_meta_check(ctx: click.Context, domain: str) -> None:
     show_default=True,
     help="Password manager export format.",
 )
-@click.option("--ntlm", is_flag=True, help="Use NTLM hashes instead of SHA-1.")
+@click.option(
+    "--mode",
+    type=click.Choice(_HASH_MODES),
+    default="sha1",
+    show_default=True,
+    help="Hash algorithm: sha1 or ntlm.",
+)
+@click.option(
+    "--ntlm",
+    "-n",
+    is_flag=True,
+    help="Use NTLM hashes instead of SHA-1 (overrides --mode).",
+)
 @click.option(
     "--pad/--no-pad",
     default=True,
@@ -476,6 +503,9 @@ def domain_verify_meta_check(ctx: click.Context, domain: str) -> None:
 )
 @click.option(
     "--concurrency",
+    "--parallelism",
+    "-p",
+    "concurrency",
     type=click.IntRange(min=1),
     default=10,
     show_default=True,
@@ -483,9 +513,9 @@ def domain_verify_meta_check(ctx: click.Context, domain: str) -> None:
 )
 @click.option(
     "--offline-db",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    type=click.Path(exists=True, dir_okay=True, path_type=Path),
     default=None,
-    help="Path to a local HIBP password dump file for offline checking.",
+    help="Path to a local HIBP password dump file or per-prefix directory for offline checking.",
 )
 @click.option(
     "--notify-webhook",
@@ -511,6 +541,7 @@ def audit(
     ctx: click.Context,
     path: Path | None,
     source: str,
+    mode: str,
     ntlm: bool,
     pad: bool,
     threshold: int,
@@ -544,7 +575,7 @@ def audit(
         raise FileOrStoreError(str(exc)) from exc
 
     settings = ctx.obj["settings"]
-    effective_ntlm = ntlm or source == "pwdump"
+    effective_ntlm = ntlm or mode == "ntlm" or source == "pwdump"
     if offline_db is not None:
         with OfflinePasswordsClient(offline_db, ntlm=effective_ntlm) as offline_client:
             summary = audit_entries(
@@ -601,10 +632,32 @@ def offline() -> None:
 
 
 @offline.command("download")
-@click.argument("output", type=click.Path(dir_okay=False, path_type=Path))
-@click.option("--ntlm", is_flag=True, help="Download NTLM hashes instead of SHA-1.")
+@click.argument("output", type=click.Path(dir_okay=True, path_type=Path))
+@click.option(
+    "--single",
+    "-s",
+    is_flag=True,
+    default=False,
+    help="Write ordered HASH:COUNT lines to one merged file instead of a per-prefix directory.",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(_HASH_MODES),
+    default="sha1",
+    show_default=True,
+    help="Hash algorithm: sha1 or ntlm.",
+)
+@click.option(
+    "--ntlm",
+    "-n",
+    is_flag=True,
+    help="Download NTLM hashes instead of SHA-1 (overrides --mode).",
+)
 @click.option(
     "--concurrency",
+    "--parallelism",
+    "-p",
+    "concurrency",
     type=click.IntRange(min=1),
     default=32,
     show_default=True,
@@ -625,37 +678,44 @@ def offline() -> None:
 @click.option(
     "--max-retries",
     type=click.IntRange(min=0),
-    default=3,
-    show_default=True,
-    help="Maximum retries per range prefix on transient errors.",
+    default=None,
+    help="Maximum retries per range prefix (omit for unlimited, 0 to disable).",
 )
 @click.option(
     "--overwrite",
     "-o",
     is_flag=True,
     default=False,
-    help="Permit replacing an existing output file.",
+    help="Permit replacing an existing single file or non-empty directory without an index.",
 )
 @click.pass_context
 @handle_errors
 def offline_download(
     ctx: click.Context,
     output: Path,
+    single: bool,
+    mode: str,
     ntlm: bool,
     concurrency: int,
     resume: bool,
     etag_cache: Path | None,
-    max_retries: int,
+    max_retries: int | None,
     overwrite: bool,
 ) -> None:
-    """Download an offline Pwned Passwords hash dump."""
+    """Download an offline Pwned Passwords hash dump (per-prefix directory by default,
+    or --single file; pass global --force to ignore saved ETags).
+    """
     settings = ctx.obj["settings"]
+    effective_ntlm = ntlm or mode == "ntlm"
+    force = bool(ctx.obj.get("force", False))
     stats = asyncio.run(
         download_offline_db(
             output,
-            ntlm=ntlm,
+            ntlm=effective_ntlm,
+            directory=not single,
             concurrency=concurrency,
             resume=resume,
+            force=force,
             overwrite=overwrite,
             etag_cache_path=etag_cache,
             user_agent=settings.user_agent,
@@ -807,12 +867,13 @@ def monitor(
 @click.command("mcp")
 @click.option(
     "--offline-db",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    type=click.Path(exists=True, dir_okay=True, path_type=Path),
     default=None,
-    help="Local HIBP password hash dump for offline MCP lookups.",
+    help="Local HIBP password dump file or per-prefix directory for offline MCP lookups.",
 )
 @click.option(
     "--ntlm",
+    "-n",
     is_flag=True,
     help="Default to NTLM hash mode for MCP lookups.",
 )

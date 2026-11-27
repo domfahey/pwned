@@ -92,6 +92,20 @@ class TestParseInputLines:
         result = parse_input_lines(lines, strip=False, ignore_comments=False, deduplicate=False)
         assert result == ["pw1", "pw2", "pw1"]
 
+    def test_skip_empty_false_preserves_blank_lines(self) -> None:
+        lines = ["pw1\n", "\n", "  \n", "pw2\r\n"]
+        result = parse_input_lines(
+            lines,
+            strip=False,
+            ignore_comments=False,
+            deduplicate=False,
+            skip_empty=False,
+        )
+        assert result == ["pw1", "", "  ", "pw2"]
+
+    def test_empty_input_with_skip_empty_false(self) -> None:
+        assert parse_input_lines([], skip_empty=False) == []
+
 
 class TestLoadInputFile:
     def test_loads_utf8_file_default_options(self, tmp_path: Path) -> None:
@@ -128,6 +142,103 @@ class TestLoadInputFile:
             "pw2",
             "pw1",
         ]
+
+    def test_loads_file_preserving_blank_lines_when_skip_empty_false(self, tmp_path: Path) -> None:
+        path = tmp_path / "blanks.txt"
+        path.write_text("pw1\n\n  \npw2\r\n", encoding="utf-8")
+
+        assert load_input_file(
+            path,
+            strip=False,
+            ignore_comments=False,
+            deduplicate=False,
+            skip_empty=False,
+        ) == ["pw1", "", "  ", "pw2"]
+
+    def test_skip_empty_false_preserves_line_indices_in_batch_passwords(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        h_pw1 = hashlib.sha1(b"pw1").hexdigest().upper()
+        h_empty = hashlib.sha1(b"").hexdigest().upper()
+        h_pw2 = hashlib.sha1(b"pw2").hexdigest().upper()
+
+        plain_path = tmp_path / "plain_blanks.txt"
+        plain_path.write_text("pw1\n\npw2\n", encoding="utf-8")
+        plain_lines = load_input_file(
+            plain_path,
+            strip=False,
+            ignore_comments=False,
+            deduplicate=False,
+            skip_empty=False,
+        )
+        assert plain_lines == ["pw1", "", "pw2"]
+
+        hash_path = tmp_path / "hash_blanks.txt"
+        hash_path.write_text(f"{h_pw1}\n\n{h_pw2}\n", encoding="utf-8")
+        hash_lines = load_input_file(
+            hash_path,
+            strip=False,
+            ignore_comments=False,
+            deduplicate=False,
+            skip_empty=False,
+        )
+        assert hash_lines == [h_pw1, "", h_pw2]
+
+        entries = sorted([(h_pw1, 10), (h_empty, 3)], key=lambda item: item[0])
+        dump = tmp_path / "sha1_dump.txt"
+        dump.write_text(
+            "\n".join(f"{digest}:{count}" for digest, count in entries) + "\n",
+            encoding="utf-8",
+        )
+        with OfflinePasswordsClient(dump) as offline_client:
+            sync_plain = batch_check_passwords(plain_lines, offline_client)
+            sync_hashed = batch_check_passwords(hash_lines, offline_client, hashed=True)
+
+        assert sync_plain == [
+            PasswordBatchItem(index=1, pwn_count=10, status="pwned"),
+            PasswordBatchItem(index=2, pwn_count=3, status="pwned"),
+            PasswordBatchItem(index=3, pwn_count=0, status="clean"),
+        ]
+        assert sync_hashed == [
+            PasswordBatchItem(index=1, pwn_count=10, status="pwned"),
+            PasswordBatchItem(
+                index=2,
+                pwn_count=0,
+                status="error",
+                error="SHA-1 hash must be exactly 40 hexadecimal characters",
+            ),
+            PasswordBatchItem(index=3, pwn_count=0, status="clean"),
+        ]
+
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{h_pw1[:5]}",
+            text=f"{h_pw1[5:]}:10\r\n",
+            is_reusable=True,
+        )
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{h_empty[:5]}",
+            text=f"{h_empty[5:]}:3\r\n",
+        )
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{h_pw2[:5]}",
+            text="00000000000000000000000000000000000:1\r\n",
+            is_reusable=True,
+        )
+
+        async def _run_async() -> tuple[list[PasswordBatchItem], list[PasswordBatchItem]]:
+            async with AsyncPwnedPasswordsClient(user_agent="test") as async_client:
+                async_plain = await async_batch_check_passwords(
+                    plain_lines, async_client, pad=False
+                )
+                async_hashed = await async_batch_check_passwords(
+                    hash_lines, async_client, hashed=True, pad=False
+                )
+                return async_plain, async_hashed
+
+        async_plain, async_hashed = asyncio.run(_run_async())
+
+        assert async_plain == sync_plain
+        assert async_hashed == sync_hashed
 
 
 class TestBatchModels:

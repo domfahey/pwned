@@ -21,6 +21,7 @@ from pwned.models import NonNegativeInt, _HIBPBase
 from pwned.passwords import BASE_URL
 
 MAX_PREFIX_EXCLUSIVE = 0x100000
+DEFAULT_INDEX_FILENAME = ".pwned-index.json"
 
 
 class DownloadStats(_HIBPBase):
@@ -31,20 +32,22 @@ class DownloadStats(_HIBPBase):
     prefixes_cached: NonNegativeInt
     hashes_written: NonNegativeInt
     elapsed_seconds: float = Field(ge=0.0)
+    ranges_per_second: float = Field(default=0.0, ge=0.0)
     output_path: str
     ntlm: bool = False
+    directory: bool = False
 
 
 def _validate_options(
     *,
     concurrency: int,
-    max_retries: int,
+    max_retries: int | None,
     start_prefix: int,
     end_prefix: int,
 ) -> None:
     if concurrency < 1:
         raise ValueError("concurrency must be at least 1")
-    if max_retries < 0:
+    if max_retries is not None and max_retries < 0:
         raise ValueError("max_retries must be non-negative")
     if start_prefix < 0 or end_prefix > MAX_PREFIX_EXCLUSIVE or start_prefix >= end_prefix:
         raise ValueError(
@@ -109,15 +112,17 @@ async def download_offline_db(
     output_path: Path,
     *,
     ntlm: bool = False,
+    directory: bool = False,
     concurrency: int = 32,
     resume: bool = True,
+    force: bool = False,
     overwrite: bool = True,
     etag_cache_path: Path | None = None,
     start_prefix: int = 0x00000,
     end_prefix: int = MAX_PREFIX_EXCLUSIVE,
     user_agent: str = DEFAULT_USER_AGENT,
     timeout: float = REQUEST_TIMEOUT,
-    max_retries: int = MAX_RETRIES,
+    max_retries: int | None = MAX_RETRIES,
     proxy: str | None = None,
     client: httpx.AsyncClient | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -125,17 +130,16 @@ async def download_offline_db(
 ) -> DownloadStats:
     """Download an offline HIBP Pwned Passwords dump compatible with ``OfflinePasswordsClient``.
 
-    Downloads 5-character hash range shards into a resumable work directory
-    (``.<output_path.name>.part``) and merges them in ascending lexicographical order into
-    ``output_path`` using an atomic file replacement.
+    In single-file mode (``directory=False``), downloads 5-character hash range shards into a
+    resumable work directory (``.<output_path.name>.part``) and merges them in ascending
+    lexicographical order into ``output_path`` using an atomic file replacement.
 
-    When ``overwrite`` is ``False`` and ``output_path`` already exists, raises
-    :class:`FileExistsError` before creating any work directory or issuing HTTP requests.
+    In directory mode (``directory=True``), writes flat ``00000.txt``..``FFFFF.txt`` range files
+    directly under ``output_path`` and stores prefix ETags in ``DEFAULT_INDEX_FILENAME`` (or
+    ``etag_cache_path`` if specified) so subsequent runs perform conditional HTTP 304 refreshes.
 
-    When ``etag_cache_path`` is provided, the sharded work directory is preserved after completion
-    so future runs with ``resume=True`` can send ``If-None-Match`` headers and retain existing
-    shards on HTTP 304 responses. When ``etag_cache_path`` is ``None``, the work directory is
-    removed after the merged output file is written.
+    Setting ``force=True`` ignores cached shards and saved ETags, forcing a full re-download and
+    rebuilding any ETag index. Setting ``max_retries=None`` retries transient errors indefinitely.
     """
     _validate_options(
         concurrency=concurrency,
@@ -143,17 +147,43 @@ async def download_offline_db(
         start_prefix=start_prefix,
         end_prefix=end_prefix,
     )
-    if not overwrite and output_path.exists():
-        raise FileExistsError(
-            f"Output file already exists: {output_path} (use --overwrite to replace)"
+
+    index_path: Path | None
+    if directory:
+        if output_path.exists() and not output_path.is_dir():
+            raise FileExistsError(f"Output path is an existing file: {output_path}")
+        resolved_index = (
+            etag_cache_path if etag_cache_path is not None else output_path / DEFAULT_INDEX_FILENAME
         )
+        if (
+            output_path.is_dir()
+            and any(output_path.iterdir())
+            and not resolved_index.exists()
+            and not overwrite
+        ):
+            raise FileExistsError(
+                f"Output directory is not empty and has no saved index: {output_path} "
+                "(use --overwrite to replace)"
+            )
+        index_path = resolved_index
+    else:
+        if output_path.is_dir():
+            raise IsADirectoryError(f"Output path is a directory: {output_path}")
+        if not overwrite and output_path.exists():
+            raise FileExistsError(
+                f"Output file already exists: {output_path} (use --overwrite to replace)"
+            )
+        index_path = etag_cache_path
 
     started = time.monotonic()
     work_dir = output_path.parent / f".{output_path.name}.part"
-    if not resume and work_dir.exists():
+    if not directory and (not resume or force) and work_dir.exists():
         shutil.rmtree(work_dir)
 
-    etags: dict[str, str] = _load_etags(etag_cache_path) if etag_cache_path is not None else {}
+    if force or not resume:
+        etags: dict[str, str] = {}
+    else:
+        etags = _load_etags(index_path) if index_path is not None else {}
     params: dict[str, str] = {"mode": "ntlm"} if ntlm else {}
     total_prefixes = end_prefix - start_prefix
 
@@ -176,13 +206,15 @@ async def download_offline_db(
     async def _process_prefix(prefix_int: int) -> None:
         nonlocal prefixes_downloaded, prefixes_cached, completed
         prefix = f"{prefix_int:05X}"
-        shard_path = work_dir / prefix[:2] / f"{prefix}.txt"
+        shard_path = (
+            output_path / f"{prefix}.txt" if directory else work_dir / prefix[:2] / f"{prefix}.txt"
+        )
 
-        if resume and shard_path.exists() and etag_cache_path is None:
+        if resume and not force and shard_path.exists() and index_path is None:
             prefixes_cached += 1
         else:
             headers: dict[str, str] = {}
-            if resume and shard_path.exists():
+            if resume and not force and shard_path.exists():
                 cached_etag = etags.get(prefix)
                 if cached_etag is not None:
                     headers["If-None-Match"] = cached_etag
@@ -196,7 +228,7 @@ async def download_offline_db(
                         params=params,
                     )
                 except httpx.RequestError as exc:
-                    if attempt < max_retries:
+                    if max_retries is None or attempt < max_retries:
                         await sleep(min(0.5 * (2**attempt), 10.0))
                         attempt += 1
                         continue
@@ -206,7 +238,7 @@ async def download_offline_db(
                     prefixes_cached += 1
                     break
                 if resp.status_code == 429 or resp.status_code >= 500:
-                    if attempt < max_retries:
+                    if max_retries is None or attempt < max_retries:
                         await sleep(min(0.5 * (2**attempt), 10.0))
                         attempt += 1
                         continue
@@ -246,21 +278,36 @@ async def download_offline_db(
         if owns_client:
             await active_client.aclose()
 
-    hashes_written = _merge_shards(output_path, work_dir, start_prefix, end_prefix)
+    if directory:
+        hashes_written = sum(
+            len(
+                _parse_range_response(
+                    (output_path / f"{prefix_int:05X}.txt").read_text(encoding="utf-8")
+                )
+            )
+            for prefix_int in range(start_prefix, end_prefix)
+        )
+    else:
+        hashes_written = _merge_shards(output_path, work_dir, start_prefix, end_prefix)
 
-    if etag_cache_path is not None:
-        with _atomic_open(etag_cache_path) as handle:
+    if index_path is not None:
+        with _atomic_open(index_path) as handle:
             handle.write(json.dumps(etags, sort_keys=True, indent=2))
     else:
         # Without ETag revalidation, shards are no longer needed once merged.
         shutil.rmtree(work_dir)
+
+    elapsed = max(0.0, time.monotonic() - started)
+    ranges_per_second = round(total_prefixes / elapsed, 2) if elapsed > 0.0 else 0.0
 
     return DownloadStats(
         prefixes_total=total_prefixes,
         prefixes_downloaded=prefixes_downloaded,
         prefixes_cached=prefixes_cached,
         hashes_written=hashes_written,
-        elapsed_seconds=max(0.0, time.monotonic() - started),
+        elapsed_seconds=elapsed,
+        ranges_per_second=ranges_per_second,
         output_path=str(output_path),
         ntlm=ntlm,
+        directory=directory,
     )
