@@ -22,7 +22,7 @@ from pwned.passwords import BASE_URL
 
 MAX_PREFIX_EXCLUSIVE = 0x100000
 DEFAULT_INDEX_FILENAME = ".pwned-index.json"
-ETAG_CHECKPOINT_INTERVAL = 4096
+ETAG_CHECKPOINT_INTERVAL = 32_768
 
 
 class DownloadStats(_HIBPBase):
@@ -81,10 +81,11 @@ def _load_etags(path: Path) -> dict[str, str]:
 
 
 def _save_etags(path: Path, etags: dict[str, str], *, mode: str | None = None) -> None:
-    """Atomically persist a prefix -> ETag mapping (with optional hash mode) as JSON."""
-    payload: dict[str, object] = {"mode": mode, "etags": etags} if mode is not None else dict(etags)
+    """Atomically persist a prefix -> ETag mapping (with optional hash mode) as compact JSON."""
+    sorted_etags = dict(sorted(etags.items()))
+    payload: object = {"mode": mode, "etags": sorted_etags} if mode is not None else sorted_etags
     with _atomic_open(path) as handle:
-        handle.write(json.dumps(payload, sort_keys=True, indent=2))
+        handle.write(json.dumps(payload, separators=(",", ":")))
 
 
 def _retry_delay(attempt: int) -> float:

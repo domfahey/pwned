@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
+import re
 from pathlib import Path
 from typing import BinaryIO
 
@@ -13,22 +13,35 @@ _SHA1_HEX_LEN = 40
 _NTLM_HEX_LEN = 32
 _BACKWARD_CHUNK_SIZE = 256
 _INDEX_FILENAME = ".pwned-index.json"
+_INDEX_SNIFF_BYTES = 256
+_INDEX_HEAD_MODE_RE = re.compile(r'^\{\s*"mode"\s*:\s*"(sha1|ntlm)"\s*[,}]')
+_INDEX_TAIL_MODE_RE = re.compile(r',\s*"mode"\s*:\s*"(sha1|ntlm)"\s*\}\s*$')
 
 
 def _read_directory_mode(directory: Path) -> str | None:
-    """Read optional hash mode metadata ('sha1' or 'ntlm') from a directory's index file."""
+    """Read optional hash mode metadata ('sha1' or 'ntlm') in O(1) bounded bytes."""
     index_path = directory / _INDEX_FILENAME
     if not index_path.is_file():
         return None
     try:
-        raw = json.loads(index_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        with index_path.open("rb") as handle:
+            head_bytes = handle.read(_INDEX_SNIFF_BYTES)
+            head = head_bytes.decode("utf-8", errors="ignore").lstrip()
+            if not head.startswith("{"):
+                return None
+            head_match = _INDEX_HEAD_MODE_RE.match(head)
+            if head_match is not None:
+                return head_match.group(1)
+            size = os.fstat(handle.fileno()).st_size
+            if size > len(head_bytes):
+                handle.seek(size - _INDEX_SNIFF_BYTES)
+                tail = handle.read(_INDEX_SNIFF_BYTES).decode("utf-8", errors="ignore")
+            else:
+                tail = head
+    except OSError:
         return None
-    if isinstance(raw, dict):
-        mode = raw.get("mode")
-        if mode in ("sha1", "ntlm"):
-            return str(mode)
-    return None
+    tail_match = _INDEX_TAIL_MODE_RE.search(tail)
+    return tail_match.group(1) if tail_match is not None else None
 
 
 def _hash_password(password: str, *, ntlm: bool) -> str:

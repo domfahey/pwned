@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -243,22 +245,63 @@ class TestDirectoryMode:
 
     def test_directory_mode_mismatch_raises_value_error(self, tmp_path: Path) -> None:
         sha1_dir = _write_range_dir(tmp_path / "sha1_indexed", [(_sha1_hex("password"), 10)])
-        (sha1_dir / ".pwned-index.json").write_text(
-            '{"mode": "sha1", "etags": {}}', encoding="utf-8"
-        )
+        (sha1_dir / ".pwned-index.json").write_text('{"mode":"sha1","etags":{}}', encoding="utf-8")
         with OfflinePasswordsClient(sha1_dir, ntlm=False) as client:
             assert client.check_password("password") == 10
         with pytest.raises(ValueError, match="SHA1 hashes.*NTLM mode"):
             OfflinePasswordsClient(sha1_dir, ntlm=True)
 
         ntlm_dir = _write_range_dir(tmp_path / "ntlm_indexed", [(_ntlm_hex("password"), 20)])
-        (ntlm_dir / ".pwned-index.json").write_text(
-            '{"mode": "ntlm", "etags": {}}', encoding="utf-8"
-        )
+        (ntlm_dir / ".pwned-index.json").write_text('{"mode":"ntlm","etags":{}}', encoding="utf-8")
         with OfflinePasswordsClient(ntlm_dir, ntlm=True) as client:
             assert client.check_password("password") == 20
         with pytest.raises(ValueError, match="NTLM hashes.*SHA1 mode"):
             OfflinePasswordsClient(ntlm_dir, ntlm=False)
+
+    def test_directory_mode_check_reads_bounded_bytes_for_large_index(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Large index (> 8 KiB) with "mode" at the head (compact format).
+        head_dir = _write_range_dir(tmp_path / "large_head", [(_ntlm_hex("password"), 7)])
+        big_etags = {f"{i:05X}": f'"etag-{i}"' for i in range(400)}
+        head_index = head_dir / ".pwned-index.json"
+        head_index.write_text(
+            json.dumps({"mode": "ntlm", "etags": big_etags}, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        assert head_index.stat().st_size > 4096
+
+        # Large index (> 8 KiB) with "mode" at the tail (sort_keys=True format).
+        tail_dir = _write_range_dir(tmp_path / "large_tail", [(_ntlm_hex("password"), 7)])
+        tail_index = tail_dir / ".pwned-index.json"
+        tail_index.write_text(
+            json.dumps({"etags": big_etags, "mode": "ntlm"}, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        assert tail_index.stat().st_size > 4096
+
+        # Small index with "mode" at the tail (fits within single sniff read).
+        small_tail_dir = _write_range_dir(tmp_path / "small_tail", [(_ntlm_hex("password"), 7)])
+        (small_tail_dir / ".pwned-index.json").write_text(
+            '{"etags": {}, "mode": "ntlm"}',
+            encoding="utf-8",
+        )
+
+        # Ensure Path.read_text is never used on the large index files.
+        real_read_text = Path.read_text
+
+        def forbid_index_read_text(self: Path, *args: object, **kwargs: object) -> str:
+            if self.name == ".pwned-index.json":
+                raise AssertionError("full index read_text should never be called")
+            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", forbid_index_read_text)
+
+        for d in (head_dir, tail_dir, small_tail_dir):
+            with OfflinePasswordsClient(d, ntlm=True) as client:
+                assert client.check_password("password") == 7
+            with pytest.raises(ValueError, match="NTLM hashes.*SHA1 mode"):
+                OfflinePasswordsClient(d, ntlm=False)
 
     @pytest.mark.parametrize(
         "index_content",
@@ -283,14 +326,14 @@ class TestDirectoryMode:
         dump_dir = _write_range_dir(tmp_path / "unreadable_dir", [(_sha1_hex("password"), 5)])
         index_path = dump_dir / ".pwned-index.json"
         index_path.write_text('{"mode": "ntlm"}', encoding="utf-8")
-        real_read_text = Path.read_text
+        real_open = Path.open
 
-        def flaky_read_text(self: Path, *args: object, **kwargs: object) -> str:
+        def flaky_open(self: Path, *args: Any, **kwargs: Any) -> Any:
             if self == index_path:
                 raise OSError("permission denied")
-            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+            return real_open(self, *args, **kwargs)
 
-        monkeypatch.setattr(Path, "read_text", flaky_read_text)
+        monkeypatch.setattr(Path, "open", flaky_open)
         with OfflinePasswordsClient(dump_dir) as client:
             assert client.check_password("password") == 5
 

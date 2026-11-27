@@ -45,7 +45,7 @@ class TestConstantsAndModels:
 
     def test_default_index_filename(self) -> None:
         assert DEFAULT_INDEX_FILENAME == ".pwned-index.json"
-        assert ETAG_CHECKPOINT_INTERVAL == 4096
+        assert ETAG_CHECKPOINT_INTERVAL == 32_768
 
     def test_retry_delay_capped_without_overflow(self) -> None:
         assert [_retry_delay(i) for i in range(6)] == [0.5, 1.0, 2.0, 4.0, 8.0, 10.0]
@@ -720,7 +720,10 @@ class TestDirectoryMode:
         assert (output_dir / "00002.txt").read_text(encoding="utf-8") == f"{'D' * 35}:40\n"
 
         index_path = output_dir / DEFAULT_INDEX_FILENAME
-        assert json.loads(index_path.read_text(encoding="utf-8")) == {
+        raw_index = index_path.read_text(encoding="utf-8")
+        assert raw_index.startswith('{"mode":"sha1","etags":{')
+        assert "\n" not in raw_index
+        assert json.loads(raw_index) == {
             "mode": "sha1",
             "etags": {
                 "00000": '"e0"',
