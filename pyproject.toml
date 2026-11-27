@@ -1,6 +1,6 @@
 [project]
 name = "pwned"
-version = "0.4.0"
+version = "0.4.1"
 description = "CLI tool and Python client for the Have I Been Pwned API v3"
 readme = "README.md"
 license = "MIT"
@@ -38,6 +38,7 @@ all = ["pykeepass>=4.0", "keyring>=25.0", "cryptography>=44.0", "zxcvbn>=4.4"]
 
 [project.urls]
 Homepage = "https://github.com/domfahey/pwned"
+Documentation = "https://domfahey.github.io/pwned/"
 Repository = "https://github.com/domfahey/pwned"
 Issues = "https://github.com/domfahey/pwned/issues"
 Changelog = "https://github.com/domfahey/pwned/blob/main/CHANGELOG.md"
@@ -66,7 +67,9 @@ exclude = [
     "/Dockerfile",
     "/Makefile",
     "/action.yml",
+    "/mkdocs.yml",
     "/packaging",
+    "/site",
 ]
 
 [dependency-groups]
@@ -76,6 +79,9 @@ dev = [
     "pytest-httpx>=0.35",
     "ruff>=0.4",
     "mypy>=1.10",
+]
+docs = [
+    "mkdocs-material>=9.6",
 ]
 
 [tool.pytest.ini_options]
