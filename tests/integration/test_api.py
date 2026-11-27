@@ -154,6 +154,15 @@ class TestAsyncEndpoints:
         assert breach.name == "Adobe"
         assert breach.domain == "adobe.com"
 
+    def test_get_breaches_exclude_unverified(self) -> None:
+        async def _run() -> list[Breach]:
+            async with AsyncHIBPClient(user_agent="pwned-integration-test") as client:
+                return await client.get_breaches(include_unverified=False)
+
+        breaches = asyncio.run(_run())
+        assert len(breaches) > 0
+        assert all(b.is_verified is True for b in breaches)
+
     def test_get_account_breaches(self) -> None:
         async def _run() -> list[Breach]:
             async with AsyncHIBPClient(
