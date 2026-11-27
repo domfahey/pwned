@@ -1,4 +1,4 @@
-.PHONY: install doctor test test-integration coverage lint format type check
+.PHONY: install doctor test test-integration coverage lint format type check docs docs-serve
 
 install:
 	uv sync
@@ -27,3 +27,9 @@ type:
 	uv run mypy
 
 check: lint type test
+
+docs:
+	uv run --group docs mkdocs build --strict
+
+docs-serve:
+	uv run --group docs mkdocs serve

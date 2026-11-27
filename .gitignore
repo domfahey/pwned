@@ -13,4 +13,5 @@ build/
 .ruff_cache/
 .coverage
 htmlcov/
+site/
 .DS_Store

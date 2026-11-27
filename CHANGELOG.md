@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-26
+
+### Added
+- Comprehensive documentation guides in `docs/` (`cli-reference.md`, `hibp-api-coverage.md`, `python-api.md`, `vault-auditing.md`, `monitoring-and-ci.md`, `offline-and-mcp.md`, `roadmap.md`).
+- Hosted MkDocs Material documentation site deployed to GitHub Pages (`mkdocs.yml`, `.github/workflows/docs.yml`) with `make docs` / `make docs-serve` targets.
+
+### Changed
+- Organized repository root layout: moved community health files (`SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`) into `.github/`, moved `todos.md` to `docs/roadmap.md`, moved Homebrew formula template to `packaging/homebrew/pwned.rb`, and renamed `.env.sample` to `.env.example`.
+
+### Fixed
+- Configured `Settings` with `extra="ignore"` so unrelated keys in local `.env` files do not cause validation failures.
+- Switched container release workflow from deprecated `qemu-user-static` to `qemu-user-binfmt` for Ubuntu 26.04 runners and added `workflow_dispatch` support.
+- Updated historical `CHANGELOG.md` link for `packaging/homebrew/pwned.rb`.
+
 ## [0.4.0] - 2026-11-26
 
 ### Added
@@ -67,7 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Handled CPython `HTMLParser` `AssertionError` on malformed SGML marked sections in `strip_html` (discovered by ClusterFuzzLite).
 - Wired automatic subscription RPM detection, TTY stderr progress, duplicate password line-index preservation, `--no-truncate` batch rejection, `NO_COLOR`/TTY status styling, and missing-home resilience in `auth show`.
-- Fixed [Formula/pwned.rb](Formula/pwned.rb) Ruby syntax/URL and extracted standalone `_parsers.py` so ClusterFuzzLite builds without native Rust compilation.
+- Fixed [packaging/homebrew/pwned.rb](packaging/homebrew/pwned.rb) Ruby syntax/URL and extracted standalone `_parsers.py` so ClusterFuzzLite builds without native Rust compilation.
 
 ## [0.2.0] - 2026-11-26
 
@@ -113,7 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured error hierarchy (`HIBPError`, `NotFoundError`, `UnauthorizedError`, `ForbiddenError`, `RateLimitError`) and automatic 429 retry with capped `Retry-After`
 - Strict `mypy`, `ruff` (including Bandit `S` rules), GitHub Actions CI, and unit + integration test suites
 
-[Unreleased]: https://github.com/domfahey/pwned/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/domfahey/pwned/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/domfahey/pwned/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/domfahey/pwned/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/domfahey/pwned/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/domfahey/pwned/compare/v0.1.1...v0.2.0

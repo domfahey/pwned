@@ -1,6 +1,7 @@
 # pwned
 
 [![CI](https://github.com/domfahey/pwned/actions/workflows/ci.yml/badge.svg)](https://github.com/domfahey/pwned/actions/workflows/ci.yml)
+[![Docs](https://github.com/domfahey/pwned/actions/workflows/docs.yml/badge.svg)](https://domfahey.github.io/pwned/)
 [![CodeQL](https://github.com/domfahey/pwned/actions/workflows/codeql.yml/badge.svg)](https://github.com/domfahey/pwned/actions/workflows/codeql.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/domfahey/pwned/badge)](https://scorecard.dev/viewer/?uri=github.com/domfahey/pwned)
 [![Release](https://img.shields.io/github/v/release/domfahey/pwned)](https://github.com/domfahey/pwned/releases)
@@ -13,7 +14,7 @@ Check email addresses against data breaches, search for compromised passwords, q
 
 ## Documentation
 
-Full guides live in [`docs/`](docs/README.md):
+Read the hosted documentation at **[domfahey.github.io/pwned](https://domfahey.github.io/pwned/)** or browse [`docs/`](docs/README.md):
 
 - [CLI Reference](docs/cli-reference.md) — Commands, aliases, flags, output formats, and exit codes
 - [HIBP API v3 Coverage](docs/hibp-api-coverage.md) — Complete 21 / 21 endpoint, model, and protocol parity matrix
@@ -251,7 +252,7 @@ Add `pwned` to your `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/domfahey/pwned
-    rev: v0.4.0
+    rev: v0.4.1
     hooks:
       - id: pwned-audit
 ```

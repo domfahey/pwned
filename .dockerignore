@@ -11,6 +11,8 @@ tests
 packaging
 .clusterfuzzlite
 docs
+mkdocs.yml
+site
 .env
 .env.*
 *.pyc
