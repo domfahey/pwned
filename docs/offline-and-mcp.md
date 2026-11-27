@@ -2,15 +2,24 @@
 
 ## Resumable Offline Hash Dump Downloader
 
-For air-gapped environments, high-scale Active Directory audits, or zero-latency local checks, `pwned offline download` fetches the complete Pwned Passwords corpus (`00000`–`FFFFF`, 1,048,576 prefixes) and assembles a sorted `<HASH>:<COUNT>\r\n` file ready for `OfflinePasswordsClient`.
+For air-gapped environments, high-scale Active Directory audits, or zero-latency local checks, `pwned offline download` fetches the complete Pwned Passwords corpus (`00000`–`FFFFF`, 1,048,576 prefixes).
+
+By default, the CLI writes a **per-prefix range directory** (`00000.txt`–`FFFFF.txt`, `SUFFIX:COUNT` lines) alongside a `.pwned-index.json` ETag index for incremental `HTTP 304` refreshes and direct interoperability with the official Have I Been Pwned CLI (`hibp password download`). Pass `--single` / `-s` to merge all prefixes into one sorted `<HASH>:<COUNT>\r\n` file.
 
 ```bash
-# Download full SHA-1 corpus (resumable by default)
-pwned offline download /data/pwned-passwords-sha1.txt --concurrency 32
+# Default: download full SHA-1 per-prefix range directory (00000.txt–FFFFF.txt + .pwned-index.json)
+pwned offline download /data/pwned-sha1 --parallelism 32
 
-# Download NTLM corpus with ETag caching for incremental HTTP 304 refreshes
+# Re-run later to refresh only changed ranges via saved ETags (HTTP 304)
+pwned offline download /data/pwned-sha1
+
+# Ignore saved ETags and force a full rebuild of the directory and index
+pwned offline download /data/pwned-sha1 --force
+
+# Download NTLM corpus into a single merged sorted file
 pwned offline download /data/pwned-passwords-ntlm.txt \
-  --ntlm \
+  --single \
+  --mode ntlm \
   --concurrency 32 \
   --etag-cache /data/pwned-ntlm-etags.json \
   --overwrite
@@ -18,23 +27,54 @@ pwned offline download /data/pwned-passwords-ntlm.txt \
 
 | Option | Default | Description |
 |---|---|---|
-| `--ntlm` | `False` | Download NTLM hashes (`?mode=ntlm`) instead of SHA-1 |
-| `--concurrency INT` | `32` | Number of workers in the bounded async download pool |
-| `--resume / --no-resume` | `True` | Resume an interrupted download by skipping existing partial shards |
-| `--etag-cache FILE` | `None` | JSON file storing ETags for conditional `If-None-Match` / HTTP `304` refreshes |
-| `--max-retries INT` | `3` | Maximum retry attempts per prefix on transient errors |
-| `-o`, `--overwrite` | `False` | Overwrite an existing `OUTPUT` file |
+| `-s`, `--single` | `False` | Write one merged sorted `HASH:COUNT` file instead of a per-prefix range directory (`00000.txt`–`FFFFF.txt`) |
+| `--mode [sha1\|ntlm]` | `sha1` | Hash algorithm mode: `sha1` or `ntlm` |
+| `-n`, `--ntlm` | `False` | Download NTLM hashes (`?mode=ntlm`) instead of SHA-1 (overrides `--mode`) |
+| `--concurrency`, `--parallelism`, `-p INT` | `32` | Number of workers in the bounded async download pool |
+| `--resume / --no-resume` | `True` | Resume an interrupted download by reusing existing files/shards and saved ETags |
+| `--etag-cache FILE` | `None` | Custom JSON file storing ETags for conditional `If-None-Match` / `HTTP 304` refreshes (defaults to `<OUTPUT>/.pwned-index.json` in directory mode) |
+| `--max-retries INT` | `None` | Maximum retry attempts per prefix on transient errors (omit for unlimited retries; `0` to disable) |
+| `-o`, `--overwrite` | `False` | Permit replacing an existing single `OUTPUT` file or a non-empty directory without a saved index |
+| `--force` | `False` | Global option: ignore cached shards and saved ETags, forcing a full re-download and rebuilding the ETag index |
 
 How it works:
-- **Bounded worker pool & TTY progress:** Uses a fixed-size async worker pool (`--concurrency`) to keep memory flat across all 1,048,576 prefixes while reporting live progress to `stderr` when attached to a TTY (so `--json`/`--format` stdout stays clean).
-- **256-bucket sharded staging:** Partial prefixes are written under `.<output>.part/<00..FF>/<PREFIX>.txt` so filesystems (APFS/NTFS/ext4) never hold 1M files in a single directory.
-- **Resumable & incremental:** Interrupted downloads skip already-fetched shards automatically (`--resume` default). Passing `--etag-cache <path>` preserves shards and sends `If-None-Match` on future runs so unchanged ranges return `HTTP 304 Not Modified`. Pass `--overwrite` / `-o` when replacing an existing `OUTPUT` file.
-- **Atomic sorted merge:** Shards are merged in strict hexadecimal order (with zero-count entries stripped) into a temp file and atomically swapped into `OUTPUT` via `os.replace()`.
-- **Direct querying:** Query the resulting file immediately with zero network traffic:
-  ```bash
-  pwned password --offline-db /data/pwned-passwords-sha1.txt --stdin
-  pwned audit ntds.pwdump --source pwdump --offline-db /data/pwned-passwords-ntlm.txt --check-reuse
-  ```
+- **Per-prefix directory mode (CLI default):** Writes flat `00000.txt`–`FFFFF.txt` range files directly under `OUTPUT` and stores prefix ETags in `.pwned-index.json` (or `--etag-cache`), directly compatible with `hibp password download`. Subsequent runs send `If-None-Match` so unchanged ranges return `HTTP 304 Not Modified`. Pass `--overwrite` / `-o` to write into a non-empty directory that has no saved index, or global `--force` to ignore saved ETags and rebuild the index from scratch.
+- **Single-file mode (`--single` / `-s`):** Stages partial prefixes in 256 buckets under `.<output>.part/<00..FF>/<PREFIX>.txt` so filesystems (APFS/NTFS/ext4) never hold 1M staging files in a single directory, then merges shards in strict hexadecimal order (with zero-count entries stripped) into a temp file and atomically swaps it into `OUTPUT` via `os.replace()`. Pass `--overwrite` / `-o` when replacing an existing single file.
+- **Bounded worker pool & TTY progress:** Uses a fixed-size async worker pool (`--concurrency` / `--parallelism` / `-p`) to keep memory flat across all 1,048,576 prefixes while reporting live progress to `stderr` when attached to a TTY (so `--json`/`--format` stdout stays clean).
+- **Download statistics (`DownloadStats`):** Both CLI output and `download_offline_db()` return a `DownloadStats` model with `prefixes_total`, `prefixes_downloaded`, `prefixes_cached`, `hashes_written`, `elapsed_seconds`, `ranges_per_second`, `output_path`, `ntlm`, and `directory`.
+
+## Offline Lookups (`--offline-db` & `OfflinePasswordsClient`)
+
+`--offline-db PATH` (on `pwned password`, `pwned audit`, and `pwned mcp`) and `OfflinePasswordsClient` accept either a **per-prefix range directory** (`O(1)` direct prefix lookup) or a **single sorted dump file** (`O(log N)` binary search):
+
+### CLI Usage
+
+```bash
+# Query a per-prefix range directory (O(1) lookup)
+pwned password --offline-db /data/pwned-sha1 --stdin
+pwned audit ntds.pwdump --source pwdump --offline-db /data/pwned-ntlm --check-reuse
+
+# Query a single merged sorted dump file (O(log N) binary search)
+pwned password --offline-db /data/pwned-passwords-sha1.txt --stdin
+pwned audit ntds.pwdump --source pwdump --offline-db /data/pwned-passwords-ntlm.txt --check-reuse
+```
+
+### Python Usage (`OfflinePasswordsClient`)
+
+```python
+from pathlib import Path
+from pwned import OfflinePasswordsClient
+
+# O(1) direct prefix lookup against a per-prefix range directory (00000.txt–FFFFF.txt)
+with OfflinePasswordsClient(Path("/data/pwned-sha1")) as dir_client:
+    assert dir_client.is_directory is True
+    count = dir_client.check_password("password")
+
+# O(log N) binary search against a single sorted dump file (HASH:COUNT)
+with OfflinePasswordsClient(Path("/data/pwned-passwords-ntlm.txt"), ntlm=True) as file_client:
+    assert file_client.is_directory is False
+    compromised = file_client.is_hash_pwned("8846F7EAEE8FB117AD06BDD830B7586C")
+```
 
 ## Local Privacy-First Stdio MCP Server (`pwned mcp`)
 
@@ -42,7 +82,7 @@ Have I Been Pwned offers an [official remote MCP server](https://haveibeenpwned.
 
 ### Client Configuration
 
-Add `pwned mcp` to any MCP-compatible AI client (Claude Desktop, Cursor, Antigravity, etc.):
+Add `pwned mcp` to any MCP-compatible AI client (Claude Desktop, Cursor, Antigravity, etc.). `--offline-db` accepts either a per-prefix range directory (`00000.txt`–`FFFFF.txt`) or a single sorted dump file:
 
 ```json
 {

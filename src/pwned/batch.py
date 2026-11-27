@@ -84,6 +84,7 @@ def load_input_file(
     strip: bool = True,
     ignore_comments: bool = True,
     deduplicate: bool = True,
+    skip_empty: bool = True,
 ) -> list[str]:
     """Load and parse a UTF-8 newline-delimited input file."""
     with path.open("r", encoding="utf-8") as handle:
@@ -92,6 +93,7 @@ def load_input_file(
             strip=strip,
             ignore_comments=ignore_comments,
             deduplicate=deduplicate,
+            skip_empty=skip_empty,
         )
 
 

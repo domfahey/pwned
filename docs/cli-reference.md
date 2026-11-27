@@ -11,9 +11,10 @@ Global options are accepted **before or after** any subcommand:
 | `--api-key TEXT` | `None` | HIBP API key override (prefer `HIBP_API_KEY`, `.env`, or keyring over CLI flags to avoid process-table exposure) |
 | `--user-agent TEXT` | `pwned-cli` | Custom `User-Agent` header (`HIBP_USER_AGENT`) |
 | `--format CHOICE` | `text` | Output format: `text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, `html` |
-| `--json` | `False` | Shorthand for `--format json` (cannot be combined with another `--format`) |
+| `--json` | `False` | Shorthand for `--format json` (cannot be combined with `--markdown` or another `--format`) |
+| `--markdown` | `False` | Shorthand for `--format markdown` (cannot be combined with `--json` or another `--format`) |
 | `--outfile PATH` | `None` | Write formatted UTF-8 output atomically to a file in an existing directory (`auth` commands always write to stdout) |
-| `--force` | `False` | Overwrite an existing `--outfile` |
+| `--force` | `False` | Overwrite an existing `--outfile` (or ignore saved ETags and force a full rebuild on `offline download`) |
 | `--cache / --no-cache` | `False` | Cache public endpoints (`/breaches`, `/dataclasses*`) and `/range/{prefix}` lookups locally |
 | `--version` | — | Show CLI version and exit |
 
@@ -73,12 +74,13 @@ Check one or more passwords or pre-computed hashes against Pwned Passwords (*k*-
 | Option | Default | Description |
 |---|---|---|
 | `--stdin` | `False` | Read single or multi-line passwords/hashes from stdin |
-| `--file FILE` | `None` | Batch-check passwords/hashes (one per line) from file |
-| `--ntlm` | `False` | Use NTLM hash (`?mode=ntlm`) instead of SHA-1 |
+| `--file FILE` | `None` | Batch-check passwords/hashes (one per line) from file, preserving blank lines and exact 1-based line numbers |
+| `--mode [sha1\|ntlm]` | `sha1` | Hash algorithm mode: `sha1` or `ntlm` |
+| `-n`, `--ntlm` | `False` | Use NTLM hash (`?mode=ntlm`) instead of SHA-1 (overrides `--mode`) |
 | `--pad / --no-pad` | `True` | Send `Add-Padding: true` header for traffic-analysis resistance (`--no-pad` to disable) |
 | `--hashed` | `False` | Treat input(s) as pre-computed 40-char SHA-1 or 32-char NTLM hashes |
-| `--offline-db FILE` | `None` | Query a local sorted HIBP dump file instead of the network API |
-| `--concurrency INT` | `10` | Max concurrent requests in online batch mode |
+| `--offline-db PATH` | `None` | Query a local sorted HIBP dump file or per-prefix range directory (`00000.txt`–`FFFFF.txt`) instead of the network API |
+| `--concurrency`, `--parallelism`, `-p INT` | `10` | Max concurrent requests in online batch mode |
 | `--stats` | `False` | Print batch summary stats (`checked / pwned / clean / errors / elapsed`) to stderr |
 | `--threshold INT` | `1` | Minimum breach count to treat as pwned |
 | `--fail-if-pwned` / `--fail-if-found` | `False` | Exit `8` if count meets threshold |
@@ -88,19 +90,20 @@ Query the raw Pwned Passwords *k*-anonymity range for a 5-character hexadecimal 
 
 | Option | Default | Description |
 |---|---|---|
-| `--ntlm` | `False` | Query NTLM hash range (`?mode=ntlm`) instead of SHA-1 |
+| `--mode [sha1\|ntlm]` | `sha1` | Hash algorithm mode: `sha1` or `ntlm` |
+| `-n`, `--ntlm` | `False` | Query NTLM hash range (`?mode=ntlm`) instead of SHA-1 (overrides `--mode`) |
 | `--pad / --no-pad` | `True` | Send `Add-Padding: true` header for traffic-analysis resistance (`--no-pad` to disable) |
 | `--fail-if-pwned` / `--fail-if-found` | `False` | Exit `8` if the returned range is non-empty |
 | `--cache / --no-cache` | `False` | Global option: cache `/range/{prefix}` responses locally |
 
 #### `pwned audit [PATH]`
-Audit a password-manager export, browser CSV, Active Directory `pwdump` file, or local `pass`/`gopass` store. See [Vault & Active Directory Auditing](vault-auditing.md).
+Audit a password-manager export, browser CSV, Active Directory `pwdump` file, or local `pass`/`gopass` store. Supports `--mode [sha1|ntlm]`, `-n`/`--ntlm`, `--concurrency`/`--parallelism`/`-p`, and `--offline-db` (accepting either a single sorted dump file or a per-prefix range directory `00000.txt`–`FFFFF.txt`). See [Vault & Active Directory Auditing](vault-auditing.md).
 
 #### `pwned offline download OUTPUT`
-Download and build a sorted offline Pwned Passwords hash dump (`00000`–`FFFFF`). See [Offline Lookups & Local MCP Server](offline-and-mcp.md).
+Download an offline Pwned Passwords corpus (`00000`–`FFFFF`) as a per-prefix range directory (`00000.txt`–`FFFFF.txt`, default) or a single merged sorted dump (`--single` / `-s`). See [Offline Lookups & Local MCP Server](offline-and-mcp.md).
 
 #### `pwned mcp`
-Start the local zero-dependency stdio MCP server (`--offline-db`, `--ntlm`, global `--cache`). See [Offline Lookups & Local MCP Server](offline-and-mcp.md).
+Start the local zero-dependency stdio MCP server (`--offline-db` accepting either a single sorted dump file or a per-prefix range directory `00000.txt`–`FFFFF.txt`, `--ntlm`, global `--cache`). See [Offline Lookups & Local MCP Server](offline-and-mcp.md).
 
 #### `pwned breach NAME`
 Fetch full metadata for a single breach by its stable `Name` (e.g., `pwned breach Adobe`).

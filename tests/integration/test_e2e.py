@@ -90,6 +90,15 @@ class TestBreachCommand:
         assert len(doc["runs"]) == 1
         assert len(doc["runs"][0]["results"]) >= 1
 
+    def test_breach_markdown_shorthand(self) -> None:
+        for args in (
+            ("--markdown", "breach", "Adobe"),
+            ("breach", "Adobe", "--markdown"),
+        ):
+            out = _run_ok(*args)
+            assert "Adobe" in out
+            assert "#" in out or "|" in out
+
     def test_outfile_and_force(self, tmp_path: Path) -> None:
         out_file = tmp_path / "adobe.json"
         runner = CliRunner()
@@ -492,6 +501,12 @@ class TestPasswordCommand:
         assert isinstance(data, dict)
         assert data["count"] > 0
 
+    def test_mode_ntlm_and_short_flag(self) -> None:
+        for flag_args in (("--mode", "ntlm"), ("-n",)):
+            data = _run_json("password", "password", *flag_args)
+            assert isinstance(data, dict)
+            assert data["count"] > 0
+
     def test_padding(self) -> None:
         data = _run_json("password", "password", "--pad")
         assert isinstance(data, dict)
@@ -565,6 +580,26 @@ class TestPasswordCommand:
         assert isinstance(first, dict) and first["count"] > 0
         assert first == second
 
+    def test_file_preserves_blank_line_numbers(self, tmp_path: Path) -> None:
+        pw_file = tmp_path / "with_blank.txt"
+        pw_file.write_text(
+            "password\n\nxK9#mL2$vQ7@nR4!pW8&jF5*hT3^bY6\n",
+            encoding="utf-8",
+        )
+        data = _run_json("password", "--file", str(pw_file))
+        assert isinstance(data, list)
+        assert len(data) == 3
+        assert [item["index"] for item in data] == [1, 2, 3]
+        assert data[0]["status"] == "pwned"
+        assert data[2]["status"] == "clean"
+
+    def test_offline_db_directory(self, tmp_path: Path) -> None:
+        dump_dir = tmp_path / "pwned-sha1"
+        dump_dir.mkdir()
+        (dump_dir / "5BAA6.txt").write_bytes(b"1E4C9B93F3F0682250B6CF8331B7EE68FD8:12345\r\n")
+        data = _run_json("password", "--offline-db", str(dump_dir), "password")
+        assert data == {"count": 12345}
+
 
 class TestPasswordRangeCommand:
     def test_password_range_sha1_and_alias(self) -> None:
@@ -590,6 +625,11 @@ class TestPasswordRangeCommand:
         code, out = _run("--json", "password-range", "8846F", "--ntlm", "--fail-if-found")
         assert code == 8, out
         data = json.loads(out)
+        assert isinstance(data, dict)
+        assert len(data) > 0
+
+    def test_password_range_mode_ntlm(self) -> None:
+        data = _run_json("pr", "8846F", "--mode", "ntlm")
         assert isinstance(data, dict)
         assert len(data) > 0
 

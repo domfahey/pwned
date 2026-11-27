@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import BinaryIO
 
-from pwned._parsers import _md4
+from pwned._parsers import _md4, _parse_range_response
 
 _HEX_CHARS = frozenset("0123456789ABCDEF")
 _SHA1_HEX_LEN = 40
@@ -43,19 +43,41 @@ def _parse_count(raw_count: bytes) -> int:
     return count if count > 0 else 0
 
 
+def _find_line_start(file_handle: BinaryIO, pos: int) -> int:
+    while pos > 0:
+        start = max(0, pos - _BACKWARD_CHUNK_SIZE)
+        file_handle.seek(start)
+        chunk = file_handle.read(pos - start)
+        newline_idx = chunk.rfind(b"\n")
+        if newline_idx != -1:
+            return start + newline_idx + 1
+        pos = start
+    return 0
+
+
 class OfflinePasswordsClient:
-    """Zero-dependency O(log N) binary-search client for HIBP password dump files."""
+    """Zero-dependency offline client for HIBP password dumps.
+
+    Supports both:
+    - Single sorted dump files (``HASH:COUNT`` lines) using ``O(log N)`` binary search.
+    - Per-prefix directories of range files (``00000.txt``..``FFFFF.txt`` containing
+      ``SUFFIX:COUNT`` lines) using ``O(1)`` direct prefix lookup.
+    """
 
     def __init__(self, path: str | os.PathLike[str], *, ntlm: bool = False) -> None:
         self._path = Path(path)
         self._ntlm = ntlm
+        self._file: BinaryIO | None
         if self._path.is_dir():
-            raise IsADirectoryError(f"Path is a directory: {self._path}")
-        self._file: BinaryIO = self._path.open("rb")
+            self._is_dir = True
+            self._file = None
+        else:
+            self._is_dir = False
+            self._file = self._path.open("rb")
 
     @property
     def path(self) -> Path:
-        """Path to the opened HIBP password dump file."""
+        """Path to the opened HIBP password dump file or range directory."""
         return self._path
 
     @property
@@ -63,9 +85,15 @@ class OfflinePasswordsClient:
         """Whether this client expects an NTLM dump instead of SHA-1."""
         return self._ntlm
 
+    @property
+    def is_directory(self) -> bool:
+        """Whether this client reads from a per-prefix directory of range files."""
+        return self._is_dir
+
     def close(self) -> None:
-        """Close the underlying dump file handle."""
-        self._file.close()
+        """Close the underlying dump file handle if open."""
+        if self._file is not None:
+            self._file.close()
 
     def __enter__(self) -> OfflinePasswordsClient:
         return self
@@ -81,29 +109,28 @@ class OfflinePasswordsClient:
             )
         return self._ntlm
 
-    def _find_line_start(self, pos: int) -> int:
-        while pos > 0:
-            start = max(0, pos - _BACKWARD_CHUNK_SIZE)
-            self._file.seek(start)
-            chunk = self._file.read(pos - start)
-            newline_idx = chunk.rfind(b"\n")
-            if newline_idx != -1:
-                return start + newline_idx + 1
-            pos = start
-        return 0
-
     def _lookup_hash(self, normalized_hash: str) -> int:
+        if self._file is None:
+            prefix_file = self._path / f"{normalized_hash[:5]}.txt"
+            if not prefix_file.is_file():
+                return 0
+            return _parse_range_response(prefix_file.read_text(encoding="utf-8")).get(
+                normalized_hash[5:],
+                0,
+            )
+
+        file_handle = self._file
         target = normalized_hash.encode("ascii")
-        file_size = os.fstat(self._file.fileno()).st_size
+        file_size = os.fstat(file_handle.fileno()).st_size
         low = 0
         high = file_size
 
         while low < high:
             mid = (low + high) // 2
-            line_start = self._find_line_start(mid)
-            self._file.seek(line_start)
-            raw_line = self._file.readline()
-            line_end = self._file.tell()
+            line_start = _find_line_start(file_handle, mid)
+            file_handle.seek(line_start)
+            raw_line = file_handle.readline()
+            line_end = file_handle.tell()
 
             entry_hash, sep, raw_count = raw_line.rstrip(b"\r\n").partition(b":")
             if not sep:

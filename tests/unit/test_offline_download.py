@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
@@ -12,13 +13,16 @@ import pytest
 from pydantic import ValidationError
 from pytest_httpx import HTTPXMock
 
+import pwned.offline_download as offline_download_module
 from pwned._parsers import _md4
 from pwned.client import HIBPError
 from pwned.offline import OfflinePasswordsClient
 from pwned.offline_download import (
+    DEFAULT_INDEX_FILENAME,
     MAX_PREFIX_EXCLUSIVE,
     DownloadStats,
     _load_etags,
+    _retry_delay,
     download_offline_db,
 )
 from pwned.passwords import BASE_URL
@@ -37,6 +41,14 @@ class TestConstantsAndModels:
         assert MAX_PREFIX_EXCLUSIVE == 0x100000
         assert MAX_PREFIX_EXCLUSIVE == 1_048_576
 
+    def test_default_index_filename(self) -> None:
+        assert DEFAULT_INDEX_FILENAME == ".pwned-index.json"
+
+    def test_retry_delay_capped_without_overflow(self) -> None:
+        assert [_retry_delay(i) for i in range(6)] == [0.5, 1.0, 2.0, 4.0, 8.0, 10.0]
+        assert _retry_delay(1024) == 10.0
+        assert _retry_delay(10_000) == 10.0
+
     def test_download_stats_model(self, tmp_path: Path) -> None:
         db_path = str(tmp_path / "db.txt")
         stats = DownloadStats(
@@ -48,8 +60,23 @@ class TestConstantsAndModels:
             output_path=db_path,
         )
         assert stats.ntlm is False
+        assert stats.directory is False
+        assert stats.ranges_per_second == 0.0
         assert stats.prefixes_total == 10
         assert stats.hashes_written == 42
+
+        dir_stats = DownloadStats(
+            prefixes_total=10,
+            prefixes_downloaded=10,
+            prefixes_cached=0,
+            hashes_written=100,
+            elapsed_seconds=2.0,
+            ranges_per_second=5.0,
+            output_path=str(tmp_path / "db_dir"),
+            directory=True,
+        )
+        assert dir_stats.directory is True
+        assert dir_stats.ranges_per_second == 5.0
 
         with pytest.raises(ValidationError):
             DownloadStats(
@@ -58,6 +85,17 @@ class TestConstantsAndModels:
                 prefixes_cached=0,
                 hashes_written=0,
                 elapsed_seconds=0.0,
+                output_path=db_path,
+            )
+
+        with pytest.raises(ValidationError):
+            DownloadStats(
+                prefixes_total=1,
+                prefixes_downloaded=1,
+                prefixes_cached=0,
+                hashes_written=1,
+                elapsed_seconds=0.0,
+                ranges_per_second=-0.5,
                 output_path=db_path,
             )
 
@@ -169,6 +207,26 @@ class TestOverwriteBehavior:
         assert stats.prefixes_downloaded == 1
         assert stats.hashes_written == 1
         assert output.read_bytes() == f"00000{'B' * 35}:9\r\n".encode("ascii")
+
+    @pytest.mark.parametrize("overwrite", [False, True])
+    def test_single_file_mode_raises_is_a_directory_error_when_output_is_dir(
+        self, tmp_path: Path, httpx_mock: HTTPXMock, overwrite: bool
+    ) -> None:
+        existing_dir = tmp_path / "existing_dir"
+        existing_dir.mkdir()
+
+        async def run() -> None:
+            await download_offline_db(
+                existing_dir,
+                start_prefix=0,
+                end_prefix=1,
+                overwrite=overwrite,
+            )
+
+        with pytest.raises(IsADirectoryError, match="Output path is a directory:"):
+            asyncio.run(run())
+
+        assert httpx_mock.get_requests() == []
 
 
 class TestBasicDownloadAndOfflineIntegration:
@@ -287,6 +345,48 @@ class TestBasicDownloadAndOfflineIntegration:
         assert output.read_bytes() == b""
         with OfflinePasswordsClient(output) as client:
             assert client.check_password("password") == 0
+
+    def test_ranges_per_second_computed_from_elapsed(
+        self, tmp_path: Path, httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for i in range(3):
+            httpx_mock.add_response(url=f"{BASE_URL}/range/{i:05X}", text=f"{'A' * 35}:1\n")
+
+        ticks = iter([100.0, 102.0])
+        monkeypatch.setattr(
+            offline_download_module,
+            "time",
+            SimpleNamespace(monotonic=lambda: next(ticks)),
+        )
+
+        output = tmp_path / "timed.txt"
+
+        async def run() -> DownloadStats:
+            return await download_offline_db(output, start_prefix=0, end_prefix=3)
+
+        stats = asyncio.run(run())
+        assert stats.elapsed_seconds == 2.0
+        assert stats.ranges_per_second == 1.5
+        assert stats.directory is False
+
+    def test_ranges_per_second_zero_when_elapsed_is_zero(
+        self, tmp_path: Path, httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        httpx_mock.add_response(url=f"{BASE_URL}/range/00000", text=f"{'A' * 35}:1\n")
+        monkeypatch.setattr(
+            offline_download_module,
+            "time",
+            SimpleNamespace(monotonic=lambda: 42.0),
+        )
+
+        output = tmp_path / "zero_elapsed.txt"
+
+        async def run() -> DownloadStats:
+            return await download_offline_db(output, start_prefix=0, end_prefix=1)
+
+        stats = asyncio.run(run())
+        assert stats.elapsed_seconds == 0.0
+        assert stats.ranges_per_second == 0.0
 
 
 class TestResumeAndETags:
@@ -481,6 +581,499 @@ class TestResumeAndETags:
         # Directory path triggers OSError on read_text.
         assert _load_etags(tmp_path) == {}
 
+    def test_single_file_force_ignores_cached_shards_without_etag_cache(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        output = tmp_path / "sha1.txt"
+        work_dir = output.parent / f".{output.name}.part"
+        stale_shard = work_dir / "00" / "00000.txt"
+        stale_shard.parent.mkdir(parents=True, exist_ok=True)
+        stale_shard.write_text(f"{'9' * 35}:999\n", encoding="utf-8")
+
+        httpx_mock.add_response(url=f"{BASE_URL}/range/00000", text=f"{'1' * 35}:10\n")
+
+        async def run() -> DownloadStats:
+            return await download_offline_db(
+                output,
+                start_prefix=0,
+                end_prefix=1,
+                resume=True,
+                force=True,
+            )
+
+        stats = asyncio.run(run())
+        assert stats.prefixes_cached == 0
+        assert stats.prefixes_downloaded == 1
+        assert stats.hashes_written == 1
+        assert not work_dir.exists()
+
+        with OfflinePasswordsClient(output) as client:
+            assert client.check_hash(f"00000{'9' * 35}") == 0
+            assert client.check_hash(f"00000{'1' * 35}") == 10
+
+    def test_single_file_force_ignores_saved_etags_and_rebuilds_cache(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        output = tmp_path / "sha1.txt"
+        etag_cache = tmp_path / "etags.json"
+        etag_cache.write_text(json.dumps({"00000": '"old-etag"'}), encoding="utf-8")
+
+        work_dir = output.parent / f".{output.name}.part"
+        stale_shard = work_dir / "00" / "00000.txt"
+        stale_shard.parent.mkdir(parents=True, exist_ok=True)
+        stale_shard.write_text(f"{'A' * 35}:1\n", encoding="utf-8")
+
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00000",
+            text=f"{'A' * 35}:55\n",
+            headers={"ETag": '"new-etag"'},
+        )
+
+        async def run() -> DownloadStats:
+            return await download_offline_db(
+                output,
+                start_prefix=0,
+                end_prefix=1,
+                resume=True,
+                force=True,
+                etag_cache_path=etag_cache,
+            )
+
+        stats = asyncio.run(run())
+        assert stats.prefixes_cached == 0
+        assert stats.prefixes_downloaded == 1
+        assert stats.hashes_written == 1
+
+        reqs = httpx_mock.get_requests()
+        assert len(reqs) == 1
+        assert "If-None-Match" not in reqs[0].headers
+        assert json.loads(etag_cache.read_text(encoding="utf-8")) == {"00000": '"new-etag"'}
+        with OfflinePasswordsClient(output) as client:
+            assert client.check_hash(f"00000{'A' * 35}") == 55
+
+
+class TestDirectoryMode:
+    def test_directory_download_writes_flat_shards_and_index(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00000",
+            text=f"{'A' * 35}:10\r\n{'0' * 35}:0\r\n",
+            headers={"ETag": '"e0"'},
+        )
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00001",
+            text=f"{'B' * 35}:20\n{'C' * 35}:30\n",
+            headers={"ETag": '"e1"'},
+        )
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00002",
+            text=f"{'D' * 35}:40\n",
+        )
+
+        output_dir = tmp_path / "hibp_shards"
+
+        async def run() -> DownloadStats:
+            return await download_offline_db(
+                output_dir,
+                start_prefix=0,
+                end_prefix=3,
+                directory=True,
+            )
+
+        stats = asyncio.run(run())
+
+        assert stats.directory is True
+        assert stats.prefixes_total == 3
+        assert stats.prefixes_downloaded == 3
+        assert stats.prefixes_cached == 0
+        assert stats.hashes_written == 4
+        assert stats.ranges_per_second >= 0.0
+        assert stats.output_path == str(output_dir)
+
+        assert (output_dir / "00000.txt").read_bytes() == (
+            f"{'A' * 35}:10\r\n{'0' * 35}:0\r\n".encode("ascii")
+        )
+        assert (output_dir / "00001.txt").read_text(encoding="utf-8") == (
+            f"{'B' * 35}:20\n{'C' * 35}:30\n"
+        )
+        assert (output_dir / "00002.txt").read_text(encoding="utf-8") == f"{'D' * 35}:40\n"
+
+        index_path = output_dir / DEFAULT_INDEX_FILENAME
+        assert json.loads(index_path.read_text(encoding="utf-8")) == {
+            "00000": '"e0"',
+            "00001": '"e1"',
+        }
+        # No .part work directory created in directory mode.
+        assert not (tmp_path / f".{output_dir.name}.part").exists()
+
+    def test_directory_mode_custom_etag_cache_path(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00000",
+            text=f"{'A' * 35}:1\n",
+            headers={"ETag": '"custom-e0"'},
+        )
+        output_dir = tmp_path / "shards"
+        custom_index = tmp_path / "meta" / "index.json"
+
+        async def run() -> DownloadStats:
+            return await download_offline_db(
+                output_dir,
+                start_prefix=0,
+                end_prefix=1,
+                directory=True,
+                etag_cache_path=custom_index,
+            )
+
+        stats = asyncio.run(run())
+        assert stats.directory is True
+        assert stats.hashes_written == 1
+        assert json.loads(custom_index.read_text(encoding="utf-8")) == {"00000": '"custom-e0"'}
+        assert not (output_dir / DEFAULT_INDEX_FILENAME).exists()
+
+    def test_directory_incremental_refresh_handles_304_200_and_missing_etag(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        output_dir = tmp_path / "hibp_dir"
+
+        # Initial download:
+        # 00000 -> ETag "e0"
+        # 00001 -> ETag "e1"
+        # 00002 -> No ETag header
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00000",
+            text=f"{'A' * 35}:1\n{'E' * 35}:4\n",
+            headers={"ETag": '"e0"'},
+        )
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00001",
+            text=f"{'B' * 35}:2\n",
+            headers={"ETag": '"e1"'},
+        )
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00002",
+            text=f"{'C' * 35}:3\n",
+        )
+
+        async def run_download(*, overwrite: bool = True) -> DownloadStats:
+            return await download_offline_db(
+                output_dir,
+                start_prefix=0,
+                end_prefix=3,
+                directory=True,
+                overwrite=overwrite,
+            )
+
+        stats1 = asyncio.run(run_download(overwrite=False))
+        assert stats1.directory is True
+        assert stats1.prefixes_downloaded == 3
+        assert stats1.prefixes_cached == 0
+        assert stats1.hashes_written == 4
+
+        # Second run on existing indexed directory (even with overwrite=False):
+        # 00000 -> 304 Not Modified (cached, original file untouched)
+        # 00001 -> 200 OK with updated content and ETag "e1-new"
+        # 00002 -> no ETag in index -> fetched fresh without If-None-Match, gets "e2"
+        httpx_mock.add_response(url=f"{BASE_URL}/range/00000", status_code=304)
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00001",
+            text=f"{'B' * 35}:22\n{'F' * 35}:99\n",
+            headers={"ETag": '"e1-new"'},
+        )
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00002",
+            text=f"{'C' * 35}:33\n",
+            headers={"ETag": '"e2"'},
+        )
+
+        stats2 = asyncio.run(run_download(overwrite=False))
+        assert stats2.directory is True
+        assert stats2.prefixes_total == 3
+        assert stats2.prefixes_cached == 1
+        assert stats2.prefixes_downloaded == 2
+        assert stats2.hashes_written == 5
+
+        reqs = httpx_mock.get_requests()[3:]
+        by_path = {req.url.path: req for req in reqs}
+        assert by_path["/range/00000"].headers["If-None-Match"] == '"e0"'
+        assert by_path["/range/00001"].headers["If-None-Match"] == '"e1"'
+        assert "If-None-Match" not in by_path["/range/00002"].headers
+
+        index_path = output_dir / DEFAULT_INDEX_FILENAME
+        assert json.loads(index_path.read_text(encoding="utf-8")) == {
+            "00000": '"e0"',
+            "00001": '"e1-new"',
+            "00002": '"e2"',
+        }
+        assert (output_dir / "00000.txt").read_text(encoding="utf-8") == (
+            f"{'A' * 35}:1\n{'E' * 35}:4\n"
+        )
+        assert (output_dir / "00001.txt").read_text(encoding="utf-8") == (
+            f"{'B' * 35}:22\n{'F' * 35}:99\n"
+        )
+        assert (output_dir / "00002.txt").read_text(encoding="utf-8") == f"{'C' * 35}:33\n"
+
+    def test_directory_force_ignores_saved_etags_and_rebuilds_index(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        output_dir = tmp_path / "hibp_dir"
+
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00000",
+            text=f"{'A' * 35}:1\n",
+            headers={"ETag": '"e0"'},
+        )
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00001",
+            text=f"{'B' * 35}:2\n",
+            headers={"ETag": '"e1"'},
+        )
+
+        async def run_initial() -> DownloadStats:
+            return await download_offline_db(
+                output_dir,
+                start_prefix=0,
+                end_prefix=2,
+                directory=True,
+            )
+
+        asyncio.run(run_initial())
+
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00000",
+            text=f"{'A' * 35}:100\n",
+            headers={"ETag": '"e0-fresh"'},
+        )
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00001",
+            text=f"{'B' * 35}:200\n",
+        )
+
+        async def run_force() -> DownloadStats:
+            return await download_offline_db(
+                output_dir,
+                start_prefix=0,
+                end_prefix=2,
+                directory=True,
+                force=True,
+            )
+
+        stats = asyncio.run(run_force())
+        assert stats.directory is True
+        assert stats.prefixes_cached == 0
+        assert stats.prefixes_downloaded == 2
+        assert stats.hashes_written == 2
+
+        reqs = httpx_mock.get_requests()[2:]
+        assert all("If-None-Match" not in req.headers for req in reqs)
+
+        index_path = output_dir / DEFAULT_INDEX_FILENAME
+        assert json.loads(index_path.read_text(encoding="utf-8")) == {"00000": '"e0-fresh"'}
+        assert (output_dir / "00000.txt").read_text(encoding="utf-8") == f"{'A' * 35}:100\n"
+        assert (output_dir / "00001.txt").read_text(encoding="utf-8") == f"{'B' * 35}:200\n"
+
+    def test_directory_resume_false_ignores_saved_etags(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        output_dir = tmp_path / "hibp_dir"
+        output_dir.mkdir()
+        (output_dir / "00000.txt").write_text(f"{'A' * 35}:1\n", encoding="utf-8")
+        index_path = output_dir / DEFAULT_INDEX_FILENAME
+        index_path.write_text(json.dumps({"00000": '"old"'}), encoding="utf-8")
+
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00000",
+            text=f"{'A' * 35}:77\n",
+            headers={"ETag": '"rebuilt"'},
+        )
+
+        async def run() -> DownloadStats:
+            return await download_offline_db(
+                output_dir,
+                start_prefix=0,
+                end_prefix=1,
+                directory=True,
+                resume=False,
+            )
+
+        stats = asyncio.run(run())
+        assert stats.prefixes_cached == 0
+        assert stats.prefixes_downloaded == 1
+        reqs = httpx_mock.get_requests()
+        assert len(reqs) == 1
+        assert "If-None-Match" not in reqs[0].headers
+        assert json.loads(index_path.read_text(encoding="utf-8")) == {"00000": '"rebuilt"'}
+
+    @pytest.mark.parametrize("overwrite", [False, True])
+    def test_directory_safety_existing_file_raises_file_exists_error(
+        self, tmp_path: Path, httpx_mock: HTTPXMock, overwrite: bool
+    ) -> None:
+        existing_file = tmp_path / "not_a_dir.txt"
+        existing_file.write_text("keep me", encoding="utf-8")
+
+        async def run() -> None:
+            await download_offline_db(
+                existing_file,
+                start_prefix=0,
+                end_prefix=1,
+                directory=True,
+                overwrite=overwrite,
+            )
+
+        with pytest.raises(FileExistsError, match="Output path is an existing file:"):
+            asyncio.run(run())
+
+        assert httpx_mock.get_requests() == []
+        assert existing_file.read_text(encoding="utf-8") == "keep me"
+
+    def test_directory_safety_non_empty_without_index_raises_when_overwrite_false(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        output_dir = tmp_path / "non_empty"
+        output_dir.mkdir()
+        (output_dir / "stray.txt").write_text("stray", encoding="utf-8")
+
+        async def run() -> None:
+            await download_offline_db(
+                output_dir,
+                start_prefix=0,
+                end_prefix=1,
+                directory=True,
+                overwrite=False,
+            )
+
+        with pytest.raises(
+            FileExistsError,
+            match=r"Output directory is not empty and has no saved index:.*--overwrite",
+        ):
+            asyncio.run(run())
+
+        assert httpx_mock.get_requests() == []
+
+    def test_directory_safety_non_empty_without_index_succeeds_when_overwrite_true(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        output_dir = tmp_path / "non_empty"
+        output_dir.mkdir()
+        (output_dir / "stray.txt").write_text("stray", encoding="utf-8")
+
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00000",
+            text=f"{'A' * 35}:5\n",
+            headers={"ETag": '"e0"'},
+        )
+
+        async def run() -> DownloadStats:
+            return await download_offline_db(
+                output_dir,
+                start_prefix=0,
+                end_prefix=1,
+                directory=True,
+                overwrite=True,
+            )
+
+        stats = asyncio.run(run())
+        assert stats.directory is True
+        assert stats.prefixes_downloaded == 1
+        assert stats.hashes_written == 1
+        assert (output_dir / "00000.txt").read_text(encoding="utf-8") == f"{'A' * 35}:5\n"
+        index_path = output_dir / DEFAULT_INDEX_FILENAME
+        assert json.loads(index_path.read_text(encoding="utf-8")) == {"00000": '"e0"'}
+
+    def test_directory_interrupted_initial_download_preserves_index_and_resumes_without_overwrite(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        output_dir = tmp_path / "resumable_dir"
+
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00000",
+            text=f"{'A' * 35}:5\r\n",
+            headers={"ETag": '"e0"'},
+        )
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00001",
+            status_code=500,
+        )
+
+        async def run_first() -> DownloadStats:
+            return await download_offline_db(
+                output_dir,
+                start_prefix=0,
+                end_prefix=2,
+                directory=True,
+                concurrency=1,
+                overwrite=False,
+                max_retries=0,
+            )
+
+        with pytest.raises(HIBPError, match="HTTP 500 for prefix 00001"):
+            asyncio.run(run_first())
+
+        index_path = output_dir / DEFAULT_INDEX_FILENAME
+        assert index_path.exists()
+        assert json.loads(index_path.read_text(encoding="utf-8")) == {"00000": '"e0"'}
+
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00000",
+            status_code=304,
+        )
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00001",
+            text=f"{'B' * 35}:9\r\n",
+            headers={"ETag": '"e1"'},
+        )
+
+        async def run_resume() -> DownloadStats:
+            return await download_offline_db(
+                output_dir,
+                start_prefix=0,
+                end_prefix=2,
+                directory=True,
+                concurrency=1,
+                overwrite=False,
+                max_retries=0,
+            )
+
+        stats = asyncio.run(run_resume())
+        assert stats.prefixes_cached == 1
+        assert stats.prefixes_downloaded == 1
+        assert stats.hashes_written == 2
+        reqs = httpx_mock.get_requests()
+        assert reqs[2].headers["If-None-Match"] == '"e0"'
+        assert json.loads(index_path.read_text(encoding="utf-8")) == {
+            "00000": '"e0"',
+            "00001": '"e1"',
+        }
+
+    def test_directory_safety_empty_existing_directory_succeeds_when_overwrite_false(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        output_dir = tmp_path / "empty_dir"
+        output_dir.mkdir()
+
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00000",
+            text=f"{'A' * 35}:7\n",
+            headers={"ETag": '"e0"'},
+        )
+
+        async def run() -> DownloadStats:
+            return await download_offline_db(
+                output_dir,
+                start_prefix=0,
+                end_prefix=1,
+                directory=True,
+                overwrite=False,
+            )
+
+        stats = asyncio.run(run())
+        assert stats.directory is True
+        assert stats.prefixes_downloaded == 1
+        assert stats.hashes_written == 1
+        assert (output_dir / "00000.txt").read_text(encoding="utf-8") == f"{'A' * 35}:7\n"
+
 
 class TestRetriesErrorsAndConcurrency:
     def test_retries_with_exponential_backoff_and_cap(
@@ -519,6 +1112,45 @@ class TestRetriesErrorsAndConcurrency:
         stats = asyncio.run(run())
         assert stats.hashes_written == 1
         assert sleeps == [0.5, 1.0, 2.0, 4.0, 8.0, 10.0, 10.0]
+
+    def test_unlimited_retries_when_max_retries_is_none(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        # 5 transient failures (past default MAX_RETRIES=3), covering both
+        # httpx.RequestError and HTTP 429/5xx paths, followed by 200 OK.
+        httpx_mock.add_response(url=f"{BASE_URL}/range/00000", status_code=503)
+        httpx_mock.add_exception(
+            httpx.ConnectError("transient"),
+            url=f"{BASE_URL}/range/00000",
+        )
+        httpx_mock.add_response(url=f"{BASE_URL}/range/00000", status_code=429)
+        httpx_mock.add_exception(
+            httpx.ReadTimeout("slow"),
+            url=f"{BASE_URL}/range/00000",
+        )
+        httpx_mock.add_response(url=f"{BASE_URL}/range/00000", status_code=503)
+        httpx_mock.add_response(url=f"{BASE_URL}/range/00000", text=f"{'A' * 35}:123\n")
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        output = tmp_path / "unlimited.txt"
+
+        async def run() -> DownloadStats:
+            return await download_offline_db(
+                output,
+                start_prefix=0,
+                end_prefix=1,
+                max_retries=None,
+                sleep=fake_sleep,
+            )
+
+        stats = asyncio.run(run())
+        assert stats.prefixes_downloaded == 1
+        assert stats.hashes_written == 1
+        assert sleeps == [0.5, 1.0, 2.0, 4.0, 8.0]
 
     def test_retry_exhaustion_on_http_500_raises_hibp_error(
         self, tmp_path: Path, httpx_mock: HTTPXMock
