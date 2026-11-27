@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 from typing import BinaryIO
@@ -11,6 +12,23 @@ _HEX_CHARS = frozenset("0123456789ABCDEF")
 _SHA1_HEX_LEN = 40
 _NTLM_HEX_LEN = 32
 _BACKWARD_CHUNK_SIZE = 256
+_INDEX_FILENAME = ".pwned-index.json"
+
+
+def _read_directory_mode(directory: Path) -> str | None:
+    """Read optional hash mode metadata ('sha1' or 'ntlm') from a directory's index file."""
+    index_path = directory / _INDEX_FILENAME
+    if not index_path.is_file():
+        return None
+    try:
+        raw = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if isinstance(raw, dict):
+        mode = raw.get("mode")
+        if mode in ("sha1", "ntlm"):
+            return str(mode)
+    return None
 
 
 def _hash_password(password: str, *, ntlm: bool) -> str:
@@ -69,6 +87,13 @@ class OfflinePasswordsClient:
         self._ntlm = ntlm
         self._file: BinaryIO | None
         if self._path.is_dir():
+            index_mode = _read_directory_mode(self._path)
+            expected_mode = "ntlm" if ntlm else "sha1"
+            if index_mode is not None and index_mode != expected_mode:
+                raise ValueError(
+                    f"Offline directory {self._path} contains {index_mode.upper()} hashes, "
+                    f"but client was opened in {expected_mode.upper()} mode"
+                )
             self._is_dir = True
             self._file = None
         else:

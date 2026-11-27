@@ -155,7 +155,7 @@ class TestLoadInputFile:
             skip_empty=False,
         ) == ["pw1", "", "  ", "pw2"]
 
-    def test_skip_empty_false_preserves_line_indices_in_batch_passwords(
+    def test_skip_empty_false_preserves_line_indices_and_skips_blank_lines_in_batch_passwords(
         self, tmp_path: Path, httpx_mock: HTTPXMock
     ) -> None:
         h_pw1 = hashlib.sha1(b"pw1").hexdigest().upper()
@@ -184,40 +184,39 @@ class TestLoadInputFile:
         )
         assert hash_lines == [h_pw1, "", h_pw2]
 
+        # Even if SHA1("") is in the dump, blank lines are skipped (never falsely pwned).
         entries = sorted([(h_pw1, 10), (h_empty, 3)], key=lambda item: item[0])
         dump = tmp_path / "sha1_dump.txt"
         dump.write_text(
             "\n".join(f"{digest}:{count}" for digest, count in entries) + "\n",
             encoding="utf-8",
         )
+        sync_progress: list[tuple[int, int, int]] = []
         with OfflinePasswordsClient(dump) as offline_client:
-            sync_plain = batch_check_passwords(plain_lines, offline_client)
+            sync_plain = batch_check_passwords(
+                plain_lines,
+                offline_client,
+                on_progress=lambda done, total, item: sync_progress.append(
+                    (done, total, item.index)
+                ),
+            )
             sync_hashed = batch_check_passwords(hash_lines, offline_client, hashed=True)
+            sync_all_blank = batch_check_passwords(["", ""], offline_client)
 
-        assert sync_plain == [
+        expected = [
             PasswordBatchItem(index=1, pwn_count=10, status="pwned"),
-            PasswordBatchItem(index=2, pwn_count=3, status="pwned"),
             PasswordBatchItem(index=3, pwn_count=0, status="clean"),
         ]
-        assert sync_hashed == [
-            PasswordBatchItem(index=1, pwn_count=10, status="pwned"),
-            PasswordBatchItem(
-                index=2,
-                pwn_count=0,
-                status="error",
-                error="SHA-1 hash must be exactly 40 hexadecimal characters",
-            ),
-            PasswordBatchItem(index=3, pwn_count=0, status="clean"),
-        ]
+        assert sync_plain == expected
+        assert sync_hashed == expected
+        assert sync_all_blank == []
+        assert sync_progress == [(1, 2, 1), (2, 2, 3)]
 
+        # Only pw1 and pw2 ranges are requested over HTTP (no request for SHA1("")).
         httpx_mock.add_response(
             url=f"https://api.pwnedpasswords.com/range/{h_pw1[:5]}",
             text=f"{h_pw1[5:]}:10\r\n",
             is_reusable=True,
-        )
-        httpx_mock.add_response(
-            url=f"https://api.pwnedpasswords.com/range/{h_empty[:5]}",
-            text=f"{h_empty[5:]}:3\r\n",
         )
         httpx_mock.add_response(
             url=f"https://api.pwnedpasswords.com/range/{h_pw2[:5]}",
@@ -225,20 +224,34 @@ class TestLoadInputFile:
             is_reusable=True,
         )
 
-        async def _run_async() -> tuple[list[PasswordBatchItem], list[PasswordBatchItem]]:
+        async_progress: list[tuple[int, int, int]] = []
+
+        async def _run_async() -> tuple[
+            list[PasswordBatchItem], list[PasswordBatchItem], list[PasswordBatchItem]
+        ]:
             async with AsyncPwnedPasswordsClient(user_agent="test") as async_client:
                 async_plain = await async_batch_check_passwords(
-                    plain_lines, async_client, pad=False
+                    plain_lines,
+                    async_client,
+                    pad=False,
+                    on_progress=lambda done, total, item: async_progress.append(
+                        (done, total, item.index)
+                    ),
                 )
                 async_hashed = await async_batch_check_passwords(
                     hash_lines, async_client, hashed=True, pad=False
                 )
-                return async_plain, async_hashed
+                async_all_blank = await async_batch_check_passwords(
+                    ["", ""], async_client, pad=False
+                )
+                return async_plain, async_hashed, async_all_blank
 
-        async_plain, async_hashed = asyncio.run(_run_async())
+        async_plain, async_hashed, async_all_blank = asyncio.run(_run_async())
 
-        assert async_plain == sync_plain
-        assert async_hashed == sync_hashed
+        assert async_plain == expected
+        assert async_hashed == expected
+        assert async_all_blank == []
+        assert async_progress == [(1, 2, 1), (2, 2, 3)]
 
 
 class TestBatchModels:

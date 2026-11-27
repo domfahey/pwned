@@ -588,10 +588,10 @@ class TestPasswordCommand:
         )
         data = _run_json("password", "--file", str(pw_file))
         assert isinstance(data, list)
-        assert len(data) == 3
-        assert [item["index"] for item in data] == [1, 2, 3]
+        assert len(data) == 2
+        assert [item["index"] for item in data] == [1, 3]
         assert data[0]["status"] == "pwned"
-        assert data[2]["status"] == "clean"
+        assert data[1]["status"] == "clean"
 
     def test_offline_db_directory(self, tmp_path: Path) -> None:
         dump_dir = tmp_path / "pwned-sha1"

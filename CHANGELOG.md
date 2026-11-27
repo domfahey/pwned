@@ -11,11 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Exported `ExitCode` (`IntEnum` mirroring official HIBP CLI codes `0`–`9` and `130`) and `BadRequestError` (HTTP `400` subclass of `HIBPError`) from `pwned`.
 - Added `--fail-if-pwned` (exit `8`) to `pwned pastes` and `pwned stealer email|website|domain` for consistent CI scripting across all search commands.
 - Added `pwned password-range <5-hex>` (alias `pr`) for raw Pwned Passwords *k*-anonymity range lookups and raw 6-character SHA-1 hex prefix support on `pwned account-range`.
-- Added global `--outfile <path>` and `--force` options for atomic UTF-8 file output from data commands (and full ETag index rebuild on `pwned offline download`).
-- Added global `--markdown` shorthand (for `--format markdown`), `--mode sha1|ntlm` and `-n` aliases (for `--ntlm`), and `--parallelism` / `-p` aliases (for `--concurrency`).
+- Added global `--outfile <path>` and `--force` options for atomic UTF-8 file output from data commands.
+- Added global `--markdown` shorthand (for `--format markdown`), `--mode sha1|ntlm` and `-n` aliases (for `--ntlm`, including `pwned mcp`), and `--parallelism` / `-p` aliases (for `--concurrency`).
 - Added non-interactive `pwned auth set --stdin` to read `HIBP_API_KEY` from standard input.
 - Added `--full` alias (for `--no-truncate` on `account`/`search`) and `--fail-if-found` alias (for `--fail-if-pwned`).
-- Added per-prefix offline dump directory mode (`00000.txt`–`FFFFF.txt` + `.pwned-index.json` ETag index) to `download_offline_db(..., directory=True)` and `pwned offline download` (`--single`/`-s` for merged sorted files, `--max-retries` with unlimited retries when omitted or `0` to disable, `--overwrite` / `-o`, global `--force` ETag rebuild, `ranges_per_second` and `directory` fields in `DownloadStats`, and stderr TTY progress reporting), plus `O(1)` directory lookups in `OfflinePasswordsClient` and `--offline-db` across `password`, `audit`, and `mcp`.
+- Added per-prefix offline dump directory mode (`00000.txt`–`FFFFF.txt` + `.pwned-index.json` hash-mode & ETag index with periodic checkpointing and atomic per-prefix writes) to `download_offline_db(..., directory=True)` and `pwned offline download` (`--single`/`-s` for merged sorted files, `--max-retries` with unlimited retries when omitted or `0` to disable, `--overwrite` / `-o`, `--force-refresh` ETag rebuild, `ranges_per_second` and `directory` fields in `DownloadStats`, and stderr TTY progress reporting), plus `O(1)` directory lookups with hash-mode validation in `OfflinePasswordsClient` and `--offline-db` across `password`, `audit`, and `mcp`.
 - Added `skip_empty: bool = True` parameter to `parse_input_lines()` and `load_input_file()`.
 
 ### Changed
@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Routed all interactive CLI prompts (`password`, `auth set`, `audit` KeePass/Bitwarden) to `stderr` (`err=True`) so piped `--json`/`--format` stdout stays clean.
 - Changed `pwned auth set` and `pwned auth clear` `--backend` default from `file` to `auto` (prefers OS Keychain when `pwned[keyring]` is installed and usable, falling back to `0600` `~/.config/pwned/.env`); saving to OS keyring now cleans up any stale `~/.config/pwned/.env` key, and `pwned auth clear` reports keyring errors with exit code `7`.
 - Changed `pwned offline download` CLI default to per-prefix directory mode (`00000.txt`–`FFFFF.txt` + `.pwned-index.json`) for direct interoperability with official `hibp password download` (use `--single`/`-s` for a merged sorted file), backed by a bounded async worker pool for flat memory usage across 1,048,576 prefixes.
-- Changed `pwned password --file` to preserve blank lines and exact 1-based line numbers (`skip_empty=False` in `load_input_file`/`parse_input_lines`).
+- Changed `pwned password --file` and multi-line `--stdin` to skip blank lines without hashing `""` while preserving exact 1-based line numbers (`skip_empty=False` in `load_input_file`/`parse_input_lines`).
 - Changed no-match (`404`) search responses on `account`, `domain`, `pastes`, and `stealer` to exit `0` with clean status text (or empty `[]` / `{}` in JSON), reserving non-zero exits for `--fail-if-pwned`, unknown catalog breaches (`breach`), failed domain verification, and errors.
 - Switched `README.md` zero-install `uvx` Quickstart to a pinned, zero-secret public lookup (`@v0.4.1 pwned breach Adobe`) and pinned `uv tool install` examples.
 

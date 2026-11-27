@@ -241,6 +241,59 @@ class TestDirectoryMode:
             assert client.check_hash(h) == 99
             assert client.check_hash(f"{h[:5]}{'A' * 35}") == 0
 
+    def test_directory_mode_mismatch_raises_value_error(self, tmp_path: Path) -> None:
+        sha1_dir = _write_range_dir(tmp_path / "sha1_indexed", [(_sha1_hex("password"), 10)])
+        (sha1_dir / ".pwned-index.json").write_text(
+            '{"mode": "sha1", "etags": {}}', encoding="utf-8"
+        )
+        with OfflinePasswordsClient(sha1_dir, ntlm=False) as client:
+            assert client.check_password("password") == 10
+        with pytest.raises(ValueError, match="SHA1 hashes.*NTLM mode"):
+            OfflinePasswordsClient(sha1_dir, ntlm=True)
+
+        ntlm_dir = _write_range_dir(tmp_path / "ntlm_indexed", [(_ntlm_hex("password"), 20)])
+        (ntlm_dir / ".pwned-index.json").write_text(
+            '{"mode": "ntlm", "etags": {}}', encoding="utf-8"
+        )
+        with OfflinePasswordsClient(ntlm_dir, ntlm=True) as client:
+            assert client.check_password("password") == 20
+        with pytest.raises(ValueError, match="NTLM hashes.*SHA1 mode"):
+            OfflinePasswordsClient(ntlm_dir, ntlm=False)
+
+    @pytest.mark.parametrize(
+        "index_content",
+        [
+            '{"00000": "etag"}',
+            '{"mode": "md5", "etags": {}}',
+            '["not", "a", "dict"]',
+            "{not valid json",
+        ],
+    )
+    def test_directory_ignores_legacy_or_invalid_index_metadata(
+        self, tmp_path: Path, index_content: str
+    ) -> None:
+        dump_dir = _write_range_dir(tmp_path / "legacy_dir", [(_sha1_hex("password"), 5)])
+        (dump_dir / ".pwned-index.json").write_text(index_content, encoding="utf-8")
+        with OfflinePasswordsClient(dump_dir) as client:
+            assert client.check_password("password") == 5
+
+    def test_directory_ignores_unreadable_index_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dump_dir = _write_range_dir(tmp_path / "unreadable_dir", [(_sha1_hex("password"), 5)])
+        index_path = dump_dir / ".pwned-index.json"
+        index_path.write_text('{"mode": "ntlm"}', encoding="utf-8")
+        real_read_text = Path.read_text
+
+        def flaky_read_text(self: Path, *args: object, **kwargs: object) -> str:
+            if self == index_path:
+                raise OSError("permission denied")
+            return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(Path, "read_text", flaky_read_text)
+        with OfflinePasswordsClient(dump_dir) as client:
+            assert client.check_password("password") == 5
+
 
 class TestEmptyAndSingleLineFiles:
     def test_empty_file_returns_zero(self, tmp_path: Path) -> None:

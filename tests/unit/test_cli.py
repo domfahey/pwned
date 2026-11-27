@@ -2248,23 +2248,19 @@ class TestPasswordHashedOfflineConcurrencyStats:
             {"index": 2, "pwn_count": 0, "status": "clean"},
         ]
 
-    def test_password_file_preserves_blank_lines_and_exact_indices(
+    def test_password_file_and_stdin_skip_blank_lines_while_preserving_indices(
         self, httpx_mock: HTTPXMock, cli_runner: CliRunner, tmp_path: Path
     ) -> None:
         pw_file = tmp_path / "with_blank.txt"
         pw_file.write_text("password\n\ncleanpw\n", encoding="utf-8")
 
         p1_prefix, p1_suffix = _sha1_parts("password")
-        empty_prefix, _ = _sha1_parts("")
         p3_prefix, _ = _sha1_parts("cleanpw")
 
+        # Only 2 HTTP requests: blank line 2 is skipped (never hashes SHA1("")).
         httpx_mock.add_response(
             url=f"https://api.pwnedpasswords.com/range/{p1_prefix}",
             text=f"{p1_suffix}:10\n",
-        )
-        httpx_mock.add_response(
-            url=f"https://api.pwnedpasswords.com/range/{empty_prefix}",
-            text="",
         )
         httpx_mock.add_response(
             url=f"https://api.pwnedpasswords.com/range/{p3_prefix}",
@@ -2274,10 +2270,32 @@ class TestPasswordHashedOfflineConcurrencyStats:
         assert res_file.exit_code == 0
         assert json.loads(res_file.output) == [
             {"index": 1, "pwn_count": 10, "status": "pwned"},
-            {"index": 2, "pwn_count": 0, "status": "clean"},
             {"index": 3, "pwn_count": 0, "status": "clean"},
         ]
 
+        # Clean file with a blank line exits 0 under --fail-if-pwned.
+        clean_file = tmp_path / "clean_with_blank.txt"
+        clean_file.write_text("cleanpw\n\n", encoding="utf-8")
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p3_prefix}",
+            text="",
+        )
+        res_clean_fail = cli_runner.invoke(
+            cli, ["--json", "password", "--file", str(clean_file), "--fail-if-pwned"]
+        )
+        assert res_clean_fail.exit_code == 0
+        assert json.loads(res_clean_fail.output) == [
+            {"index": 1, "pwn_count": 0, "status": "clean"},
+        ]
+
+        # All-blank file raises usage error (exit 2).
+        blanks_only = tmp_path / "blanks_only.txt"
+        blanks_only.write_text("\n\n", encoding="utf-8")
+        res_blanks_only = cli_runner.invoke(cli, ["password", "--file", str(blanks_only)])
+        assert res_blanks_only.exit_code == 2
+        assert "No passwords provided." in res_blanks_only.output
+
+        # --stdin multi-line also preserves exact 1-based line numbers across blank lines.
         httpx_mock.add_response(
             url=f"https://api.pwnedpasswords.com/range/{p1_prefix}",
             text=f"{p1_suffix}:10\n",
@@ -2294,8 +2312,41 @@ class TestPasswordHashedOfflineConcurrencyStats:
         assert res_stdin.exit_code == 0
         assert json.loads(res_stdin.output) == [
             {"index": 1, "pwn_count": 10, "status": "pwned"},
-            {"index": 2, "pwn_count": 0, "status": "clean"},
+            {"index": 3, "pwn_count": 0, "status": "clean"},
         ]
+
+        # --stdin single password followed by blank line stays in single-password mode.
+        httpx_mock.add_response(
+            url=f"https://api.pwnedpasswords.com/range/{p1_prefix}",
+            text=f"{p1_suffix}:10\n",
+        )
+        res_stdin_single = cli_runner.invoke(
+            cli,
+            ["--json", "password", "--stdin"],
+            input="password\n\n",
+        )
+        assert res_stdin_single.exit_code == 0
+        assert json.loads(res_stdin_single.output) == {"count": 10}
+
+    def test_password_offline_db_directory_mode_mismatch_exits_2(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        ntlm_dir = tmp_path / "ntlm_dir"
+        ntlm_dir.mkdir()
+        (ntlm_dir / ".pwned-index.json").write_text(
+            '{"mode": "ntlm", "etags": {}}', encoding="utf-8"
+        )
+        res_single = cli_runner.invoke(cli, ["password", "--offline-db", str(ntlm_dir), "password"])
+        assert res_single.exit_code == 2
+        assert "NTLM hashes" in res_single.output
+
+        pw_file = tmp_path / "pws.txt"
+        pw_file.write_text("password\n", encoding="utf-8")
+        res_batch = cli_runner.invoke(
+            cli, ["password", "--offline-db", str(ntlm_dir), "--file", str(pw_file)]
+        )
+        assert res_batch.exit_code == 2
+        assert "NTLM hashes" in res_batch.output
 
 
 class TestSarifFormatEndToEnd:
@@ -2432,12 +2483,16 @@ class TestMarkdownHtmlAndHelp:
         assert res_conflict_after.exit_code == 2
         assert "Cannot combine --json and --markdown." in res_conflict_after.output
 
-    def test_force_help_mentions_offline_download(self, cli_runner: CliRunner) -> None:
+    def test_force_help_scoped_to_outfile(self, cli_runner: CliRunner) -> None:
         result = cli_runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
         normalized = " ".join(result.output.split())
-        expected = "Overwrite an existing --outfile (or ignore cached ETags on offline download)."
-        assert expected in normalized
+        assert "--force Overwrite an existing --outfile." in normalized
+        assert "offline download" not in normalized
+
+        dl_help = cli_runner.invoke(cli, ["offline", "download", "--help"])
+        assert dl_help.exit_code == 0
+        assert "--force-refresh" in dl_help.output
 
 
 class TestPasswordCache:

@@ -274,8 +274,11 @@ def batch_check_passwords(
 
     cache: dict[str, int] = {}
     results: list[PasswordBatchItem] = []
-    total = len(passwords)
+    total = sum(1 for password in passwords if password)
+    completed = 0
     for idx, password in enumerate(passwords, start=1):
+        if not password:
+            continue
         if password in cache:
             item = _password_item(idx, cache[password], threshold)
         else:
@@ -295,8 +298,9 @@ def batch_check_passwords(
                 cache[password] = count
                 item = _password_item(idx, count, threshold)
         results.append(item)
+        completed += 1
         if on_progress is not None:
-            on_progress(idx, total, item)
+            on_progress(completed, total, item)
     return results
 
 
@@ -316,11 +320,11 @@ async def async_batch_check_passwords(
         raise ValueError("threshold must be at least 1")
     if concurrency < 1:
         raise ValueError("concurrency must be at least 1")
-    if not passwords:
+    unique_inputs = list(dict.fromkeys(password for password in passwords if password))
+    if not unique_inputs:
         return []
 
     semaphore = asyncio.Semaphore(concurrency)
-    unique_inputs = list(dict.fromkeys(passwords))
 
     async def _lookup_one(value: str) -> tuple[str, int | None, str | None]:
         async with semaphore:
@@ -337,8 +341,11 @@ async def async_batch_check_passwords(
     resolved = {value: (count, error) for value, count, error in outcomes}
 
     results: list[PasswordBatchItem] = []
-    total = len(passwords)
+    total = sum(1 for password in passwords if password)
+    completed = 0
     for idx, password in enumerate(passwords, start=1):
+        if not password:
+            continue
         count, error = resolved[password]
         if count is None:
             item = PasswordBatchItem(
@@ -350,6 +357,7 @@ async def async_batch_check_passwords(
         else:
             item = _password_item(idx, count, threshold)
         results.append(item)
+        completed += 1
         if on_progress is not None:
-            on_progress(idx, total, item)
+            on_progress(completed, total, item)
     return results

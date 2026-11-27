@@ -2038,6 +2038,16 @@ class TestAuditCommand:
         assert data_ntlm["compromised_entries"] == 1
         assert data_ntlm["findings"] == [{"name": "SiteB", "username": "b@x.com", "pwn_count": 42}]
 
+        (ntlm_dir / ".pwned-index.json").write_text(
+            '{"mode": "ntlm", "etags": {}}', encoding="utf-8"
+        )
+        res_mismatch = cli_runner.invoke(
+            app,
+            ["audit", str(export_file), "--source", "csv", "--offline-db", str(ntlm_dir)],
+        )
+        assert res_mismatch.exit_code == 2
+        assert "NTLM hashes" in res_mismatch.output
+
 
 class TestCompletionCommand:
     @pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
@@ -2138,7 +2148,6 @@ class TestOfflineCommand:
             [
                 "--user-agent",
                 "custom-ua",
-                "--force",
                 "--json",
                 "offline",
                 "download",
@@ -2149,6 +2158,7 @@ class TestOfflineCommand:
                 "--parallelism",
                 "8",
                 "--no-resume",
+                "--force-refresh",
                 "--etag-cache",
                 str(etag_file),
                 "--max-retries",
@@ -2160,6 +2170,24 @@ class TestOfflineCommand:
         opts_data = json.loads(res_opts.output)
         assert opts_data["ntlm"] is True
         assert opts_data["directory"] is False
+
+        # Global --force overwrites --outfile without forcing an ETag cache rebuild.
+        stats_outfile = isolated_env / "stats.json"
+        stats_outfile.write_text("old", encoding="utf-8")
+        res_global_force = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "--outfile",
+                str(stats_outfile),
+                "--force",
+                "offline",
+                "download",
+                str(out_dir),
+            ],
+        )
+        assert res_global_force.exit_code == 0
+        assert json.loads(stats_outfile.read_text(encoding="utf-8"))["directory"] is True
 
         res_short = cli_runner.invoke(
             app,
@@ -2207,6 +2235,19 @@ class TestOfflineCommand:
                 "etag_cache_path": etag_file,
                 "user_agent": "custom-ua",
                 "max_retries": 5,
+                "on_progress": None,
+            },
+            {
+                "output_path": out_dir,
+                "ntlm": False,
+                "directory": True,
+                "concurrency": 32,
+                "resume": True,
+                "force": False,
+                "overwrite": False,
+                "etag_cache_path": None,
+                "user_agent": "pwned-cli",
+                "max_retries": None,
                 "on_progress": None,
             },
             {
@@ -2315,6 +2356,20 @@ class TestOfflineCommand:
         result = cli_runner.invoke(app, ["offline", "download", str(isolated_env / "hashes.txt")])
         assert result.exit_code == 6
         assert "HTTP 503 for prefix 00000" in result.output
+
+    def test_offline_download_value_error_handled_as_usage_error(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        async def fake_download(*args: Any, **kwargs: Any) -> DownloadStats:
+            raise ValueError("Offline directory contains SHA1 hashes; requested NTLM mode")
+
+        monkeypatch.setattr("pwned.cli_commands.download_offline_db", fake_download)
+        app = _make_cli()
+        result = cli_runner.invoke(
+            app, ["offline", "download", str(isolated_env / "ranges"), "--ntlm"]
+        )
+        assert result.exit_code == 2
+        assert "SHA1 hashes" in result.output
 
 
 class TestDomainReportCommand:
@@ -2659,7 +2714,7 @@ class TestMcpCommand:
         assert s2._ntlm is True
         assert isinstance(s2._cache, ResponseCache)
 
-    def test_mcp_offline_db_directory_and_short_ntlm(
+    def test_mcp_offline_db_directory_mode_and_short_ntlm(
         self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
     ) -> None:
         served: list[Any] = []
@@ -2671,8 +2726,17 @@ class TestMcpCommand:
         (db_dir / f"{prefix}.txt").write_text(f"{suffix}:1\n", encoding="utf-8")
 
         app = _make_cli()
-        result = cli_runner.invoke(app, ["mcp", "--offline-db", str(db_dir), "-n"])
-        assert result.exit_code == 0
-        assert len(served) == 1
+        res_short = cli_runner.invoke(
+            app, ["mcp", "--offline-db", str(db_dir), "--mode", "sha1", "-n"]
+        )
+        assert res_short.exit_code == 0
+        res_mode = cli_runner.invoke(app, ["mcp", "--offline-db", str(db_dir), "--mode", "ntlm"])
+        assert res_mode.exit_code == 0
+        assert len(served) == 2
         assert served[0]._offline_db == db_dir
         assert served[0]._ntlm is True
+        assert served[1]._offline_db == db_dir
+        assert served[1]._ntlm is True
+
+        res_bad = cli_runner.invoke(app, ["mcp", "--mode", "md5"])
+        assert res_bad.exit_code == 2

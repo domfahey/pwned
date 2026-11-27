@@ -19,9 +19,11 @@ from pwned.client import HIBPError
 from pwned.offline import OfflinePasswordsClient
 from pwned.offline_download import (
     DEFAULT_INDEX_FILENAME,
+    ETAG_CHECKPOINT_INTERVAL,
     MAX_PREFIX_EXCLUSIVE,
     DownloadStats,
     _load_etags,
+    _load_index,
     _retry_delay,
     download_offline_db,
 )
@@ -43,6 +45,7 @@ class TestConstantsAndModels:
 
     def test_default_index_filename(self) -> None:
         assert DEFAULT_INDEX_FILENAME == ".pwned-index.json"
+        assert ETAG_CHECKPOINT_INTERVAL == 4096
 
     def test_retry_delay_capped_without_overflow(self) -> None:
         assert [_retry_delay(i) for i in range(6)] == [0.5, 1.0, 2.0, 4.0, 8.0, 10.0]
@@ -577,9 +580,26 @@ class TestResumeAndETags:
         mixed_file = tmp_path / "mixed.json"
         mixed_file.write_text('{"00000": "etag0", "00001": 123}', encoding="utf-8")
         assert _load_etags(mixed_file) == {"00000": "etag0"}
+        assert _load_index(mixed_file) == ({"00000": "etag0"}, None)
+
+        structured = tmp_path / "structured.json"
+        structured.write_text(
+            json.dumps({"mode": "ntlm", "etags": {"00000": '"e0"', "00001": 99}}),
+            encoding="utf-8",
+        )
+        assert _load_index(structured) == ({"00000": '"e0"'}, "ntlm")
+        assert _load_etags(structured) == {"00000": '"e0"'}
+
+        bad_mode = tmp_path / "bad_mode.json"
+        bad_mode.write_text(
+            json.dumps({"mode": "md5", "etags": {"00000": '"e0"'}}),
+            encoding="utf-8",
+        )
+        assert _load_index(bad_mode) == ({"00000": '"e0"'}, None)
 
         # Directory path triggers OSError on read_text.
         assert _load_etags(tmp_path) == {}
+        assert _load_index(tmp_path) == ({}, None)
 
     def test_single_file_force_ignores_cached_shards_without_etag_cache(
         self, tmp_path: Path, httpx_mock: HTTPXMock
@@ -701,8 +721,11 @@ class TestDirectoryMode:
 
         index_path = output_dir / DEFAULT_INDEX_FILENAME
         assert json.loads(index_path.read_text(encoding="utf-8")) == {
-            "00000": '"e0"',
-            "00001": '"e1"',
+            "mode": "sha1",
+            "etags": {
+                "00000": '"e0"',
+                "00001": '"e1"',
+            },
         }
         # No .part work directory created in directory mode.
         assert not (tmp_path / f".{output_dir.name}.part").exists()
@@ -730,7 +753,10 @@ class TestDirectoryMode:
         stats = asyncio.run(run())
         assert stats.directory is True
         assert stats.hashes_written == 1
-        assert json.loads(custom_index.read_text(encoding="utf-8")) == {"00000": '"custom-e0"'}
+        assert json.loads(custom_index.read_text(encoding="utf-8")) == {
+            "mode": "sha1",
+            "etags": {"00000": '"custom-e0"'},
+        }
         assert not (output_dir / DEFAULT_INDEX_FILENAME).exists()
 
     def test_directory_incremental_refresh_handles_304_200_and_missing_etag(
@@ -773,9 +799,9 @@ class TestDirectoryMode:
         assert stats1.hashes_written == 4
 
         # Second run on existing indexed directory (even with overwrite=False):
-        # 00000 -> 304 Not Modified (cached, original file untouched)
-        # 00001 -> 200 OK with updated content and ETag "e1-new"
-        # 00002 -> no ETag in index -> fetched fresh without If-None-Match, gets "e2"
+        # 00000 -> 304 Not Modified (cached, original file untouched and not re-read)
+        # 00001 -> 200 OK with updated content and ETag "e1-new" (2 hashes written)
+        # 00002 -> no ETag in index -> fetched fresh without If-None-Match, gets "e2" (1 hash)
         httpx_mock.add_response(url=f"{BASE_URL}/range/00000", status_code=304)
         httpx_mock.add_response(
             url=f"{BASE_URL}/range/00001",
@@ -793,7 +819,7 @@ class TestDirectoryMode:
         assert stats2.prefixes_total == 3
         assert stats2.prefixes_cached == 1
         assert stats2.prefixes_downloaded == 2
-        assert stats2.hashes_written == 5
+        assert stats2.hashes_written == 3
 
         reqs = httpx_mock.get_requests()[3:]
         by_path = {req.url.path: req for req in reqs}
@@ -803,9 +829,12 @@ class TestDirectoryMode:
 
         index_path = output_dir / DEFAULT_INDEX_FILENAME
         assert json.loads(index_path.read_text(encoding="utf-8")) == {
-            "00000": '"e0"',
-            "00001": '"e1-new"',
-            "00002": '"e2"',
+            "mode": "sha1",
+            "etags": {
+                "00000": '"e0"',
+                "00001": '"e1-new"',
+                "00002": '"e2"',
+            },
         }
         assert (output_dir / "00000.txt").read_text(encoding="utf-8") == (
             f"{'A' * 35}:1\n{'E' * 35}:4\n"
@@ -870,7 +899,10 @@ class TestDirectoryMode:
         assert all("If-None-Match" not in req.headers for req in reqs)
 
         index_path = output_dir / DEFAULT_INDEX_FILENAME
-        assert json.loads(index_path.read_text(encoding="utf-8")) == {"00000": '"e0-fresh"'}
+        assert json.loads(index_path.read_text(encoding="utf-8")) == {
+            "mode": "sha1",
+            "etags": {"00000": '"e0-fresh"'},
+        }
         assert (output_dir / "00000.txt").read_text(encoding="utf-8") == f"{'A' * 35}:100\n"
         assert (output_dir / "00001.txt").read_text(encoding="utf-8") == f"{'B' * 35}:200\n"
 
@@ -904,7 +936,10 @@ class TestDirectoryMode:
         reqs = httpx_mock.get_requests()
         assert len(reqs) == 1
         assert "If-None-Match" not in reqs[0].headers
-        assert json.loads(index_path.read_text(encoding="utf-8")) == {"00000": '"rebuilt"'}
+        assert json.loads(index_path.read_text(encoding="utf-8")) == {
+            "mode": "sha1",
+            "etags": {"00000": '"rebuilt"'},
+        }
 
     @pytest.mark.parametrize("overwrite", [False, True])
     def test_directory_safety_existing_file_raises_file_exists_error(
@@ -980,7 +1015,10 @@ class TestDirectoryMode:
         assert stats.hashes_written == 1
         assert (output_dir / "00000.txt").read_text(encoding="utf-8") == f"{'A' * 35}:5\n"
         index_path = output_dir / DEFAULT_INDEX_FILENAME
-        assert json.loads(index_path.read_text(encoding="utf-8")) == {"00000": '"e0"'}
+        assert json.loads(index_path.read_text(encoding="utf-8")) == {
+            "mode": "sha1",
+            "etags": {"00000": '"e0"'},
+        }
 
     def test_directory_interrupted_initial_download_preserves_index_and_resumes_without_overwrite(
         self, tmp_path: Path, httpx_mock: HTTPXMock
@@ -1013,7 +1051,10 @@ class TestDirectoryMode:
 
         index_path = output_dir / DEFAULT_INDEX_FILENAME
         assert index_path.exists()
-        assert json.loads(index_path.read_text(encoding="utf-8")) == {"00000": '"e0"'}
+        assert json.loads(index_path.read_text(encoding="utf-8")) == {
+            "mode": "sha1",
+            "etags": {"00000": '"e0"'},
+        }
 
         httpx_mock.add_response(
             url=f"{BASE_URL}/range/00000",
@@ -1039,12 +1080,197 @@ class TestDirectoryMode:
         stats = asyncio.run(run_resume())
         assert stats.prefixes_cached == 1
         assert stats.prefixes_downloaded == 1
-        assert stats.hashes_written == 2
+        assert stats.hashes_written == 1
         reqs = httpx_mock.get_requests()
         assert reqs[2].headers["If-None-Match"] == '"e0"'
         assert json.loads(index_path.read_text(encoding="utf-8")) == {
-            "00000": '"e0"',
-            "00001": '"e1"',
+            "mode": "sha1",
+            "etags": {
+                "00000": '"e0"',
+                "00001": '"e1"',
+            },
+        }
+
+    def test_directory_304_refresh_never_reads_cached_prefix_files(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        output_dir = tmp_path / "cached_dir"
+        output_dir.mkdir()
+        shard0 = output_dir / "00000.txt"
+        shard0.write_text(f"{'A' * 35}:5\n", encoding="utf-8")
+        (output_dir / DEFAULT_INDEX_FILENAME).write_text(
+            json.dumps({"mode": "sha1", "etags": {"00000": '"e0"'}}),
+            encoding="utf-8",
+        )
+        httpx_mock.add_response(url=f"{BASE_URL}/range/00000", status_code=304)
+
+        original_read_text = Path.read_text
+        read_paths: list[Path] = []
+
+        def tracking_read_text(self: Path, *args: object, **kwargs: object) -> str:
+            read_paths.append(self)
+            return original_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+        async def run() -> DownloadStats:
+            with patch.object(Path, "read_text", tracking_read_text):
+                return await download_offline_db(
+                    output_dir,
+                    start_prefix=0,
+                    end_prefix=1,
+                    directory=True,
+                )
+
+        stats = asyncio.run(run())
+        assert stats.prefixes_cached == 1
+        assert stats.prefixes_downloaded == 0
+        assert stats.hashes_written == 0
+        assert shard0 not in read_paths
+
+    def test_directory_shard_write_is_atomic_on_error(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        output_dir = tmp_path / "atomic_dir"
+        output_dir.mkdir()
+        shard0 = output_dir / "00000.txt"
+        shard0.write_text(f"{'A' * 35}:1\n", encoding="utf-8")
+        (output_dir / DEFAULT_INDEX_FILENAME).write_text(
+            json.dumps({"mode": "sha1", "etags": {"00000": '"old"'}}),
+            encoding="utf-8",
+        )
+
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00000",
+            text=f"{'B' * 35}:99\n",
+            headers={"ETag": '"new"'},
+        )
+
+        real_replace = os.replace
+
+        def fail_shard_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+            if Path(dst) == shard0:
+                raise OSError("disk full on shard")
+            real_replace(src, dst)
+
+        async def run() -> None:
+            with patch.object(os, "replace", side_effect=fail_shard_replace):
+                await download_offline_db(
+                    output_dir,
+                    start_prefix=0,
+                    end_prefix=1,
+                    directory=True,
+                )
+
+        with pytest.raises(OSError, match="disk full on shard"):
+            asyncio.run(run())
+
+        assert shard0.read_text(encoding="utf-8") == f"{'A' * 35}:1\n"
+        assert list(output_dir.glob("*.tmp")) == []
+
+    def test_directory_periodic_etag_checkpointing(
+        self, tmp_path: Path, httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(offline_download_module, "ETAG_CHECKPOINT_INTERVAL", 2)
+        for i in range(4):
+            httpx_mock.add_response(
+                url=f"{BASE_URL}/range/{i:05X}",
+                text=f"{'A' * 35}:{i + 1}\n",
+                headers={"ETag": f'"e{i}"'},
+            )
+
+        output_dir = tmp_path / "checkpoint_dir"
+        saved_snapshots: list[int] = []
+        real_save_etags = offline_download_module._save_etags
+
+        def spy_save_etags(path: Path, etags: dict[str, str], *, mode: str | None = None) -> None:
+            saved_snapshots.append(len(etags))
+            real_save_etags(path, etags, mode=mode)
+
+        monkeypatch.setattr(offline_download_module, "_save_etags", spy_save_etags)
+
+        async def run() -> DownloadStats:
+            return await download_offline_db(
+                output_dir,
+                start_prefix=0,
+                end_prefix=4,
+                directory=True,
+                concurrency=1,
+            )
+
+        stats = asyncio.run(run())
+        assert stats.prefixes_downloaded == 4
+        # Initial empty index (0), checkpoint at 2, checkpoint at 4, final flush at 4.
+        assert saved_snapshots == [0, 2, 4, 4]
+
+    def test_directory_mode_mismatch_raises_unless_forced_or_no_resume(
+        self, tmp_path: Path, httpx_mock: HTTPXMock
+    ) -> None:
+        output_dir = tmp_path / "mode_dir"
+        output_dir.mkdir()
+        (output_dir / "00000.txt").write_text(f"{'A' * 35}:1\n", encoding="utf-8")
+        index_path = output_dir / DEFAULT_INDEX_FILENAME
+        index_path.write_text(
+            json.dumps({"mode": "sha1", "etags": {"00000": '"e0"'}}),
+            encoding="utf-8",
+        )
+
+        async def run_mismatch() -> None:
+            await download_offline_db(
+                output_dir,
+                start_prefix=0,
+                end_prefix=1,
+                directory=True,
+                ntlm=True,
+            )
+
+        with pytest.raises(ValueError, match="SHA1 hashes.*requested NTLM mode"):
+            asyncio.run(run_mismatch())
+        assert httpx_mock.get_requests() == []
+
+        httpx_mock.add_response(
+            url=httpx.URL(f"{BASE_URL}/range/00000", params={"mode": "ntlm"}),
+            text=f"{'B' * 27}:7\n",
+            headers={"ETag": '"ntlm-0"'},
+        )
+
+        async def run_force_rebuild() -> DownloadStats:
+            return await download_offline_db(
+                output_dir,
+                start_prefix=0,
+                end_prefix=1,
+                directory=True,
+                ntlm=True,
+                force=True,
+            )
+
+        stats = asyncio.run(run_force_rebuild())
+        assert stats.ntlm is True
+        assert stats.prefixes_downloaded == 1
+        assert json.loads(index_path.read_text(encoding="utf-8")) == {
+            "mode": "ntlm",
+            "etags": {"00000": '"ntlm-0"'},
+        }
+
+        httpx_mock.add_response(
+            url=f"{BASE_URL}/range/00000",
+            text=f"{'C' * 35}:9\n",
+            headers={"ETag": '"sha1-0"'},
+        )
+
+        async def run_no_resume_rebuild() -> DownloadStats:
+            return await download_offline_db(
+                output_dir,
+                start_prefix=0,
+                end_prefix=1,
+                directory=True,
+                ntlm=False,
+                resume=False,
+            )
+
+        stats2 = asyncio.run(run_no_resume_rebuild())
+        assert stats2.ntlm is False
+        assert json.loads(index_path.read_text(encoding="utf-8")) == {
+            "mode": "sha1",
+            "etags": {"00000": '"sha1-0"'},
         }
 
     def test_directory_safety_empty_existing_directory_succeeds_when_overwrite_false(
@@ -1402,6 +1628,7 @@ class TestRetriesErrorsAndConcurrency:
         with pytest.raises(OSError, match="disk full"):
             asyncio.run(run())
 
-        # Original file preserved and no leftover .tmp files.
+        # Original file preserved and no leftover .tmp files in output or shard staging dirs.
         assert output.read_text(encoding="utf-8") == "existing"
         assert list(tmp_path.glob("*.tmp")) == []
+        assert list((output.parent / f".{output.name}.part").rglob("*.tmp")) == []
