@@ -14,7 +14,7 @@ pwned offline download /data/pwned-sha1 --parallelism 32
 pwned offline download /data/pwned-sha1
 
 # Ignore saved ETags and force a full rebuild of the directory and index
-pwned offline download /data/pwned-sha1 --force
+pwned offline download /data/pwned-sha1 --force-refresh
 
 # Download NTLM corpus into a single merged sorted file
 pwned offline download /data/pwned-passwords-ntlm.txt \
@@ -35,13 +35,13 @@ pwned offline download /data/pwned-passwords-ntlm.txt \
 | `--etag-cache FILE` | `None` | Custom JSON file storing ETags for conditional `If-None-Match` / `HTTP 304` refreshes (defaults to `<OUTPUT>/.pwned-index.json` in directory mode) |
 | `--max-retries INT` | `None` | Maximum retry attempts per prefix on transient errors (omit for unlimited retries; `0` to disable) |
 | `-o`, `--overwrite` | `False` | Permit replacing an existing single `OUTPUT` file or a non-empty directory without a saved index |
-| `--force` | `False` | Global option: ignore cached shards and saved ETags, forcing a full re-download and rebuilding the ETag index |
+| `--force-refresh` | `False` | Ignore cached shards and saved ETags, forcing a full re-download and rebuilding the ETag index |
 
 How it works:
-- **Per-prefix directory mode (CLI default):** Writes flat `00000.txt`–`FFFFF.txt` range files directly under `OUTPUT` and stores prefix ETags in `.pwned-index.json` (or `--etag-cache`), directly compatible with `hibp password download`. Subsequent runs send `If-None-Match` so unchanged ranges return `HTTP 304 Not Modified`. Pass `--overwrite` / `-o` to write into a non-empty directory that has no saved index, or global `--force` to ignore saved ETags and rebuild the index from scratch.
-- **Single-file mode (`--single` / `-s`):** Stages partial prefixes in 256 buckets under `.<output>.part/<00..FF>/<PREFIX>.txt` so filesystems (APFS/NTFS/ext4) never hold 1M staging files in a single directory, then merges shards in strict hexadecimal order (with zero-count entries stripped) into a temp file and atomically swaps it into `OUTPUT` via `os.replace()`. Pass `--overwrite` / `-o` when replacing an existing single file.
+- **Per-prefix directory mode (CLI default):** Atomically writes flat `00000.txt`–`FFFFF.txt` range files directly under `OUTPUT` and checkpoints hash mode (`sha1`/`ntlm`) plus prefix ETags in `.pwned-index.json` (or `--etag-cache`), directly compatible with `hibp password download`. Subsequent runs send `If-None-Match` so unchanged ranges return `HTTP 304 Not Modified` without re-reading cached files from disk. Mixing SHA-1 and NTLM modes against an indexed directory is rejected unless rebuilding with `--force-refresh` or `--no-resume`. Pass `--overwrite` / `-o` to write into a non-empty directory that has no saved index.
+- **Single-file mode (`--single` / `-s`):** Atomically stages partial prefixes in 256 buckets under `.<output>.part/<00..FF>/<PREFIX>.txt` so filesystems (APFS/NTFS/ext4) never hold 1M staging files in a single directory, then merges shards in strict hexadecimal order (with zero-count entries stripped) into a temp file and atomically swaps it into `OUTPUT` via `os.replace()`. Pass `--overwrite` / `-o` when replacing an existing single file.
 - **Bounded worker pool & TTY progress:** Uses a fixed-size async worker pool (`--concurrency` / `--parallelism` / `-p`) to keep memory flat across all 1,048,576 prefixes while reporting live progress to `stderr` when attached to a TTY (so `--json`/`--format` stdout stays clean).
-- **Download statistics (`DownloadStats`):** Both CLI output and `download_offline_db()` return a `DownloadStats` model with `prefixes_total`, `prefixes_downloaded`, `prefixes_cached`, `hashes_written`, `elapsed_seconds`, `ranges_per_second`, `output_path`, `ntlm`, and `directory`.
+- **Download statistics (`DownloadStats`):** Both CLI output and `download_offline_db()` return a `DownloadStats` model with `prefixes_total`, `prefixes_downloaded`, `prefixes_cached`, `hashes_written` (hashes written during that run), `elapsed_seconds`, `ranges_per_second`, `output_path`, `ntlm`, and `directory`.
 
 ## Offline Lookups (`--offline-db` & `OfflinePasswordsClient`)
 

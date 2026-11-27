@@ -22,6 +22,7 @@ from pwned.passwords import BASE_URL
 
 MAX_PREFIX_EXCLUSIVE = 0x100000
 DEFAULT_INDEX_FILENAME = ".pwned-index.json"
+ETAG_CHECKPOINT_INTERVAL = 32_768
 
 
 class DownloadStats(_HIBPBase):
@@ -56,23 +57,35 @@ def _validate_options(
         )
 
 
-def _load_etags(path: Path) -> dict[str, str]:
-    """Load a prefix -> ETag mapping from JSON, returning {} if missing or invalid."""
+def _load_index(path: Path) -> tuple[dict[str, str], str | None]:
+    """Load (etags, mode) from an index/ETag JSON file, returning ({}, None) if invalid."""
     if not path.exists():
-        return {}
+        return {}, None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {}
+        return {}, None
     if not isinstance(raw, dict):
-        return {}
-    return {str(k): v for k, v in raw.items() if isinstance(v, str)}
+        return {}, None
+    nested_etags = raw.get("etags")
+    if isinstance(nested_etags, dict):
+        raw_mode = raw.get("mode")
+        mode = raw_mode if raw_mode in ("sha1", "ntlm") else None
+        return {str(k): v for k, v in nested_etags.items() if isinstance(v, str)}, mode
+    return {str(k): v for k, v in raw.items() if isinstance(v, str)}, None
 
 
-def _save_etags(path: Path, etags: dict[str, str]) -> None:
-    """Atomically persist a prefix -> ETag mapping as JSON."""
+def _load_etags(path: Path) -> dict[str, str]:
+    """Load a prefix -> ETag mapping from JSON, returning {} if missing or invalid."""
+    return _load_index(path)[0]
+
+
+def _save_etags(path: Path, etags: dict[str, str], *, mode: str | None = None) -> None:
+    """Atomically persist a prefix -> ETag mapping (with optional hash mode) as compact JSON."""
+    sorted_etags = dict(sorted(etags.items()))
+    payload: object = {"mode": mode, "etags": sorted_etags} if mode is not None else sorted_etags
     with _atomic_open(path) as handle:
-        handle.write(json.dumps(etags, sort_keys=True, indent=2))
+        handle.write(json.dumps(payload, separators=(",", ":")))
 
 
 def _retry_delay(attempt: int) -> float:
@@ -188,22 +201,39 @@ async def download_offline_db(
             )
         index_path = etag_cache_path
 
+    requested_mode = "ntlm" if ntlm else "sha1"
+    index_mode: str | None = requested_mode if directory else None
+    existing_etags, existing_mode = (
+        _load_index(index_path) if index_path is not None else ({}, None)
+    )
+    if (
+        directory
+        and existing_mode is not None
+        and existing_mode != requested_mode
+        and resume
+        and not force
+    ):
+        raise ValueError(
+            f"Offline directory {output_path} contains {existing_mode.upper()} hashes; "
+            f"requested {requested_mode.upper()} mode "
+            "(use --force-refresh or --no-resume to rebuild)"
+        )
+
     started = time.monotonic()
     work_dir = output_path.parent / f".{output_path.name}.part"
     if not directory and (not resume or force) and work_dir.exists():
         shutil.rmtree(work_dir)
 
-    if force or not resume:
-        etags: dict[str, str] = {}
-    else:
-        etags = _load_etags(index_path) if index_path is not None else {}
-    if dir_index is not None and not dir_index.exists():
-        _save_etags(dir_index, etags)
+    etags: dict[str, str] = {} if (force or not resume) else existing_etags
+    if dir_index is not None and (not dir_index.exists() or force or not resume):
+        _save_etags(dir_index, etags, mode=index_mode)
     params: dict[str, str] = {"mode": "ntlm"} if ntlm else {}
     total_prefixes = end_prefix - start_prefix
 
     prefixes_downloaded = 0
     prefixes_cached = 0
+    hashes_written = 0
+    dirty_etags = 0
     completed = 0
 
     owns_client = client is None
@@ -219,7 +249,7 @@ async def download_offline_db(
     )
 
     async def _process_prefix(prefix_int: int) -> None:
-        nonlocal prefixes_downloaded, prefixes_cached, completed
+        nonlocal prefixes_downloaded, prefixes_cached, hashes_written, dirty_etags, completed
         prefix = f"{prefix_int:05X}"
         shard_path = (
             output_path / f"{prefix}.txt" if directory else work_dir / prefix[:2] / f"{prefix}.txt"
@@ -261,11 +291,17 @@ async def download_offline_db(
                 if resp.status_code != 200:
                     raise HIBPError(f"HTTP {resp.status_code} for prefix {prefix}")
 
-                shard_path.parent.mkdir(parents=True, exist_ok=True)
-                shard_path.write_text(resp.text, encoding="utf-8", newline="")
+                with _atomic_open(shard_path) as handle:
+                    handle.write(resp.text)
+                if directory:
+                    hashes_written += len(_parse_range_response(resp.text))
                 new_etag = resp.headers.get("etag")
                 if new_etag:
                     etags[prefix] = new_etag
+                    dirty_etags += 1
+                    if index_path is not None and dirty_etags >= ETAG_CHECKPOINT_INTERVAL:
+                        _save_etags(index_path, etags, mode=index_mode)
+                        dirty_etags = 0
                 prefixes_downloaded += 1
                 break
 
@@ -293,18 +329,9 @@ async def download_offline_db(
         if owns_client:
             await active_client.aclose()
         if index_path is not None:
-            _save_etags(index_path, etags)
+            _save_etags(index_path, etags, mode=index_mode)
 
-    if directory:
-        hashes_written = sum(
-            len(
-                _parse_range_response(
-                    (output_path / f"{prefix_int:05X}.txt").read_text(encoding="utf-8")
-                )
-            )
-            for prefix_int in range(start_prefix, end_prefix)
-        )
-    else:
+    if not directory:
         hashes_written = _merge_shards(output_path, work_dir, start_prefix, end_prefix)
 
     if index_path is None:

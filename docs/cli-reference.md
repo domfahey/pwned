@@ -14,7 +14,7 @@ Global options are accepted **before or after** any subcommand:
 | `--json` | `False` | Shorthand for `--format json` (cannot be combined with `--markdown` or another `--format`) |
 | `--markdown` | `False` | Shorthand for `--format markdown` (cannot be combined with `--json` or another `--format`) |
 | `--outfile PATH` | `None` | Write formatted UTF-8 output atomically to a file in an existing directory (`auth` commands always write to stdout) |
-| `--force` | `False` | Overwrite an existing `--outfile` (or ignore saved ETags and force a full rebuild on `offline download`) |
+| `--force` | `False` | Overwrite an existing `--outfile` |
 | `--cache / --no-cache` | `False` | Cache public endpoints (`/breaches`, `/dataclasses*`) and `/range/{prefix}` lookups locally |
 | `--version` | — | Show CLI version and exit |
 
@@ -73,8 +73,8 @@ Check one or more passwords or pre-computed hashes against Pwned Passwords (*k*-
 
 | Option | Default | Description |
 |---|---|---|
-| `--stdin` | `False` | Read single or multi-line passwords/hashes from stdin |
-| `--file FILE` | `None` | Batch-check passwords/hashes (one per line) from file, preserving blank lines and exact 1-based line numbers |
+| `--stdin` | `False` | Read single or multi-line passwords/hashes from stdin (skips blank lines while preserving 1-based line numbers in batch mode) |
+| `--file FILE` | `None` | Batch-check passwords/hashes (one per line) from file, skipping blank lines while preserving exact 1-based line numbers |
 | `--mode [sha1\|ntlm]` | `sha1` | Hash algorithm mode: `sha1` or `ntlm` |
 | `-n`, `--ntlm` | `False` | Use NTLM hash (`?mode=ntlm`) instead of SHA-1 (overrides `--mode`) |
 | `--pad / --no-pad` | `True` | Send `Add-Padding: true` header for traffic-analysis resistance (`--no-pad` to disable) |
@@ -103,7 +103,7 @@ Audit a password-manager export, browser CSV, Active Directory `pwdump` file, or
 Download an offline Pwned Passwords corpus (`00000`–`FFFFF`) as a per-prefix range directory (`00000.txt`–`FFFFF.txt`, default) or a single merged sorted dump (`--single` / `-s`). See [Offline Lookups & Local MCP Server](offline-and-mcp.md).
 
 #### `pwned mcp`
-Start the local zero-dependency stdio MCP server (`--offline-db` accepting either a single sorted dump file or a per-prefix range directory `00000.txt`–`FFFFF.txt`, `--ntlm`, global `--cache`). See [Offline Lookups & Local MCP Server](offline-and-mcp.md).
+Start the local zero-dependency stdio MCP server (`--offline-db` accepting either a single sorted dump file or a per-prefix range directory `00000.txt`–`FFFFF.txt`, `--mode [sha1|ntlm]`, `-n`/`--ntlm`, global `--cache`). See [Offline Lookups & Local MCP Server](offline-and-mcp.md).
 
 #### `pwned breach NAME`
 Fetch full metadata for a single breach by its stable `Name` (e.g., `pwned breach Adobe`).

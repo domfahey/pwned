@@ -145,7 +145,7 @@ class _GlobalOptionGroup(click.Group):
 @click.option(
     "--force",
     is_flag=True,
-    help="Overwrite an existing --outfile (or ignore cached ETags on offline download).",
+    help="Overwrite an existing --outfile.",
 )
 @click.pass_context
 def cli(
@@ -849,6 +849,13 @@ def stealer_domain(ctx: click.Context, domain: str, fail_if_pwned: bool) -> None
 # --- Password command ---
 
 
+def _open_offline_client(offline_db: Path, *, ntlm: bool) -> OfflinePasswordsClient:
+    try:
+        return OfflinePasswordsClient(offline_db, ntlm=ntlm)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+
 def _check_single_password(
     ctx: click.Context,
     single_password: str,
@@ -862,7 +869,7 @@ def _check_single_password(
 ) -> None:
     s = ctx.obj["settings"]
     client_cm: OfflinePasswordsClient | PwnedPasswordsClient = (
-        OfflinePasswordsClient(offline_db, ntlm=ntlm)
+        _open_offline_client(offline_db, ntlm=ntlm)
         if offline_db is not None
         else PwnedPasswordsClient(user_agent=s.user_agent, cache=get_cache(ctx))
     )
@@ -939,7 +946,7 @@ def _check_batch_passwords(
     on_progress = _password_progress if _is_stderr_tty() else None
     start = time.monotonic()
     if offline_db is not None:
-        with OfflinePasswordsClient(offline_db, ntlm=ntlm) as client:
+        with _open_offline_client(offline_db, ntlm=ntlm) as client:
             results = batch_check_passwords(
                 passwords,
                 client,
@@ -1086,7 +1093,7 @@ def password(
             deduplicate=False,
             skip_empty=False,
         )
-        if not passwords:
+        if not any(passwords):
             raise click.UsageError("No passwords provided.")
         _check_batch_passwords(
             ctx,
@@ -1104,10 +1111,17 @@ def password(
         return
 
     if from_stdin:
-        lines = parse_input_lines(sys.stdin, strip=False, ignore_comments=False, deduplicate=False)
-        if not lines:
+        lines = parse_input_lines(
+            sys.stdin,
+            strip=False,
+            ignore_comments=False,
+            deduplicate=False,
+            skip_empty=False,
+        )
+        non_empty = [line for line in lines if line]
+        if not non_empty:
             raise click.UsageError("No password provided on stdin.")
-        if len(lines) > 1:
+        if len(non_empty) > 1:
             _check_batch_passwords(
                 ctx,
                 lines,
@@ -1122,7 +1136,7 @@ def password(
                 cache=get_cache(ctx),
             )
             return
-        single_password = lines[0]
+        single_password = non_empty[0]
     elif password is None:
         single_password = (
             click.prompt("Hash", hide_input=False, err=True)

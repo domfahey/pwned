@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from pathlib import Path
 from typing import BinaryIO
 
@@ -11,6 +12,36 @@ _HEX_CHARS = frozenset("0123456789ABCDEF")
 _SHA1_HEX_LEN = 40
 _NTLM_HEX_LEN = 32
 _BACKWARD_CHUNK_SIZE = 256
+_INDEX_FILENAME = ".pwned-index.json"
+_INDEX_SNIFF_BYTES = 256
+_INDEX_HEAD_MODE_RE = re.compile(r'^\{\s*"mode"\s*:\s*"(sha1|ntlm)"\s*[,}]')
+_INDEX_TAIL_MODE_RE = re.compile(r',\s*"mode"\s*:\s*"(sha1|ntlm)"\s*\}\s*$')
+
+
+def _read_directory_mode(directory: Path) -> str | None:
+    """Read optional hash mode metadata ('sha1' or 'ntlm') in O(1) bounded bytes."""
+    index_path = directory / _INDEX_FILENAME
+    if not index_path.is_file():
+        return None
+    try:
+        with index_path.open("rb") as handle:
+            head_bytes = handle.read(_INDEX_SNIFF_BYTES)
+            head = head_bytes.decode("utf-8", errors="ignore").lstrip()
+            if not head.startswith("{"):
+                return None
+            head_match = _INDEX_HEAD_MODE_RE.match(head)
+            if head_match is not None:
+                return head_match.group(1)
+            size = os.fstat(handle.fileno()).st_size
+            if size > len(head_bytes):
+                handle.seek(size - _INDEX_SNIFF_BYTES)
+                tail = handle.read(_INDEX_SNIFF_BYTES).decode("utf-8", errors="ignore")
+            else:
+                tail = head
+    except OSError:
+        return None
+    tail_match = _INDEX_TAIL_MODE_RE.search(tail)
+    return tail_match.group(1) if tail_match is not None else None
 
 
 def _hash_password(password: str, *, ntlm: bool) -> str:
@@ -69,6 +100,13 @@ class OfflinePasswordsClient:
         self._ntlm = ntlm
         self._file: BinaryIO | None
         if self._path.is_dir():
+            index_mode = _read_directory_mode(self._path)
+            expected_mode = "ntlm" if ntlm else "sha1"
+            if index_mode is not None and index_mode != expected_mode:
+                raise ValueError(
+                    f"Offline directory {self._path} contains {index_mode.upper()} hashes, "
+                    f"but client was opened in {expected_mode.upper()} mode"
+                )
             self._is_dir = True
             self._file = None
         else:

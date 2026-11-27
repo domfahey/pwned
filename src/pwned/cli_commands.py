@@ -577,7 +577,11 @@ def audit(
     settings = ctx.obj["settings"]
     effective_ntlm = ntlm or mode == "ntlm" or source == "pwdump"
     if offline_db is not None:
-        with OfflinePasswordsClient(offline_db, ntlm=effective_ntlm) as offline_client:
+        try:
+            offline_cm = OfflinePasswordsClient(offline_db, ntlm=effective_ntlm)
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+        with offline_cm as offline_client:
             summary = audit_entries(
                 entries,
                 offline_client,
@@ -688,6 +692,12 @@ def offline() -> None:
     default=False,
     help="Permit replacing an existing single file or non-empty directory without an index.",
 )
+@click.option(
+    "--force-refresh",
+    is_flag=True,
+    default=False,
+    help="Ignore cached shards and saved ETags, forcing a full re-download.",
+)
 @click.pass_context
 @handle_errors
 def offline_download(
@@ -701,28 +711,31 @@ def offline_download(
     etag_cache: Path | None,
     max_retries: int | None,
     overwrite: bool,
+    force_refresh: bool,
 ) -> None:
     """Download an offline Pwned Passwords hash dump (per-prefix directory by default,
-    or --single file; pass global --force to ignore saved ETags).
+    or --single file; pass --force-refresh to ignore saved ETags).
     """
     settings = ctx.obj["settings"]
     effective_ntlm = ntlm or mode == "ntlm"
-    force = bool(ctx.obj.get("force", False))
-    stats = asyncio.run(
-        download_offline_db(
-            output,
-            ntlm=effective_ntlm,
-            directory=not single,
-            concurrency=concurrency,
-            resume=resume,
-            force=force,
-            overwrite=overwrite,
-            etag_cache_path=etag_cache,
-            user_agent=settings.user_agent,
-            max_retries=max_retries,
-            on_progress=_offline_progress if _is_stderr_tty() else None,
+    try:
+        stats = asyncio.run(
+            download_offline_db(
+                output,
+                ntlm=effective_ntlm,
+                directory=not single,
+                concurrency=concurrency,
+                resume=resume,
+                force=force_refresh,
+                overwrite=overwrite,
+                etag_cache_path=etag_cache,
+                user_agent=settings.user_agent,
+                max_retries=max_retries,
+                on_progress=_offline_progress if _is_stderr_tty() else None,
+            )
         )
-    )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
     render_output(ctx, stats)
 
 
@@ -872,21 +885,29 @@ def monitor(
     help="Local HIBP password dump file or per-prefix directory for offline MCP lookups.",
 )
 @click.option(
+    "--mode",
+    type=click.Choice(_HASH_MODES),
+    default="sha1",
+    show_default=True,
+    help="Default hash algorithm for MCP lookups: sha1 or ntlm.",
+)
+@click.option(
     "--ntlm",
     "-n",
     is_flag=True,
-    help="Default to NTLM hash mode for MCP lookups.",
+    help="Default to NTLM hash mode for MCP lookups (overrides --mode).",
 )
 @click.pass_context
 @handle_errors
-def mcp(ctx: click.Context, offline_db: Path | None, ntlm: bool) -> None:
+def mcp(ctx: click.Context, offline_db: Path | None, mode: str, ntlm: bool) -> None:
     """Run the local stdio MCP server for AI assistants."""
     settings = ctx.obj["settings"]
+    effective_ntlm = ntlm or mode == "ntlm"
     server = MCPServer(
         api_key=settings.get_api_key(),
         user_agent=settings.user_agent,
         offline_db=offline_db,
-        ntlm=ntlm,
+        ntlm=effective_ntlm,
         cache=get_cache(ctx),
     )
     serve_stdio(server)
