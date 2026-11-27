@@ -111,7 +111,7 @@ API key precedence (highest first): `--api-key` CLI flag > `HIBP_API_KEY` env va
 
 ## CLI Overview
 
-Commands grouped by HIBP subscription tier (see [CLI Reference](docs/cli-reference.md) for all flags and examples):
+Commands are grouped by HIBP subscription tier. Protected commands (`Core` and above) require an [HIBP API key](https://haveibeenpwned.com/API/Key) configured via `pwned auth set` (see [CLI Reference](docs/cli-reference.md) for all flags and examples).
 
 | Plan Tier | Commands |
 |---|---|
