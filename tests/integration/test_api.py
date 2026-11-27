@@ -6,7 +6,7 @@ import hashlib
 import pytest
 
 from pwned.async_client import AsyncHIBPClient
-from pwned.client import HIBPClient, NotFoundError
+from pwned.client import HIBPClient, NotFoundError, UnauthorizedError
 from pwned.models import Breach, DataClassDescription
 from pwned.passwords import AsyncPwnedPasswordsClient, PwnedPasswordsClient
 
@@ -27,6 +27,12 @@ class TestPublicEndpoints:
             breaches = client.get_breaches()
             assert len(breaches) > 0
             assert breaches[0].name
+
+    def test_get_breaches_exclude_unverified(self) -> None:
+        with HIBPClient(user_agent="pwned-integration-test") as client:
+            breaches = client.get_breaches(include_unverified=False)
+            assert len(breaches) > 0
+            assert all(b.is_verified is True for b in breaches)
 
     def test_get_breach_adobe(self) -> None:
         with HIBPClient(user_agent="pwned-integration-test") as client:
@@ -69,6 +75,35 @@ class TestAuthenticatedEndpoints:
         with HIBPClient(api_key=TEST_API_KEY, user_agent="pwned-integration-test") as client:
             breaches = client.get_account_breaches(f"multiple-breaches@{TEST_DOMAIN}")
             assert len(breaches) >= 3
+
+    def test_account_domain_filter(self) -> None:
+        with HIBPClient(api_key=TEST_API_KEY, user_agent="pwned-integration-test") as client:
+            breaches = client.get_account_breaches(
+                f"multiple-breaches@{TEST_DOMAIN}", domain="adobe.com"
+            )
+            assert [b.name for b in breaches] == ["Adobe"]
+
+    def test_malformed_api_key_error_detail(self) -> None:
+        with (
+            HIBPClient(
+                api_key="not-a-valid-key",
+                user_agent="pwned-integration-test",
+                max_retries=0,
+            ) as client,
+            pytest.raises(UnauthorizedError, match="improperly formed"),
+        ):
+            client.get_account_breaches(f"account-exists@{TEST_DOMAIN}")
+
+    def test_invalid_hex_api_key_error_detail(self) -> None:
+        with (
+            HIBPClient(
+                api_key="11111111111111111111111111111111",
+                user_agent="pwned-integration-test",
+                max_retries=0,
+            ) as client,
+            pytest.raises(UnauthorizedError, match="invalid"),
+        ):
+            client.get_account_breaches("test@example.com")
 
 
 class TestPwnedPasswords:

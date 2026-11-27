@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -167,6 +168,14 @@ class TestDataclassesCommand:
         assert lines[0] == "value"
         assert "Email addresses" in lines
 
+    def test_dataclasses_with_cache(self, tmp_path: Path) -> None:
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": str(tmp_path)}):
+            first = _run_json("--cache", "dataclasses")
+            cache_files = list((tmp_path / "pwned").glob("*.json"))
+            assert len(cache_files) >= 1
+            second = _run_json("--cache", "dataclasses")
+        assert first == second
+
 
 # ── Account breaches (test API key) ──────────────────────────────────
 
@@ -196,6 +205,17 @@ class TestAccountCommand:
         data = _run_json("--api-key", TEST_KEY, "account", f"multiple-breaches@{DOMAIN}")
         assert isinstance(data, list)
         assert len(data) >= 3
+
+    def test_account_domain_filter(self) -> None:
+        data = _run_json(
+            "--api-key",
+            TEST_KEY,
+            "account",
+            f"multiple-breaches@{DOMAIN}",
+            "--domain",
+            "adobe.com",
+        )
+        assert data == [{"Name": "Adobe"}]
 
     def test_spam_list_only(self) -> None:
         data = _run_json(
@@ -332,6 +352,53 @@ class TestAccountCommand:
         assert code == 0
         assert "Clean" in out
 
+    def test_account_markdown_and_html(self) -> None:
+        md = _run_ok(
+            "--format",
+            "markdown",
+            "--api-key",
+            TEST_KEY,
+            "account",
+            f"account-exists@{DOMAIN}",
+        )
+        assert "|" in md
+        assert "Adobe" in md
+
+        html = _run_ok(
+            "--format",
+            "html",
+            "--api-key",
+            TEST_KEY,
+            "account",
+            f"account-exists@{DOMAIN}",
+        )
+        assert "<!DOCTYPE html>" in html
+        assert "Have I Been Pwned" in html
+
+    def test_account_baseline_save_and_diff(self, tmp_path: Path) -> None:
+        baseline = tmp_path / "baseline.json"
+        _run_ok(
+            "--api-key",
+            TEST_KEY,
+            "account",
+            f"account-exists@{DOMAIN}",
+            "--save-baseline",
+            str(baseline),
+        )
+        assert baseline.exists()
+
+        code, out = _run(
+            "--api-key",
+            TEST_KEY,
+            "account",
+            f"account-exists@{DOMAIN}",
+            "--baseline",
+            str(baseline),
+            "--fail-if-pwned",
+        )
+        assert code == 0
+        assert "No new" in out or "Clean" in out or out.strip() != ""
+
 
 # ── Password command (free, no auth) ─────────────────────────────────
 
@@ -398,3 +465,16 @@ class TestErrorHandling:
         """Account lookup without any API key fails with auth error."""
         out = _run_fail("account", f"account-exists@{DOMAIN}")
         assert "API key" in out or "Unauthorized" in out
+
+    def test_malformed_api_key_diagnostic(self) -> None:
+        out = _run_fail("--api-key", "not-a-valid-key", "account", f"account-exists@{DOMAIN}")
+        assert "improperly formed" in out
+
+    def test_invalid_hex_api_key_diagnostic(self) -> None:
+        out = _run_fail(
+            "--api-key",
+            "11111111111111111111111111111111",
+            "account",
+            "test@example.com",
+        )
+        assert "invalid" in out.lower()
