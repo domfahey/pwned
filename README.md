@@ -17,10 +17,12 @@ A command-line tool, typed Python SDK, offline password auditor, declarative bre
 
 ## Quickstart
 
-Check a password without installing anything (free, no API key required):
+Check a password without installing anything (free, hidden prompt, no API key required):
 
 ```bash
 uvx --from git+https://github.com/domfahey/pwned.git pwned password
+# Password:
+# Password not found in any data breaches.
 ```
 
 Common workflows once installed:
@@ -135,40 +137,45 @@ Global flags are accepted before or after subcommands (`pwned --json --cache bre
 
 `pwned` ships PEP 561 type annotations (`py.typed`) with sync, async, offline, and framework validator APIs. See [Python Library Guide](docs/python-api.md) for full details.
 
-```python
-import asyncio
-from pathlib import Path
-from typing import Annotated
-from pydantic import AfterValidator, BaseModel
-from pwned import (
-    AsyncHIBPClient,
-    AsyncPwnedPasswordsClient,
-    HIBPClient,
-    OfflinePasswordsClient,
-    PwnedPasswordsClient,
-    ResponseCache,
-    make_password_validator,
-)
+### Sync & Offline Clients
 
-# Sync password & account checks
+```python
+from pathlib import Path
+from pwned import HIBPClient, OfflinePasswordsClient, PwnedPasswordsClient, ResponseCache
+
 with PwnedPasswordsClient() as pw:
-    compromised = pw.is_pwned("hunter2", threshold=1)
+    print(pw.is_pwned("hunter2", threshold=1))
 
 with HIBPClient(api_key="your_api_key", user_agent="my-app", cache=ResponseCache()) as client:
     breaches = client.get_account_breaches("user@example.com", truncate=False)
+    print(f"Found {len(breaches)} breaches")
 
-# Async clients
-async def check_async() -> None:
-    async with AsyncPwnedPasswordsClient() as pw:
-        count = await pw.check_password("hunter2", pad=True)
-    async with AsyncHIBPClient(api_key="your_api_key") as client:
-        status = await client.get_subscription_status()
-
-# Offline O(log N) lookup against official sorted dumps
 with OfflinePasswordsClient(Path("/path/to/pwned-passwords-sha1.txt")) as offline:
-    count = offline.check_password("hunter2")
+    print(offline.check_password("hunter2"))
+```
 
-# Pydantic / FastAPI password validator
+### Async Clients
+
+```python
+import asyncio
+from pwned import AsyncHIBPClient, AsyncPwnedPasswordsClient
+
+async def main() -> None:
+    async with AsyncPwnedPasswordsClient() as pw:
+        print(await pw.check_password("hunter2", pad=True))
+    async with AsyncHIBPClient(api_key="your_api_key") as client:
+        print(await client.get_subscription_status())
+
+asyncio.run(main())
+```
+
+### Pydantic / FastAPI Password Validator
+
+```python
+from typing import Annotated
+from pydantic import AfterValidator, BaseModel
+from pwned import make_password_validator
+
 SafePassword = Annotated[str, AfterValidator(make_password_validator(threshold=1))]
 
 class SignupForm(BaseModel):
@@ -201,6 +208,8 @@ include_stealer_logs = true
 ```
 
 ```bash
+export HIBP_API_KEY="your_api_key"
+export PWNED_WEBHOOK_URL="https://hooks.slack.com/services/..."  # required when [notify] is set
 pwned monitor --config pwned.toml --save-baselines
 ```
 
@@ -212,12 +221,14 @@ Run scheduled exposure monitoring or local vault/hash audits in GitHub Actions w
 steps:
   - uses: actions/checkout@v4
   - uses: domfahey/pwned@v0.4.1
+    env:
+      PWNED_WEBHOOK_URL: ${{ secrets.PWNED_WEBHOOK_URL }}
     with:
       args: monitor --config pwned.toml --save-baselines --fail-if-pwned
       api-key: ${{ secrets.HIBP_API_KEY }}
 ```
 
-*(Commands like `password` and `audit` use the free k-anonymity API and do not require `api-key`.)*
+Commands like `password` and `audit` use the free *k*-anonymity API and do not require `api-key`. Exit codes: `0` clean, `1` exposure found with `--fail-if-pwned`, `2` CLI/auth/config error.
 
 | Input | Required | Default | Description |
 |---|---|---|---|
