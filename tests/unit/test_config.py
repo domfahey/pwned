@@ -106,6 +106,13 @@ class TestLoadSettings:
         cleared = load_settings(api_key="")
         assert cleared.api_key is None
 
+    def test_dotenv_unknown_hibp_keys_ignored(self, tmp_path: Path) -> None:
+        (tmp_path / ".env").write_text(
+            "HIBP_API_KEY=dotenvkey\nHIBP_EXTRA=1\nOTHER=2\n", encoding="utf-8"
+        )
+        assert load_settings().get_api_key() == "dotenvkey"
+        assert get_api_key_source() == "dotenv"
+
     def test_empty_env_var_overrides_dotenv(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
