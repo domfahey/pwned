@@ -8,12 +8,31 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-An unofficial command-line tool and typed Python SDK for querying [Troy Hunt](https://www.troyhunt.com)'s [Have I Been Pwned](https://haveibeenpwned.com/) service (API v3) — with offline password auditing, declarative breach monitoring, and a local stdio MCP server.
+An unofficial, typed Python SDK and security-workflow toolkit for [Troy Hunt](https://www.troyhunt.com)'s [Have I Been Pwned](https://haveibeenpwned.com/) service (API v3): offline password auditing, vault and Active Directory hygiene checks, declarative breach monitoring, and a local stdio MCP server, all built on a full API client.
 
-- **100% HIBP API v3 parity** — all 21 / 21 endpoints across sync/async clients and the CLI ([coverage matrix](docs/hibp-api-coverage.md)).
 - **Privacy-first password checks** — *k*-anonymity (SHA-1 & NTLM, 5-char prefix only, padded by default), air-gapped `O(1)` per-prefix range directories, ~50% smaller `PWNB` compact binary indexes, sub-1 GB `PWNL` Bloom filters, `O(log N)` sorted text dumps, and self-hosted `pwned serve` range servers; plaintext passwords never leave your machine.
 - **18 vault & Active Directory audit sources** — Bitwarden (JSON, PBKDF2/Argon2id encrypted JSON, CSV, live `bw`/`rbw` CLI), 1Password (CSV, 1PUX, live `op` CLI), LastPass, Dashlane, Proton Pass, Chrome/Edge, Firefox, Apple Passwords, generic CSV, KeePass `.kdbx`, AD `pwdump`/`secretsdump` (with hygiene checks & banned wordlists), and live Unix `pass`/`gopass`, plus Watchtower-style breach & stealer-log correlation.
 - **CI/CD & reporting ready** — `text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, and standalone `html` outputs, declarative `pwned.toml` monitoring with SQLite exposure history & baseline diffing, Slack/Discord/Teams/PagerDuty/SMTP/GitHub Issues alerts, GitHub Action, and multi-arch container images.
+- **Python SDK with full HIBP API v3 coverage**: all 21 / 21 endpoints in sync and async clients, strict Pydantic v2 models, and Pydantic/FastAPI/Django password validators ([coverage matrix](docs/hibp-api-coverage.md)).
+
+### `pwned` or the official CLI?
+
+Have I Been Pwned publishes an official [.NET CLI (`hibp`)](https://haveibeenpwned.com/cli). **For one-off breach, account, domain, or password lookups, use `hibp`.** It is maintained by HIBP and covers the API directly. `pwned` keeps the same exit codes and similar flags (`--markdown`, `--outfile`, `--fail-if-found`), so scripts move between the two easily.
+
+Use `pwned` when you need what the official CLI doesn't do:
+
+| Need | `hibp` | `pwned` |
+|---|:---:|:---:|
+| Breach, account, paste, domain, stealer-log, and password lookups | Yes | Yes |
+| Download offline Pwned Passwords dumps | Yes | Yes |
+| Query offline dumps, compact indexes, and Bloom filters locally | | Yes |
+| Self-hosted *k*-anonymity range server (`pwned serve`) | | Yes |
+| Audit password-manager vaults and AD `pwdump` exports | | Yes |
+| Declarative monitoring, baselines, history, and alert webhooks | | Yes |
+| SARIF, CSV, JSONL, table, and HTML output | | Yes |
+| Importable Python library (sync/async clients, validators) | | Yes |
+| Local stdio MCP server | | Yes |
+| Installs with `uv`/`pip`, no .NET runtime | | Yes |
 
 ## Quickstart
 
@@ -354,7 +373,7 @@ tests/
 
 Other Have I Been Pwned CLIs:
 
-- [`HaveIBeenPwned.Cli`](https://haveibeenpwned.com/cli) — .NET (official HIBP CLI)
+- [`HaveIBeenPwned.Cli`](https://haveibeenpwned.com/cli) — .NET (official HIBP CLI; recommended for quick lookups)
 - [`wKovacs64/pwned`](https://github.com/wKovacs64/pwned) — Node.js/TypeScript
 - [`brycx/checkpwn`](https://github.com/brycx/checkpwn) — Rust
 
