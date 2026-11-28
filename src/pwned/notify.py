@@ -367,13 +367,18 @@ def send_github_issue_notification(
     def _send(c: httpx.Client) -> dict[str, Any]:
         try:
             if config.dedup_title:
-                params: dict[str, str] = {"state": "open", "per_page": "100"}
-                if config.labels:
-                    params["labels"] = ",".join(config.labels)
-                list_resp = c.get(issues_url, params=params, headers=headers)
-                list_resp.raise_for_status()
-                existing = list_resp.json()
-                if isinstance(existing, list):
+                page = 1
+                while True:
+                    params: dict[str, str] = {"state": "open", "per_page": "100"}
+                    if config.labels:
+                        params["labels"] = ",".join(config.labels)
+                    if page > 1:
+                        params["page"] = str(page)
+                    list_resp = c.get(issues_url, params=params, headers=headers)
+                    list_resp.raise_for_status()
+                    existing = list_resp.json()
+                    if not isinstance(existing, list):
+                        break
                     for item in existing:
                         if (
                             isinstance(item, dict)
@@ -394,6 +399,9 @@ def send_github_issue_notification(
                                 "number": number,
                                 "url": str(comment_data.get("html_url", "")),
                             }
+                    if len(existing) < 100:
+                        break
+                    page += 1
 
             create_resp = c.post(
                 issues_url,

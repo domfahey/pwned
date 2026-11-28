@@ -619,6 +619,55 @@ def test_send_github_issue_notification_create_comment_and_errors(httpx_mock: An
         "url": "https://github.com/acme/sec-alerts/issues/7#issuecomment-99",
     }
 
+    # dedup_title=True paginates past 100 open issues to find a match on page 2
+    full_page_other = [{"title": f"Other Issue {idx}", "number": 100 + idx} for idx in range(100)]
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{issues_url}?state=open&per_page=100&labels=security%2Cpwned",
+        json=full_page_other,
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{issues_url}?state=open&per_page=100&labels=security%2Cpwned&page=2",
+        json=[{"title": "pwned Exposure Alert", "number": 205}],
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{issues_url}/205/comments",
+        status_code=201,
+        json={"html_url": "https://github.com/acme/sec-alerts/issues/205#issuecomment-1"},
+    )
+    commented_p2 = send_github_issue_notification(cfg, data)
+    assert commented_p2 == {
+        "action": "commented",
+        "number": 205,
+        "url": "https://github.com/acme/sec-alerts/issues/205#issuecomment-1",
+    }
+
+    # dedup_title=True exhausts page 2 cleanly and creates a new issue when no match exists
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{issues_url}?state=open&per_page=100&labels=security%2Cpwned",
+        json=full_page_other,
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url=f"{issues_url}?state=open&per_page=100&labels=security%2Cpwned&page=2",
+        json=[],
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=issues_url,
+        status_code=201,
+        json={"number": 300, "html_url": "https://github.com/acme/sec-alerts/issues/300"},
+    )
+    created_after_p2 = send_github_issue_notification(cfg, data)
+    assert created_after_p2 == {
+        "action": "created",
+        "number": 300,
+        "url": "https://github.com/acme/sec-alerts/issues/300",
+    }
+
     # dedup_title=True with empty labels + non-list GET response falls back to creating issue
     no_labels_cfg = GitHubIssueNotifyConfig(
         repo="acme/sec-alerts",

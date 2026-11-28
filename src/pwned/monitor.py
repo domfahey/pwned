@@ -706,7 +706,7 @@ def run_monitor(
     updates: dict[str, Any] = {}
     if webhook_sent:
         updates["webhook_sent"] = True
-    if config.notify.email is not None or config.notify.github_issue is not None:
+    if sent_channels or config.notify.email is not None or config.notify.github_issue is not None:
         updates["notifications_sent"] = sent_channels
     if updates:
         report = report.model_copy(update=updates)

@@ -1443,7 +1443,7 @@ def test_run_monitor_pagerduty_email_and_github_issue_notifications(
     )
     clean_stub = _StubHIBPClient(accounts={"alice@example.com": SearchResult()})
 
-    # 1. PagerDuty webhook only (config key + override): notifications_sent stays unset
+    # 1. PagerDuty webhook only (config key + override): records "webhook" in notifications_sent
     pd_cfg = MonitorConfig(
         notify=MonitorNotifyConfig(
             webhook_url=PAGERDUTY_EVENTS_URL,
@@ -1462,7 +1462,8 @@ def test_run_monitor_pagerduty_email_and_github_issue_notifications(
             webhook_client=wh_client,
         )
     assert pd_report.webhook_sent is True
-    assert "notifications_sent" not in pd_report.model_dump(exclude_unset=True)
+    assert pd_report.notifications_sent == ["webhook"]
+    assert pd_report.model_dump(exclude_unset=True)["notifications_sent"] == ["webhook"]
     pd_req = httpx_mock.get_requests()[0]
     pd_body = json.loads(pd_req.content.decode("utf-8"))
     assert pd_body["routing_key"] == "override-pd-key"
