@@ -160,7 +160,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Custom `httpx.Client` / `httpx.AsyncClient` injection, `proxy` support, and configurable `max_retries` (including `0`) and `timeout`.
 - **Security & Supply Chain**:
   - CodeQL and OpenSSF Scorecard workflows.
-  - `SHA256SUMS` checksums and changelog-based release notes on GitHub Releases.
+  - `SHA256SUMS.txt` checksums and changelog-based release notes on GitHub Releases.
   - ClusterFuzzLite fuzzing (`.github/workflows/cifuzz.yml`) of the zero-dependency parsers.
 
 ## [0.1.1] - 2026-11-26
