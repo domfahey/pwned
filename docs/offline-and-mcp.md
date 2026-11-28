@@ -113,7 +113,7 @@ Or run zero-install via `uvx`:
 | Tool | Purpose | Privacy Guardrails |
 |---|---|---|
 | `check_password_hash` | Check a pre-computed 40-char SHA-1 or 32-char NTLM hash against `--offline-db` or online *k*-anonymity (`--cache` supported) | Accepts **hashes only** — never accepts plaintext passwords |
-| `audit_vault` | Audit local plaintext vault exports, `pwdump` files, or `pass`/`gopass` stores (`check_reuse`, `check_strength`, `threshold`) | Returns sanitized findings/risk scores only (zero plaintext passwords); **rejects** `keepass` and `bitwarden-encrypted-json` so master passwords are never passed through an AI prompt |
+| `audit_vault` | Audit local plaintext vault exports, `pwdump` files, or `pass`/`gopass` stores (`check_reuse`, `check_strength`, `check_ad_hygiene`, `exclude_machines`, `custom_wordlist_path`, `threshold`) | Returns sanitized findings/risk scores only (zero plaintext passwords); **rejects** `keepass` and `bitwarden-encrypted-json` so master passwords are never passed through an AI prompt |
 | `diff_baseline` | Diff two local JSON snapshot files (`breaches`, `domain`, `search`, `account_batch`) | 100% local file comparison |
 | `lookup_breach` | Look up public HIBP breach metadata by name or filtered list (with optional local `--cache`) | Public read-only catalog |
 | `check_account_range` | Check an email address via HIBP's 6-char SHA-1 *k*-anonymity range API | Uses locally configured HIBP API key; never sends plaintext email to HIBP |

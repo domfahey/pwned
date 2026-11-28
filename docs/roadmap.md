@@ -114,8 +114,8 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 Prioritized from cross-ecosystem research (official `HaveIBeenPwned.Cli` / `haveibeenpwned.com/cli`, `DSInternals`, `easybill/easypwned`, `ScottHelme/when-pwned-passwords-bloom`, `alexbrazier/pwned-bloom`, `HaveIBeenPwned/PwnedPasswordsCloudflareWorker`, `Keyguard`, `1Password`/`Bitwarden` CLIs, `brycx/checkpwn`, and `wneessen/go-hibp`).
 
 ### Active Directory & Enterprise Credential Hygiene
-- [ ] **Extended AD `pwdump` quality checks** — detect empty NTLM hashes (`31D6CFE0D16AE931B73C59D7E0C089C0`), present legacy LM hashes, username-as-password matches (local MD4 of `SamAccountName` and case variants), and add `--exclude-machines` filtering for `$` computer accounts.
-- [ ] **Custom organizational wordlist support (`--custom-wordlist <file>`)** — check passwords and NTLM dumps against company-specific banned dictionaries (brand names, seasonal patterns, default onboarding passwords) alongside HIBP.
+- [x] **Extended AD `pwdump` quality checks** — detect empty NTLM hashes (`31D6CFE0D16AE931B73C59D7E0C089C0`), present legacy LM hashes, username-as-password matches (local MD4 of `SamAccountName` and case variants), and add `--exclude-machines` filtering for `$` computer accounts.
+- [x] **Custom organizational wordlist support (`--custom-wordlist <file>`)** — check passwords and NTLM dumps against company-specific banned dictionaries (brand names, seasonal patterns, default onboarding passwords) alongside HIBP.
 
 ### Watchtower-Style Vault Auditing & Live CLI Connectors
 - [ ] **Live cloud vault CLI connectors (`--source bitwarden-cli` / `1password-cli`)** — audit unlocked `bw` / `rbw` and `op` vaults directly in memory without writing plaintext exports to disk (mirroring existing `pass` / `gopass` support).

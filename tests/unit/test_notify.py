@@ -52,10 +52,20 @@ def test_has_exposures() -> None:
     assert has_exposures([{"status": "pwned"}])
     assert has_exposures(["some-non-status-item"])
 
-    assert not has_exposures({"findings": [], "reused_groups": [], "strength_findings": []})
+    assert not has_exposures(
+        {
+            "findings": [],
+            "reused_groups": [],
+            "strength_findings": [],
+            "ad_findings": [],
+            "wordlist_findings": [],
+        }
+    )
     assert has_exposures({"findings": [{"account": "alice"}]})
     assert has_exposures({"reused_groups": [["a", "b"]]})
     assert has_exposures({"strength_findings": [{"account": "bob"}]})
+    assert has_exposures({"findings": [], "ad_findings": [{"issue": "empty_ntlm"}]})
+    assert has_exposures({"findings": [], "wordlist_findings": [{"match_type": "exact"}]})
 
     assert not has_exposures({"new_exposures": 0})
     assert has_exposures({"new_exposures": 1})

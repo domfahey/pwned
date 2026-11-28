@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from pwned._parsers import parse_pwdump_lines
+from pwned._parsers import (
+    EMPTY_LM_HASH,
+    EMPTY_NTLM_HASH,
+    parse_pwdump_lines,
+    parse_pwdump_records,
+)
 from pwned.strength import (
     StrengthResult,
     compute_vault_risk_score,
@@ -34,6 +39,47 @@ def test_parse_pwdump_lines_edge_cases() -> None:
         "CORP\\   :500:lm:31d6cfe0d16ae931b73c59d7e0c089c0:::",
     ]
     assert parse_pwdump_lines(lines) == []
+
+
+def test_parse_pwdump_records_lm_and_constants() -> None:
+    assert EMPTY_LM_HASH == "AAD3B435B51404EEAAD3B435B51404EE"
+    assert EMPTY_NTLM_HASH == "31D6CFE0D16AE931B73C59D7E0C089C0"
+
+    lines = [
+        "CORP\\legacy:1001:e52cac67419a9a224a3b108f3fa6cb6d:8846f7eaee8fb117ad06bdd830b7586c:::",
+        "CORP\\modern:1002:aad3b435b51404eeaad3b435b51404ee:8846f7eaee8fb117ad06bdd830b7586c:::",
+        (
+            "CORP\\placeholder:1003:NO PASSWORD*********************:"
+            "31d6cfe0d16ae931b73c59d7e0c089c0:::"
+        ),
+        "CORP\\blanklm:1004::31d6cfe0d16ae931b73c59d7e0c089c0:::",
+    ]
+    assert parse_pwdump_records(lines) == [
+        (
+            "CORP",
+            "legacy",
+            "E52CAC67419A9A224A3B108F3FA6CB6D",
+            "8846F7EAEE8FB117AD06BDD830B7586C",
+        ),
+        (
+            "CORP",
+            "modern",
+            EMPTY_LM_HASH,
+            "8846F7EAEE8FB117AD06BDD830B7586C",
+        ),
+        (
+            "CORP",
+            "placeholder",
+            "",
+            EMPTY_NTLM_HASH,
+        ),
+        (
+            "CORP",
+            "blanklm",
+            "",
+            EMPTY_NTLM_HASH,
+        ),
+    ]
 
 
 def test_strength_result_model() -> None:

@@ -142,9 +142,22 @@ def _md4(data: bytes) -> str:
     return struct.pack("<4I", a0, b0, c0, d0).hex()
 
 
-def parse_pwdump_lines(lines: Iterable[str]) -> list[tuple[str, str, str]]:
-    """Parse impacket secretsdump / pwdump lines into (domain, username, nt_hash_upper) tuples."""
-    results: list[tuple[str, str, str]] = []
+EMPTY_LM_HASH = "AAD3B435B51404EEAAD3B435B51404EE"
+EMPTY_NTLM_HASH = "31D6CFE0D16AE931B73C59D7E0C089C0"
+_HEX_CHARS = frozenset("0123456789abcdefABCDEF")
+
+
+def _is_hex32(value: str) -> bool:
+    return len(value) == 32 and all(c in _HEX_CHARS for c in value)
+
+
+def parse_pwdump_records(lines: Iterable[str]) -> list[tuple[str, str, str, str]]:
+    """Parse impacket secretsdump / pwdump lines into (domain, user, lm_upper, nt_upper) tuples.
+
+    If the LM field is missing or not a 32-character hex digest (e.g. placeholder text),
+    the returned LM field is an empty string.
+    """
+    results: list[tuple[str, str, str, str]] = []
     for raw in lines:
         line = raw.rstrip("\r\n")
         if not line:
@@ -157,11 +170,12 @@ def parse_pwdump_lines(lines: Iterable[str]) -> list[tuple[str, str, str]]:
             continue
         account = parts[0].strip()
         rid = parts[1].strip()
+        lm = parts[2].strip()
         nt = parts[3].strip()
 
         if not account or not rid.isdigit():
             continue
-        if len(nt) != 32 or not all(c in "0123456789abcdefABCDEF" for c in nt):
+        if not _is_hex32(nt):
             continue
 
         if "\\" in account:
@@ -176,5 +190,11 @@ def parse_pwdump_lines(lines: Iterable[str]) -> list[tuple[str, str, str]]:
         if not username:
             continue
 
-        results.append((domain, username, nt.upper()))
+        lm_upper = lm.upper() if _is_hex32(lm) else ""
+        results.append((domain, username, lm_upper, nt.upper()))
     return results
+
+
+def parse_pwdump_lines(lines: Iterable[str]) -> list[tuple[str, str, str]]:
+    """Parse impacket secretsdump / pwdump lines into (domain, username, nt_hash_upper) tuples."""
+    return [(domain, username, nt) for domain, username, _lm, nt in parse_pwdump_records(lines)]

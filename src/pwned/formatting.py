@@ -52,6 +52,25 @@ _SARIF_RULES: list[dict[str, Any]] = [
         "shortDescription": {"text": "Known data breach record from Have I Been Pwned."},
         "defaultConfiguration": {"level": "warning"},
     },
+    {
+        "id": "HIBP005",
+        "name": "ADCredentialHygiene",
+        "shortDescription": {
+            "text": (
+                "Active Directory credential hygiene issue "
+                "(empty NTLM hash, legacy LM hash, or username-as-password)."
+            )
+        },
+        "defaultConfiguration": {"level": "error"},
+    },
+    {
+        "id": "HIBP006",
+        "name": "BannedWordlistPassword",
+        "shortDescription": {
+            "text": "Password matches an entry in the custom organizational banned wordlist."
+        },
+        "defaultConfiguration": {"level": "error"},
+    },
 ]
 
 
@@ -242,7 +261,7 @@ def _sarif_breach_result(
 
 def _sarif_dict_results(serialized: dict[str, Any]) -> list[dict[str, Any]]:
     if "findings" in serialized and isinstance(serialized["findings"], list):
-        return [
+        results = [
             _sarif_result(
                 "HIBP002",
                 "error",
@@ -252,6 +271,25 @@ def _sarif_dict_results(serialized: dict[str, Any]) -> list[dict[str, Any]]:
             )
             for f in serialized["findings"]
         ]
+        results.extend(
+            _sarif_result(
+                "HIBP005",
+                "error",
+                f"AD credential hygiene issue ({f.get('issue', '')}) for "
+                f"{f.get('name', '')} ({f.get('username', '')}): {f.get('detail', '')}",
+            )
+            for f in serialized.get("ad_findings") or []
+        )
+        results.extend(
+            _sarif_result(
+                "HIBP006",
+                "error",
+                f"Password matches custom wordlist ({f.get('match_type', '')}) for "
+                f"{f.get('name', '')} ({f.get('username', '')}).",
+            )
+            for f in serialized.get("wordlist_findings") or []
+        )
+        return results
     if "breaches" in serialized or "pastes" in serialized or "stealer_logs" in serialized:
         results = [
             _sarif_breach_result(
@@ -450,6 +488,12 @@ def _audit_blocks(serialized: dict[str, Any]) -> list[_Block]:
     strength_findings = serialized.get("strength_findings")
     if isinstance(strength_findings, list):
         summary_rows.append(["Weak Passwords", str(len(strength_findings))])
+    ad_findings = serialized.get("ad_findings")
+    if isinstance(ad_findings, list):
+        summary_rows.append(["AD Hygiene Findings", str(len(ad_findings))])
+    wordlist_findings = serialized.get("wordlist_findings")
+    if isinstance(wordlist_findings, list):
+        summary_rows.append(["Custom Wordlist Matches", str(len(wordlist_findings))])
 
     blocks: list[_Block] = [
         _Heading(2, "Vault Audit Summary"),
@@ -489,6 +533,37 @@ def _audit_blocks(serialized: dict[str, Any]) -> list[_Block]:
     if isinstance(strength_findings, list) and strength_findings:
         blocks.append(_Heading(3, "Weak Passwords"))
         blocks.append(_dict_list_table(strength_findings))
+    if isinstance(ad_findings, list) and ad_findings:
+        blocks.append(_Heading(3, "AD Hygiene Findings"))
+        blocks.append(
+            _Table(
+                ["Name", "Username", "Issue", "Detail"],
+                [
+                    [
+                        str(f.get("name", "")),
+                        str(f.get("username", "")),
+                        str(f.get("issue", "")),
+                        str(f.get("detail", "")),
+                    ]
+                    for f in ad_findings
+                ],
+            )
+        )
+    if isinstance(wordlist_findings, list) and wordlist_findings:
+        blocks.append(_Heading(3, "Custom Wordlist Matches"))
+        blocks.append(
+            _Table(
+                ["Name", "Username", "Match Type"],
+                [
+                    [
+                        str(f.get("name", "")),
+                        str(f.get("username", "")),
+                        str(f.get("match_type", "")),
+                    ]
+                    for f in wordlist_findings
+                ],
+            )
+        )
     return blocks
 
 
