@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import smtplib
 from datetime import date
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,11 @@ from pwned.monitor import (
     MonitorReport,
     load_monitor_config,
     run_monitor,
+)
+from pwned.notify import (
+    PAGERDUTY_EVENTS_URL,
+    EmailNotifyConfig,
+    GitHubIssueNotifyConfig,
 )
 
 
@@ -899,10 +906,12 @@ def test_run_monitor_without_db_preserves_exclude_unset_contract() -> None:
     dumped = report.model_dump(exclude_unset=True)
     assert "resolved_exposures" not in dumped
     assert "history_summary" not in dumped
+    assert "notifications_sent" not in dumped
 
     serialized = serialize(report)
     assert "resolved_exposures" not in serialized
     assert "history_summary" not in serialized
+    assert "notifications_sent" not in serialized
 
 
 def test_run_monitor_history_tracking_with_baselines_errors_and_precheck(tmp_path: Path) -> None:
@@ -1178,3 +1187,369 @@ def test_run_monitor_history_reconciliation_respects_queried_scope(tmp_path: Pat
         assert [(r.category, r.identifier) for r in dom_active] == [
             ("alias_breach", "bob:LinkedIn")
         ]
+
+
+def test_load_monitor_config_expanded_notify_destinations_and_env_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    default_notify = MonitorNotifyConfig()
+    assert default_notify.pagerduty_routing_key is None
+    assert default_notify.pagerduty_severity == "error"
+    assert default_notify.email is None
+    assert default_notify.github_issue is None
+    redacted_notify = MonitorNotifyConfig(pagerduty_routing_key="secret-pd-key")
+    assert "secret-pd-key" not in repr(redacted_notify)
+
+    expected_smtp_cred = "smtp-secret-pass"
+    expected_gh_cred = "ghp-secret-val"
+    monkeypatch.setenv("PD_ROUTING_KEY", "pd-live-key")
+    monkeypatch.setenv("SMTP_USER", "alerts-user")
+    monkeypatch.setenv("SMTP_PASS", expected_smtp_cred)
+    monkeypatch.setenv("GH_TOKEN", expected_gh_cred)
+
+    toml_path = tmp_path / "expanded.toml"
+    toml_path.write_text(
+        f"""
+[notify]
+webhook_url = "{PAGERDUTY_EVENTS_URL}"
+format = "pagerduty"
+pagerduty_routing_key = "${{PD_ROUTING_KEY}}"
+pagerduty_severity = "critical"
+
+[notify.email]
+host = "smtp.example.com"
+port = 587
+from_addr = "alerts@example.com"
+to_addrs = ["sec@example.com", "ops@example.com"]
+username = "${{SMTP_USER}}"
+password = "${{SMTP_PASS}}"
+use_tls = true
+use_ssl = false
+
+[notify.github_issue]
+repo = "acme/security-alerts"
+token = "${{GH_TOKEN}}"
+labels = ["security", "hibp"]
+dedup_title = false
+
+[[accounts]]
+email = "alice@example.com"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    cfg = load_monitor_config(toml_path)
+    assert cfg.notify.webhook_url == PAGERDUTY_EVENTS_URL
+    assert cfg.notify.format == "pagerduty"
+    assert cfg.notify.pagerduty_routing_key == "pd-live-key"
+    assert cfg.notify.pagerduty_severity == "critical"
+    assert cfg.notify.email is not None
+    assert cfg.notify.email.host == "smtp.example.com"
+    assert cfg.notify.email.username == "alerts-user"
+    assert cfg.notify.email.password == expected_smtp_cred
+    assert cfg.notify.github_issue is not None
+    assert cfg.notify.github_issue.repo == "acme/security-alerts"
+    assert cfg.notify.github_issue.token == expected_gh_cred
+    assert cfg.notify.github_issue.labels == ["security", "hibp"]
+    assert cfg.notify.github_issue.dedup_title is False
+
+    # Email config without username/password (optional strings omitted)
+    no_auth_toml = tmp_path / "no_auth_email.toml"
+    no_auth_toml.write_text(
+        """
+[notify.email]
+host = "localhost"
+port = 25
+from_addr = "alerts@example.com"
+to_addrs = ["sec@example.com"]
+use_tls = false
+
+[[accounts]]
+email = "alice@example.com"
+""".strip(),
+        encoding="utf-8",
+    )
+    no_auth_cfg = load_monitor_config(no_auth_toml)
+    assert no_auth_cfg.notify.email is not None
+    assert no_auth_cfg.notify.email.username is None
+    assert no_auth_cfg.notify.email.password is None
+
+    # Non-string pagerduty_routing_key
+    bad_pd_type = tmp_path / "bad_pd.toml"
+    bad_pd_type.write_text(
+        "[notify]\npagerduty_routing_key = 123\n\n[[accounts]]\nemail = 'a@b.com'\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"notify\.pagerduty_routing_key must be a string\."):
+        load_monitor_config(bad_pd_type)
+
+    # Missing env var in pagerduty_routing_key
+    monkeypatch.delenv("MISSING_PD", raising=False)
+    missing_pd = tmp_path / "missing_pd.toml"
+    missing_pd.write_text(
+        "[notify]\npagerduty_routing_key = '${MISSING_PD}'\n\n[[accounts]]\nemail = 'a@b.com'\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"Environment variable 'MISSING_PD' referenced in "
+            r"notify\.pagerduty_routing_key is not set\."
+        ),
+    ):
+        load_monitor_config(missing_pd)
+
+    # Non-table notify.email
+    bad_email_type = tmp_path / "bad_email.toml"
+    bad_email_type.write_text(
+        "[notify]\nemail = 'invalid'\n\n[[accounts]]\nemail = 'a@b.com'\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"\[notify\.email\]"):
+        load_monitor_config(bad_email_type)
+
+    # Missing env var in notify.email.username and notify.email.password
+    monkeypatch.delenv("MISSING_SMTP_USER", raising=False)
+    missing_user = tmp_path / "missing_user.toml"
+    missing_user.write_text(
+        """
+[notify.email]
+host = "smtp.example.com"
+from_addr = "a@b.com"
+to_addrs = ["c@d.com"]
+username = "${MISSING_SMTP_USER}"
+password = "pw"
+
+[[accounts]]
+email = "alice@example.com"
+""".strip(),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"Environment variable 'MISSING_SMTP_USER' referenced in "
+            r"notify\.email\.username is not set\."
+        ),
+    ):
+        load_monitor_config(missing_user)
+
+    monkeypatch.delenv("MISSING_SMTP_PASS", raising=False)
+    missing_pass = tmp_path / "missing_pass.toml"
+    missing_pass.write_text(
+        """
+[notify.email]
+host = "smtp.example.com"
+from_addr = "a@b.com"
+to_addrs = ["c@d.com"]
+username = "user"
+password = "${MISSING_SMTP_PASS}"
+
+[[accounts]]
+email = "alice@example.com"
+""".strip(),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"Environment variable 'MISSING_SMTP_PASS' referenced in "
+            r"notify\.email\.password is not set\."
+        ),
+    ):
+        load_monitor_config(missing_pass)
+
+    # Non-table notify.github_issue
+    bad_gh_type = tmp_path / "bad_gh.toml"
+    bad_gh_type.write_text(
+        "[notify]\ngithub_issue = 'invalid'\n\n[[accounts]]\nemail = 'a@b.com'\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"\[notify\.github_issue\]"):
+        load_monitor_config(bad_gh_type)
+
+    # Non-string github_issue.token fails Pydantic validation
+    bad_gh_tok = tmp_path / "bad_gh_tok.toml"
+    bad_gh_tok.write_text(
+        """
+[notify.github_issue]
+repo = "acme/sec"
+token = 999
+
+[[accounts]]
+email = "alice@example.com"
+""".strip(),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError):
+        load_monitor_config(bad_gh_tok)
+
+    # Missing env var in notify.github_issue.token
+    monkeypatch.delenv("MISSING_GH_TOKEN", raising=False)
+    missing_gh = tmp_path / "missing_gh.toml"
+    missing_gh.write_text(
+        """
+[notify.github_issue]
+repo = "acme/sec"
+token = "${MISSING_GH_TOKEN}"
+
+[[accounts]]
+email = "alice@example.com"
+""".strip(),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"Environment variable 'MISSING_GH_TOKEN' referenced in "
+            r"notify\.github_issue\.token is not set\."
+        ),
+    ):
+        load_monitor_config(missing_gh)
+
+
+class _MonitorFakeSMTP:
+    def __init__(self, host: str, port: int, timeout: float = 30.0) -> None:
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.sent_messages: list[EmailMessage] = []
+
+    def __enter__(self) -> _MonitorFakeSMTP:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def send_message(self, msg: EmailMessage) -> None:
+        self.sent_messages.append(msg)
+
+
+def test_run_monitor_pagerduty_email_and_github_issue_notifications(
+    monkeypatch: pytest.MonkeyPatch,
+    httpx_mock: Any,
+) -> None:
+    smtp_instances: list[_MonitorFakeSMTP] = []
+
+    def fake_smtp(host: str, port: int, timeout: float = 30.0) -> _MonitorFakeSMTP:
+        inst = _MonitorFakeSMTP(host, port, timeout=timeout)
+        smtp_instances.append(inst)
+        return inst
+
+    monkeypatch.setattr(smtplib, "SMTP", fake_smtp)
+
+    pwned_stub = _StubHIBPClient(
+        accounts={"alice@example.com": SearchResult(breaches=[Breach(Name="Adobe")])}
+    )
+    clean_stub = _StubHIBPClient(accounts={"alice@example.com": SearchResult()})
+
+    # 1. PagerDuty webhook only (config key + override): records "webhook" in notifications_sent
+    pd_cfg = MonitorConfig(
+        notify=MonitorNotifyConfig(
+            webhook_url=PAGERDUTY_EVENTS_URL,
+            format="pagerduty",
+            pagerduty_routing_key="cfg-pd-key",
+            pagerduty_severity="critical",
+        ),
+        accounts=[MonitorAccountTarget(email="alice@example.com")],
+    )
+    httpx_mock.add_response(url=PAGERDUTY_EVENTS_URL, status_code=202, json={"status": "success"})
+    with httpx.Client() as wh_client:
+        pd_report = run_monitor(
+            pd_cfg,
+            pwned_stub,  # type: ignore[arg-type]
+            pagerduty_routing_key_override="override-pd-key",
+            webhook_client=wh_client,
+        )
+    assert pd_report.webhook_sent is True
+    assert pd_report.notifications_sent == ["webhook"]
+    assert pd_report.model_dump(exclude_unset=True)["notifications_sent"] == ["webhook"]
+    pd_req = httpx_mock.get_requests()[0]
+    pd_body = json.loads(pd_req.content.decode("utf-8"))
+    assert pd_body["routing_key"] == "override-pd-key"
+    assert pd_body["payload"]["severity"] == "critical"
+
+    # 2. All three channels (webhook + email + github_issue): clean run sends nothing
+    email_cfg = EmailNotifyConfig(
+        host="localhost",
+        port=25,
+        from_addr="alerts@example.com",
+        to_addrs=["sec@example.com"],
+        use_tls=False,
+    )
+    gh_cfg = GitHubIssueNotifyConfig(
+        repo="acme/sec-alerts",
+        token="ghp_test_token",
+        dedup_title=False,
+    )
+    all_cfg = MonitorConfig(
+        notify=MonitorNotifyConfig(
+            webhook_url=PAGERDUTY_EVENTS_URL,
+            format="auto",
+            pagerduty_routing_key="cfg-pd-key",
+            pagerduty_severity="warning",
+            email=email_cfg,
+            github_issue=gh_cfg,
+        ),
+        accounts=[MonitorAccountTarget(email="alice@example.com")],
+    )
+    with httpx.Client() as wh_client:
+        clean_all = run_monitor(
+            all_cfg,
+            clean_stub,  # type: ignore[arg-type]
+            webhook_client=wh_client,
+        )
+    assert clean_all.webhook_sent is False
+    assert clean_all.notifications_sent == []
+    assert "notifications_sent" in clean_all.model_dump(exclude_unset=True)
+    assert smtp_instances == []
+
+    # 3. All three channels on pwned run: webhook + email + github_issue all fire
+    gh_issues_url = "https://api.github.com/repos/acme/sec-alerts/issues"
+    httpx_mock.add_response(url=PAGERDUTY_EVENTS_URL, status_code=202, json={"status": "success"})
+    httpx_mock.add_response(
+        method="POST",
+        url=gh_issues_url,
+        status_code=201,
+        json={"number": 11, "html_url": "https://github.com/acme/sec-alerts/issues/11"},
+    )
+    with httpx.Client() as wh_client:
+        pwned_all = run_monitor(
+            all_cfg,
+            pwned_stub,  # type: ignore[arg-type]
+            webhook_client=wh_client,
+        )
+        assert not wh_client.is_closed
+    assert pwned_all.webhook_sent is True
+    assert pwned_all.notifications_sent == ["webhook", "email", "github_issue"]
+    assert len(smtp_instances) == 1
+    assert smtp_instances[0].sent_messages[0]["Subject"] == "pwned Monitor Alert"
+    gh_req = httpx_mock.get_requests()[-1]
+    assert str(gh_req.url) == gh_issues_url
+    gh_body = json.loads(gh_req.content.decode("utf-8"))
+    assert gh_body["title"] == "pwned Monitor Alert"
+    assert "## Monitor Report" in gh_body["body"]
+
+    # 4. Email only (no webhook, no github_issue) on pwned run
+    email_only_cfg = MonitorConfig(
+        notify=MonitorNotifyConfig(email=email_cfg),
+        accounts=[MonitorAccountTarget(email="alice@example.com")],
+    )
+    email_only_report = run_monitor(email_only_cfg, pwned_stub)  # type: ignore[arg-type]
+    assert email_only_report.webhook_sent is False
+    assert email_only_report.notifications_sent == ["email"]
+
+    # 5. GitHub issue only (no webhook, no email) on pwned run
+    gh_only_cfg = MonitorConfig(
+        notify=MonitorNotifyConfig(github_issue=gh_cfg),
+        accounts=[MonitorAccountTarget(email="alice@example.com")],
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=gh_issues_url,
+        status_code=201,
+        json={"number": 12, "html_url": "https://github.com/acme/sec-alerts/issues/12"},
+    )
+    gh_only_report = run_monitor(gh_only_cfg, pwned_stub)  # type: ignore[arg-type]
+    assert gh_only_report.webhook_sent is False
+    assert gh_only_report.notifications_sent == ["github_issue"]

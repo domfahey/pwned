@@ -864,6 +864,71 @@ class TestDoctorCommand:
         assert by_name["subscription"]["status"] == "skipped"
 
 
+class TestOfflineIndexCommands:
+    def test_offline_compact_and_bloom_roundtrip(self, tmp_path: Path) -> None:
+        dump_file = tmp_path / "dump.txt"
+        dump_file.write_text(
+            "0000000000000000000000000000000000000001:42\n"
+            "5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8:999\n",
+            encoding="utf-8",
+        )
+        compact_path = tmp_path / "out.pwned-bin"
+        bloom_path = tmp_path / "out.pwned-bloom"
+
+        compact_stats = _run_json("offline", "compact", str(dump_file), str(compact_path))
+        assert isinstance(compact_stats, dict)
+        assert compact_stats["record_count"] == 2
+        assert compact_stats["ntlm"] is False
+        assert compact_path.is_file()
+
+        pw_compact = _run_json("password", "--offline-db", str(compact_path), "password")
+        assert isinstance(pw_compact, dict)
+        assert "password" not in pw_compact
+        assert pw_compact["count"] == 999
+        _run_exit(8, "password", "--offline-db", str(compact_path), "password", "--fail-if-pwned")
+
+        bloom_stats = _run_json(
+            "offline",
+            "build-bloom",
+            str(compact_path),
+            str(bloom_path),
+            "--fpr",
+            "0.001",
+        )
+        assert isinstance(bloom_stats, dict)
+        assert bloom_stats["item_count"] == 2
+        assert bloom_stats["ntlm"] is False
+        assert bloom_path.is_file()
+
+        pw_bloom = _run_json("password", "--offline-db", str(bloom_path), "password")
+        assert isinstance(pw_bloom, dict)
+        assert "password" not in pw_bloom
+        assert pw_bloom["count"] == 1
+        _run_exit(8, "password", "--offline-db", str(bloom_path), "password", "--fail-if-pwned")
+
+        doctor_compact = _run_json(
+            "doctor",
+            "--no-network",
+            "--offline-db",
+            str(compact_path),
+        )
+        assert isinstance(doctor_compact, dict)
+        assert doctor_compact["healthy"] is True
+        assert doctor_compact["offline_db_kind"] == "compact"
+        assert doctor_compact["offline_db_mode"] == "sha1"
+
+        doctor_bloom = _run_json(
+            "doctor",
+            "--no-network",
+            "--offline-db",
+            str(bloom_path),
+        )
+        assert isinstance(doctor_bloom, dict)
+        assert doctor_bloom["healthy"] is True
+        assert doctor_bloom["offline_db_kind"] == "bloom"
+        assert doctor_bloom["offline_db_mode"] == "sha1"
+
+
 # ── Error handling ───────────────────────────────────────────────────
 
 

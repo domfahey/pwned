@@ -46,9 +46,10 @@ src/pwned/
 ├── mcp_server.py       # Local privacy-first stdio Model Context Protocol server
 ├── models.py           # Pydantic v2 models for API responses
 ├── monitor.py          # Declarative TOML exposure monitoring engine
-├── notify.py           # Webhook notification client (Slack, Discord, generic JSON)
-├── offline.py          # Offline sorted hash file lookups (`OfflinePasswordsClient`)
+├── notify.py           # Alert notification client (Slack, Discord, Teams, PagerDuty, SMTP email, GitHub Issues, generic JSON)
+├── offline.py          # Offline hash lookups across directories, compact binary indexes, Bloom filters, and text dumps (`OfflinePasswordsClient`)
 ├── offline_download.py # Resumable official Pwned Passwords dump downloader
+├── offline_index.py    # Compact binary prefix-indexed dumps (`PWNB`) and mmap-able Bloom filters (`PWNL`)
 ├── passwords.py        # Sync & async Pwned Passwords clients (`PwnedPasswordsClient`, `AsyncPwnedPasswordsClient`)
 ├── py.typed            # PEP 561 type marker
 ├── reporting.py        # Domain exposure risk summary reporting

@@ -2,46 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 from pathlib import Path
 from typing import BinaryIO
 
 from pwned._parsers import _md4, _parse_range_response
+from pwned.offline_index import (
+    BloomFilterReader,
+    CompactIndexReader,
+    OfflineFormat,
+    detect_offline_format,
+)
+from pwned.offline_index import _read_directory_mode as _read_directory_mode
 
 _HEX_CHARS = frozenset("0123456789ABCDEF")
 _SHA1_HEX_LEN = 40
 _NTLM_HEX_LEN = 32
 _BACKWARD_CHUNK_SIZE = 256
-_INDEX_FILENAME = ".pwned-index.json"
-_INDEX_SNIFF_BYTES = 256
-_INDEX_HEAD_MODE_RE = re.compile(r'^\{\s*"mode"\s*:\s*"(sha1|ntlm)"\s*[,}]')
-_INDEX_TAIL_MODE_RE = re.compile(r',\s*"mode"\s*:\s*"(sha1|ntlm)"\s*\}\s*$')
-
-
-def _read_directory_mode(directory: Path) -> str | None:
-    """Read optional hash mode metadata ('sha1' or 'ntlm') in O(1) bounded bytes."""
-    index_path = directory / _INDEX_FILENAME
-    if not index_path.is_file():
-        return None
-    try:
-        with index_path.open("rb") as handle:
-            head_bytes = handle.read(_INDEX_SNIFF_BYTES)
-            head = head_bytes.decode("utf-8", errors="ignore").lstrip()
-            if not head.startswith("{"):
-                return None
-            head_match = _INDEX_HEAD_MODE_RE.match(head)
-            if head_match is not None:
-                return head_match.group(1)
-            size = os.fstat(handle.fileno()).st_size
-            if size > len(head_bytes):
-                handle.seek(size - _INDEX_SNIFF_BYTES)
-                tail = handle.read(_INDEX_SNIFF_BYTES).decode("utf-8", errors="ignore")
-            else:
-                tail = head
-    except OSError:
-        return None
-    tail_match = _INDEX_TAIL_MODE_RE.search(tail)
-    return tail_match.group(1) if tail_match is not None else None
 
 
 def _hash_password(password: str, *, ntlm: bool) -> str:
@@ -89,17 +65,23 @@ def _find_line_start(file_handle: BinaryIO, pos: int) -> int:
 class OfflinePasswordsClient:
     """Zero-dependency offline client for HIBP password dumps.
 
-    Supports both:
-    - Single sorted dump files (``HASH:COUNT`` lines) using ``O(log N)`` binary search.
+    Transparently detects and supports:
     - Per-prefix directories of range files (``00000.txt``..``FFFFF.txt`` containing
       ``SUFFIX:COUNT`` lines) using ``O(1)`` direct prefix lookup.
+    - Compact fixed-width binary prefix-indexed dumps (``PWNB``) via ``mmap``.
+    - Probabilistic mmap-able Bloom filters (``PWNL``) returning ``1``/``0``.
+    - Single sorted text dump files (``HASH:COUNT`` lines) using ``O(log N)`` binary search.
     """
 
     def __init__(self, path: str | os.PathLike[str], *, ntlm: bool = False) -> None:
         self._path = Path(path)
         self._ntlm = ntlm
-        self._file: BinaryIO | None
-        if self._path.is_dir():
+        self._file: BinaryIO | None = None
+        self._compact: CompactIndexReader | None = None
+        self._bloom: BloomFilterReader | None = None
+        self._format: OfflineFormat = detect_offline_format(self._path)
+
+        if self._format == "directory":
             index_mode = _read_directory_mode(self._path)
             expected_mode = "ntlm" if ntlm else "sha1"
             if index_mode is not None and index_mode != expected_mode:
@@ -107,15 +89,16 @@ class OfflinePasswordsClient:
                     f"Offline directory {self._path} contains {index_mode.upper()} hashes, "
                     f"but client was opened in {expected_mode.upper()} mode"
                 )
-            self._is_dir = True
-            self._file = None
+        elif self._format == "compact":
+            self._compact = CompactIndexReader(self._path, ntlm=ntlm)
+        elif self._format == "bloom":
+            self._bloom = BloomFilterReader(self._path, ntlm=ntlm)
         else:
-            self._is_dir = False
             self._file = self._path.open("rb")
 
     @property
     def path(self) -> Path:
-        """Path to the opened HIBP password dump file or range directory."""
+        """Path to the opened HIBP password dump file, binary index, or range directory."""
         return self._path
 
     @property
@@ -124,14 +107,23 @@ class OfflinePasswordsClient:
         return self._ntlm
 
     @property
+    def format(self) -> OfflineFormat:
+        """Detected storage format ('directory', 'compact', 'bloom', or 'text')."""
+        return self._format
+
+    @property
     def is_directory(self) -> bool:
         """Whether this client reads from a per-prefix directory of range files."""
-        return self._is_dir
+        return self._format == "directory"
 
     def close(self) -> None:
-        """Close the underlying dump file handle if open."""
+        """Close the underlying dump file or binary index handle if open."""
         if self._file is not None:
             self._file.close()
+        elif self._compact is not None:
+            self._compact.close()
+        elif self._bloom is not None:
+            self._bloom.close()
 
     def __enter__(self) -> OfflinePasswordsClient:
         return self
@@ -148,6 +140,10 @@ class OfflinePasswordsClient:
         return self._ntlm
 
     def _lookup_hash(self, normalized_hash: str) -> int:
+        if self._compact is not None:
+            return self._compact.lookup_hash(normalized_hash)
+        if self._bloom is not None:
+            return self._bloom.lookup_hash(normalized_hash)
         if self._file is None:
             prefix_file = self._path / f"{normalized_hash[:5]}.txt"
             if not prefix_file.is_file():

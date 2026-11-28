@@ -90,14 +90,36 @@ async def check_async() -> int:
 
 asyncio.run(check_async())
 
-# Air-gapped O(log N) binary search over a local sorted hash dump
+# Air-gapped lookup over a text dump, range directory, compact index (PWNB), or Bloom filter (PWNL)
 with OfflinePasswordsClient(Path("/data/pwned-passwords-sha1.txt")) as offline:
     count = offline.check_password("hunter2")
+
+# Build and query compact binary indexes (PWNB) and mmap-able Bloom filters (PWNL)
+from pwned import (
+    BloomFilterReader,
+    CompactIndexReader,
+    build_bloom_filter,
+    build_compact_index,
+)
+
+build_compact_index(Path("/data/pwned-sha1"), Path("/data/pwned-sha1.pwnb"), overwrite=True)
+build_bloom_filter(
+    Path("/data/pwned-sha1.pwnb"),
+    Path("/data/pwned-sha1.bloom"),
+    false_positive_rate=0.01,
+    overwrite=True,
+)
+with CompactIndexReader(Path("/data/pwned-sha1.pwnb")) as compact:
+    exact_count = compact.lookup_hash("5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8")
+    bucket = compact.get_range("5BAA6")
+
+with BloomFilterReader(Path("/data/pwned-sha1.bloom")) as bloom:
+    maybe_present = bloom.might_contain_hash("5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8")
 
 # Self-hosted /range/{prefix} HTTP server (offline DB or upstream caching proxy)
 from pwned import PwnedRangeServer, create_range_server
 
-with PwnedRangeServer(offline_db=Path("/data/pwned-sha1"), host="127.0.0.1", port=8080) as srv:
+with PwnedRangeServer(offline_db=Path("/data/pwned-sha1.pwnb"), host="127.0.0.1", port=8080) as srv:
     srv.serve_forever()
 # Or: create_range_server(port=8080, cache=ResponseCache())
 ```
@@ -157,18 +179,22 @@ validate_password_not_pwned("my-candidate-password", threshold=1)
 
 For Django forms or `AUTH_PASSWORD_VALIDATORS`, wrap `validate_password_not_pwned(password)` and re-raise `ValueError` as `django.core.exceptions.ValidationError`. See [Have I Been Pwned's NIST SP 800-63B guidance](https://haveibeenpwned.com/NIST) for compromised-password screening compliance details.
 
-## Reporting, Webhooks, Monitoring & Formatting
+## Reporting, Notifications, Monitoring & Formatting
 
 ```python
 from pathlib import Path
 from pwned import (
+    EmailNotifyConfig,
     ExposureHistoryStore,
+    GitHubIssueNotifyConfig,
     HIBPClient,
     ResponseCache,
     format_output,
     generate_domain_report,
     load_monitor_config,
     run_monitor,
+    send_email_notification,
+    send_github_issue_notification,
     send_webhook_notification,
 )
 
@@ -178,13 +204,46 @@ with HIBPClient(api_key="your-key", cache=ResponseCache()) as client:
     markdown = format_output(report, fmt="markdown")
     html = format_output(report, fmt="html")
 
-    # Send webhook only if exposures exist
+    # Send webhooks only if exposures exist (auto-detects Slack, Discord, Teams, PagerDuty, generic)
     send_webhook_notification(
         "https://hooks.slack.com/services/...",
         report,
         fmt="auto",
         title="Domain Exposure Report",
     )
+    send_webhook_notification(
+        "https://org.webhook.office.com/webhookb2/...",
+        report,
+        fmt="teams",
+        title="Domain Exposure Report",
+    )
+    send_webhook_notification(
+        "https://events.pagerduty.com/v2/enqueue",
+        report,
+        fmt="pagerduty",
+        routing_key="your-pd-routing-key",
+        severity="error",
+        title="Domain Exposure Report",
+    )
+
+    # Send SMTP email alert or open/comment on a GitHub Issue
+    email_cfg = EmailNotifyConfig(
+        host="smtp.example.com",
+        port=587,
+        from_addr="alerts@example.com",
+        to_addrs=["soc@example.com"],
+        username="alerts-bot",
+        password="smtp-password",
+    )
+    send_email_notification(email_cfg, report, title="Domain Exposure Report")
+
+    gh_cfg = GitHubIssueNotifyConfig(
+        repo="org/security-alerts",
+        token="ghp_...",
+        labels=["security", "pwned"],
+        dedup_title=True,
+    )
+    issue = send_github_issue_notification(gh_cfg, report, title="Domain Exposure Report")
 
     # Declarative TOML monitor with SQLite exposure history tracking
     cfg = load_monitor_config(Path("pwned.toml"))
@@ -203,7 +262,7 @@ with ExposureHistoryStore(Path("history.sqlite3")) as store:
 
 ## Custom `httpx` Client & Proxy Injection
 
-All HTTP clients (`HIBPClient`, `AsyncHIBPClient`, `PwnedPasswordsClient`, `AsyncPwnedPasswordsClient`) and `download_offline_db` / `send_webhook_notification` accept `proxy="http://..."` or an externally managed `client=` (`httpx.Client` / `httpx.AsyncClient`) for connection pooling, custom TLS roots, corporate proxies, and deterministic testing. Externally injected clients are never closed by `pwned`.
+All HTTP clients (`HIBPClient`, `AsyncHIBPClient`, `PwnedPasswordsClient`, `AsyncPwnedPasswordsClient`) and `download_offline_db` / `send_webhook_notification` / `send_github_issue_notification` accept `proxy="http://..."` or an externally managed `client=` (`httpx.Client` / `httpx.AsyncClient`) for connection pooling, custom TLS roots, corporate proxies, and deterministic testing. Externally injected clients are never closed by `pwned`.
 
 ## Exception Hierarchy
 

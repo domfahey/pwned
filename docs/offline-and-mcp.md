@@ -43,9 +43,96 @@ How it works:
 - **Bounded worker pool & TTY progress:** Uses a fixed-size async worker pool (`--concurrency` / `--parallelism` / `-p`) to keep memory flat across all 1,048,576 prefixes while reporting live progress to `stderr` when attached to a TTY (so `--json`/`--format` stdout stays clean).
 - **Download statistics (`DownloadStats`):** Both CLI output and `download_offline_db()` return a `DownloadStats` model with `prefixes_total`, `prefixes_downloaded`, `prefixes_cached`, `hashes_written` (hashes written during that run), `elapsed_seconds`, `ranges_per_second`, `output_path`, `ntlm`, and `directory`.
 
+## Compact Offline Hash Indexes (`pwned offline compact` & `build-bloom`)
+
+Once you have a local range directory or sorted text dump, `pwned` can compile it into two memory-mapped binary formats for faster lookups and dramatically smaller storage footprints:
+
+| Format | Magic | Size vs. ASCII | Lookup | Exact Counts | `pwned serve` Support |
+|---|---|---|---|---|---|
+| Compact binary index (`compact`) | `PWNB` | ~50% smaller | `O(1)` prefix jump (`1,048,576` prefixes) + mmap binary search | Yes | Yes |
+| Bloom filter (`bloom`) | `PWNL` | Sub-1 GB RAM/mmap | `O(k)` mmap bitset probes (zero false negatives) | No (`1` or `0`) | No (rejected) |
+
+### Fixed-Width Compact Binary Index (`pwned offline compact`)
+
+`pwned offline compact SOURCE OUTPUT` compiles a per-prefix range directory (`00000.txt`–`FFFFF.txt`) or sorted single-file text dump into a single memory-mapped `PWNB` binary file with an `O(1)` 1,048,576-prefix jump table and fixed-width sorted records (24 bytes/record for SHA-1; 20 bytes/record for NTLM). Exact breach prevalence counts are preserved (zero-count entries omitted) at ~50% of the ASCII dump size, and the index is supported across `OfflinePasswordsClient`, `pwned password --offline-db`, `pwned audit --offline-db`, `pwned serve --offline-db`, `pwned mcp --offline-db`, and `pwned doctor --offline-db`.
+
+```bash
+# Compile a SHA-1 range directory or sorted text dump into a compact binary index
+pwned offline compact /data/pwned-sha1 /data/pwned-sha1.pwnb --overwrite
+
+# Compile an NTLM dump explicitly
+pwned offline compact /data/pwned-passwords-ntlm.txt /data/pwned-ntlm.pwnb --mode ntlm -o
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--mode [sha1\|ntlm]` | Auto-detected | Hash algorithm mode (`sha1` or `ntlm`); auto-detected from `SOURCE` if omitted |
+| `-n`, `--ntlm` | `False` | Compile as NTLM hashes (overrides `--mode`) |
+| `-o`, `--overwrite` | `False` | Replace an existing `OUTPUT` file atomically |
+
+### Mmap-able Bloom Filter (`pwned offline build-bloom`)
+
+`pwned offline build-bloom SOURCE OUTPUT` compiles a compact binary index (fastest single-pass build), per-prefix range directory, or text dump into a memory-mapped `PWNL` probabilistic Bloom filter. At the default `--fpr 0.01` (1% false-positive rate), the entire HIBP corpus fits in a sub-1 GB RAM/mmap-resident file suitable for containers and CI runners with **zero false negatives** (`lookup_hash` returns `1` for a possible match or `0` for guaranteed absence).
+
+!!! note "Bloom filter limitations"
+    Bloom filters are probabilistic presence-only filters: they do **not** store exact breach counts (`lookup_hash` returns `1` or `0`, so `--threshold > 1` will never match) and they **cannot** enumerate suffix lists for `/range/<prefix>`. Bloom filters work with `OfflinePasswordsClient`, `pwned password --offline-db`, `pwned audit --offline-db`, `pwned mcp --offline-db`, and `pwned doctor --offline-db`, and are rejected by `pwned serve --offline-db`.
+
+```bash
+# Build a sub-1 GB Bloom filter from a compact index (or directory/text dump)
+pwned offline build-bloom /data/pwned-sha1.pwnb /data/pwned-sha1.bloom --fpr 0.01 --overwrite
+
+# Build an NTLM Bloom filter with an explicit item-count hint (avoids counting pass on text/dir)
+pwned offline build-bloom /data/pwned-ntlm /data/pwned-ntlm.bloom \
+  --ntlm \
+  --fpr 0.001 \
+  --expected-items 900000000 \
+  --overwrite
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--mode [sha1\|ntlm]` | Auto-detected | Hash algorithm mode (`sha1` or `ntlm`); auto-detected from `SOURCE` if omitted |
+| `-n`, `--ntlm` | `False` | Build an NTLM Bloom filter (overrides `--mode`) |
+| `--fpr FLOAT` | `0.01` | Target false-positive rate (strictly between `0` and `1`) |
+| `--expected-items INT` | Auto-counted | Optional expected item count to size the bitset in a single pass |
+| `-o`, `--overwrite` | `False` | Replace an existing `OUTPUT` file atomically |
+
+### Python Usage (`build_compact_index`, `build_bloom_filter` & `OfflinePasswordsClient.format`)
+
+```python
+from pathlib import Path
+from pwned import OfflinePasswordsClient, build_bloom_filter, build_compact_index
+
+compact_stats = build_compact_index(
+    Path("/data/pwned-sha1"),
+    Path("/data/pwned-sha1.pwnb"),
+    overwrite=True,
+)
+bloom_stats = build_bloom_filter(
+    Path("/data/pwned-sha1.pwnb"),
+    Path("/data/pwned-sha1.bloom"),
+    false_positive_rate=0.01,
+    overwrite=True,
+)
+print(compact_stats.record_count, bloom_stats.bit_count, bloom_stats.num_hashes)
+
+with OfflinePasswordsClient(Path("/data/pwned-sha1.pwnb")) as compact_client:
+    assert compact_client.format == "compact"
+    exact_count = compact_client.check_password("password")
+
+with OfflinePasswordsClient(Path("/data/pwned-sha1.bloom")) as bloom_client:
+    assert bloom_client.format == "bloom"
+    probably_pwned = bloom_client.check_password("password")  # 1 or 0
+```
+
 ## Offline Lookups (`--offline-db` & `OfflinePasswordsClient`)
 
-`--offline-db PATH` (on `pwned password`, `pwned audit`, `pwned serve`, and `pwned mcp`) and `OfflinePasswordsClient` accept either a **per-prefix range directory** (`O(1)` direct prefix lookup) or a **single sorted dump file** (`O(log N)` binary search):
+`--offline-db PATH` (on `pwned password`, `pwned audit`, `pwned serve`, `pwned mcp`, and `pwned doctor`) and `OfflinePasswordsClient` transparently auto-detect all four offline storage formats:
+
+- **Per-prefix range directory** (`format == "directory"`): `O(1)` direct prefix lookup over `00000.txt`–`FFFFF.txt`.
+- **Compact binary index (`PWNB`)** (`format == "compact"`): `O(1)` prefix jump table + mmap binary search with exact counts.
+- **Bloom filter (`PWNL`)** (`format == "bloom"`): sub-1 GB mmap presence filter returning `1`/`0` (supported by lookup commands and `doctor`; rejected by `pwned serve`).
+- **Single sorted text dump** (`format == "text"`): `O(log N)` binary search over `HASH:COUNT` lines.
 
 ### CLI Usage
 
@@ -53,6 +140,11 @@ How it works:
 # Query a per-prefix range directory (O(1) lookup)
 pwned password --offline-db /data/pwned-sha1 --stdin
 pwned audit ntds.pwdump --source pwdump --offline-db /data/pwned-ntlm --check-reuse
+
+# Query a compact binary index (PWNB) or mmap-able Bloom filter (PWNL)
+pwned password --offline-db /data/pwned-sha1.pwnb --stdin
+pwned audit vault.json --source bitwarden-json --offline-db /data/pwned-sha1.bloom
+pwned doctor --offline-db /data/pwned-sha1.pwnb --no-network
 
 # Query a single merged sorted dump file (O(log N) binary search)
 pwned password --offline-db /data/pwned-passwords-sha1.txt --stdin
@@ -67,12 +159,18 @@ from pwned import OfflinePasswordsClient
 
 # O(1) direct prefix lookup against a per-prefix range directory (00000.txt–FFFFF.txt)
 with OfflinePasswordsClient(Path("/data/pwned-sha1")) as dir_client:
+    assert dir_client.format == "directory"
     assert dir_client.is_directory is True
     count = dir_client.check_password("password")
 
+# Memory-mapped O(1) prefix jump lookup against a compact binary index (PWNB)
+with OfflinePasswordsClient(Path("/data/pwned-sha1.pwnb")) as compact_client:
+    assert compact_client.format == "compact"
+    count = compact_client.check_password("password")
+
 # O(log N) binary search against a single sorted dump file (HASH:COUNT)
 with OfflinePasswordsClient(Path("/data/pwned-passwords-ntlm.txt"), ntlm=True) as file_client:
-    assert file_client.is_directory is False
+    assert file_client.format == "text"
     compromised = file_client.is_hash_pwned("8846F7EAEE8FB117AD06BDD830B7586C")
 ```
 
@@ -83,8 +181,8 @@ with OfflinePasswordsClient(Path("/data/pwned-passwords-ntlm.txt"), ntlm=True) a
 ### CLI Usage
 
 ```bash
-# Air-gapped / self-hosted mode backed by an offline range directory or single sorted dump
-pwned serve --offline-db /data/pwned-sha1 --host 127.0.0.1 --port 8080
+# Air-gapped / self-hosted mode backed by a compact binary index (PWNB), range directory, or sorted dump
+pwned serve --offline-db /data/pwned-sha1.pwnb --host 127.0.0.1 --port 8080
 
 # Serve an NTLM offline dump
 pwned serve --offline-db /data/pwned-ntlm --ntlm --host 0.0.0.0 --port 8080
@@ -97,7 +195,7 @@ pwned --cache serve --port 8080
 |---|---|---|
 | `--host TEXT` | `127.0.0.1` | Bind address for the HTTP server |
 | `--port INT` | `8080` | Listening TCP port (`0` selects an ephemeral port) |
-| `--offline-db PATH` | `None` | Local HIBP sorted dump file or per-prefix range directory (`00000.txt`–`FFFFF.txt`); disables upstream network calls when set |
+| `--offline-db PATH` | `None` | Local HIBP compact binary index (`PWNB`), per-prefix range directory (`00000.txt`–`FFFFF.txt`), or sorted text dump; disables upstream network calls when set (Bloom filters are rejected because they cannot list prefix suffixes) |
 | `--mode [sha1\|ntlm]` | `sha1` | Offline database hash mode (`sha1` or `ntlm`; proxy mode serves both dynamically) |
 | `-n`, `--ntlm` | `False` | Serve an NTLM `--offline-db` (overrides `--mode`) |
 | `--pad / --no-pad` | `True` | Request `Add-Padding: true` on upstream HIBP proxy fetches |
@@ -119,9 +217,9 @@ pwned --cache serve --port 8080
 from pathlib import Path
 from pwned import PwnedRangeServer, ResponseCache, create_range_server
 
-# Offline directory or single-file range server
+# Offline compact index (PWNB), range directory, or single-file range server
 with PwnedRangeServer(
-    offline_db=Path("/data/pwned-sha1"),
+    offline_db=Path("/data/pwned-sha1.pwnb"),
     host="127.0.0.1",
     port=8080,
 ) as server:
@@ -139,7 +237,7 @@ Have I Been Pwned offers an [official remote MCP server](https://haveibeenpwned.
 
 ### Client Configuration
 
-Add `pwned mcp` to any MCP-compatible AI client (Claude Desktop, Cursor, Antigravity, etc.). `--offline-db` accepts either a per-prefix range directory (`00000.txt`–`FFFFF.txt`) or a single sorted dump file:
+Add `pwned mcp` to any MCP-compatible AI client (Claude Desktop, Cursor, Antigravity, etc.). `--offline-db` accepts a per-prefix range directory (`00000.txt`–`FFFFF.txt`), compact binary index (`PWNB`), Bloom filter (`PWNL`), or single sorted dump file:
 
 ```json
 {

@@ -18,6 +18,7 @@ from pwned.client import REQUEST_TIMEOUT, HIBPError
 from pwned.config import DEFAULT_USER_AGENT
 from pwned.models import _HIBPBase
 from pwned.offline import OfflinePasswordsClient, _find_line_start
+from pwned.offline_index import CompactIndexReader, OfflineFormat
 from pwned.passwords import PwnedPasswordsClient, _validate_prefix
 
 DEFAULT_HOST = "127.0.0.1"
@@ -234,6 +235,22 @@ class _OfflineFileBackend:
         self._file.close()
 
 
+class _OfflineCompactBackend:
+    backend_name: ServerBackendKind = "offline"
+
+    def __init__(self, file_path: Path, *, ntlm: bool) -> None:
+        self._ntlm = ntlm
+        self.mode_name: ServerModeKind = "ntlm" if ntlm else "sha1"
+        self._reader = CompactIndexReader(file_path, ntlm=ntlm)
+
+    def get_range(self, prefix: str, *, ntlm: bool) -> dict[str, int]:
+        _check_offline_mode(configured_ntlm=self._ntlm, requested_ntlm=ntlm)
+        return self._reader.get_range(prefix)
+
+    def close(self) -> None:
+        self._reader.close()
+
+
 class _UpstreamProxyBackend:
     backend_name: ServerBackendKind = "proxy"
     mode_name: ServerModeKind = "auto"
@@ -396,7 +413,8 @@ class PwnedRangeServer:
     """Self-hosted HIBP k-anonymity range HTTP server and caching proxy.
 
     Serves ``GET /range/<prefix>`` compatible with ``api.pwnedpasswords.com`` from either:
-    - An offline HIBP dump (single sorted file or per-prefix range directory), or
+    - An offline HIBP dump (single sorted file, per-prefix range directory, or compact binary
+      index), or
     - An upstream caching proxy backed by ``PwnedPasswordsClient``.
     """
 
@@ -421,18 +439,25 @@ class PwnedRangeServer:
         self._metrics = ServerMetrics()
 
         offline_path: Path | None = None
-        is_offline_dir = False
+        offline_format: OfflineFormat | None = None
         if offline_db is not None:
             offline_path = Path(offline_db)
             with OfflinePasswordsClient(offline_path, ntlm=ntlm) as validated:
-                is_offline_dir = validated.is_directory
+                offline_format = validated.format
+            if offline_format == "bloom":
+                raise ValueError(
+                    "Bloom filters cannot serve /range/<prefix> suffix lists; "
+                    "use a text dump, per-prefix directory, or compact binary index."
+                )
 
         self._httpd = _RangeThreadingHTTPServer((host, port), self)
 
         self._backend: _RangeBackend
         if offline_path is not None:
-            if is_offline_dir:
+            if offline_format == "directory":
                 self._backend = _OfflineDirectoryBackend(offline_path, ntlm=ntlm)
+            elif offline_format == "compact":
+                self._backend = _OfflineCompactBackend(offline_path, ntlm=ntlm)
             else:
                 self._backend = _OfflineFileBackend(offline_path, ntlm=ntlm)
         else:

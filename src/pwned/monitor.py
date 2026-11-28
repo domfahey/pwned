@@ -28,7 +28,15 @@ from pwned.history import (
     HistoryTrendSummary,
 )
 from pwned.models import Breach, NonNegativeInt, SearchResult, _HIBPBase
-from pwned.notify import WebhookFormat, send_webhook_notification
+from pwned.notify import (
+    EmailNotifyConfig,
+    GitHubIssueNotifyConfig,
+    PagerDutySeverity,
+    WebhookFormat,
+    send_email_notification,
+    send_github_issue_notification,
+    send_webhook_notification,
+)
 
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 _ObservedExposure = tuple[ExposureTargetType, str, ExposureCategory, str]
@@ -107,6 +115,10 @@ class MonitorNotifyConfig(_HIBPBase):
 
     webhook_url: str | None = None
     format: WebhookFormat = "auto"
+    pagerduty_routing_key: str | None = Field(default=None, repr=False)
+    pagerduty_severity: PagerDutySeverity = "error"
+    email: EmailNotifyConfig | None = None
+    github_issue: GitHubIssueNotifyConfig | None = None
 
 
 class MonitorConfig(_HIBPBase):
@@ -156,15 +168,18 @@ class MonitorReport(_HIBPBase):
     accounts: list[MonitorAccountResult] = Field(default_factory=list)
     domains: list[MonitorDomainResult] = Field(default_factory=list)
     webhook_sent: bool = False
+    notifications_sent: list[str] = Field(default_factory=list)
     history_summary: HistoryTrendSummary | None = None
 
 
-def _expand_env_vars(value: str) -> str:
+def _expand_env_vars(value: str, *, field_name: str = "webhook_url") -> str:
     def _replace(match: re.Match[str]) -> str:
         name = match.group(1)
         env_val = os.environ.get(name)
         if not env_val:
-            raise ValueError(f"Environment variable {name!r} referenced in webhook_url is not set.")
+            raise ValueError(
+                f"Environment variable {name!r} referenced in {field_name} is not set."
+            )
         return env_val
 
     return _ENV_VAR_RE.sub(_replace, value)
@@ -199,7 +214,40 @@ def load_monitor_config(path: Path) -> MonitorConfig:
     if raw_url is not None:
         if not isinstance(raw_url, str):
             raise ValueError("notify.webhook_url must be a string.")
-        notify_data["webhook_url"] = _expand_env_vars(raw_url)
+        notify_data["webhook_url"] = _expand_env_vars(raw_url, field_name="webhook_url")
+
+    raw_pd_key = notify_data.get("pagerduty_routing_key")
+    if raw_pd_key is not None:
+        if not isinstance(raw_pd_key, str):
+            raise ValueError("notify.pagerduty_routing_key must be a string.")
+        notify_data["pagerduty_routing_key"] = _expand_env_vars(
+            raw_pd_key, field_name="notify.pagerduty_routing_key"
+        )
+
+    raw_email = notify_data.get("email")
+    if raw_email is not None:
+        if not isinstance(raw_email, dict):
+            raise ValueError("TOML section [notify.email] must be a table.")
+        email_data = dict(raw_email)
+        for email_key in ("username", "password"):
+            raw_val = email_data.get(email_key)
+            if isinstance(raw_val, str):
+                email_data[email_key] = _expand_env_vars(
+                    raw_val, field_name=f"notify.email.{email_key}"
+                )
+        notify_data["email"] = email_data
+
+    raw_github = notify_data.get("github_issue")
+    if raw_github is not None:
+        if not isinstance(raw_github, dict):
+            raise ValueError("TOML section [notify.github_issue] must be a table.")
+        github_data = dict(raw_github)
+        raw_token = github_data.get("token")
+        if isinstance(raw_token, str):
+            github_data["token"] = _expand_env_vars(
+                raw_token, field_name="notify.github_issue.token"
+            )
+        notify_data["github_issue"] = github_data
 
     monitor_data: dict[str, Any] = dict(monitor_raw)
     raw_baseline_dir = monitor_data.get("baseline_dir")
@@ -524,6 +572,7 @@ def run_monitor(
     db_path_override: Path | None = None,
     webhook_url_override: str | None = None,
     webhook_format_override: WebhookFormat | None = None,
+    pagerduty_routing_key_override: str | None = None,
     sleep: Callable[[float], None] = time.sleep,
     webhook_client: httpx.Client | None = None,
 ) -> MonitorReport:
@@ -613,19 +662,53 @@ def run_monitor(
             webhook_sent=False,
         )
 
+    sent_channels: list[str] = []
+    webhook_sent = False
     effective_url = webhook_url_override or config.notify.webhook_url
     if effective_url:
         effective_fmt: WebhookFormat = (
             webhook_format_override if webhook_format_override is not None else config.notify.format
         )
-        sent = send_webhook_notification(
+        effective_routing_key = (
+            pagerduty_routing_key_override or config.notify.pagerduty_routing_key
+        )
+        if send_webhook_notification(
             effective_url,
             report,
             fmt=effective_fmt,
             title="pwned Monitor Alert",
+            routing_key=effective_routing_key,
+            severity=config.notify.pagerduty_severity,
+            client=webhook_client,
+        ):
+            webhook_sent = True
+            sent_channels.append("webhook")
+
+    if config.notify.email is not None and send_email_notification(
+        config.notify.email,
+        report,
+        title="pwned Monitor Alert",
+    ):
+        sent_channels.append("email")
+
+    if (
+        config.notify.github_issue is not None
+        and send_github_issue_notification(
+            config.notify.github_issue,
+            report,
+            title="pwned Monitor Alert",
             client=webhook_client,
         )
-        if sent:
-            report = report.model_copy(update={"webhook_sent": True})
+        is not None
+    ):
+        sent_channels.append("github_issue")
+
+    updates: dict[str, Any] = {}
+    if webhook_sent:
+        updates["webhook_sent"] = True
+    if sent_channels or config.notify.email is not None or config.notify.github_issue is not None:
+        updates["notifications_sent"] = sent_channels
+    if updates:
+        report = report.model_copy(update=updates)
 
     return report
