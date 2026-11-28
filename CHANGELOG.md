@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Repositioned `README.md` around the Python SDK and security-workflow toolkit, with a comparison table recommending the official `hibp` CLI for one-off lookups.
+- Added a Planned section to `docs/roadmap.md` (directory matching, multi-tenant reports, PAM password filter, compliance evidence, and more).
+
+### Fixed
+- Corrected documentation claims carried in earlier release notes: `PWNL` Bloom filters need ~1.2 bytes per hash at the default 1% FPR (sub-1 GB only at `--fpr 0.02` for ~900M hashes, not at the default as stated in 0.6.0); `PWNB` indexes are ~40–45% smaller than ASCII dumps (not ~50%, as stated in 0.6.0); `--mode`, `-n`, and `--parallelism`/`-p` are per-command options, not global (as stated in 0.5.0); Django support is a documented recipe, not a validator factory (as stated in 0.3.0).
+
 ## [0.6.0] - 2026-11-28
 
 ### Added
@@ -149,6 +156,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - XDG config fallback (`~/.config/pwned/.env`) and `pwned auth set|show|clear` command with secure `0600` permissions.
 - **Zero-Install & Packaging Improvements**:
   - `uvx` zero-install guidance and optional KeePass extras (`pwned[keepass]`).
+- **Client Configuration**:
+  - Custom `httpx.Client` / `httpx.AsyncClient` injection, `proxy` support, and configurable `max_retries` (including `0`) and `timeout`.
+- **Security & Supply Chain**:
+  - CodeQL and OpenSSF Scorecard workflows.
+  - `SHA256SUMS` checksums and changelog-based release notes on GitHub Releases.
+  - ClusterFuzzLite fuzzing (`.github/workflows/cifuzz.yml`) of the zero-dependency parsers.
 
 ## [0.1.1] - 2026-11-26
 
@@ -162,6 +175,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Hardened CI with SHA-pinned actions (`persist-credentials: false`), Python 3.12–3.14 + Linux/macOS/Windows matrix, and 95% coverage floor
 - Upgraded runtime and development dependencies (`pydantic` 2.14.4, `pydantic-settings` 2.16.3, `click` 8.5.1, `pytest` 9.2.0, `mypy` 2.4.1, `ruff` 0.17.6)
+
+### Fixed
+- Replaced deprecated `click.get_text_stream("stdin")` with `sys.stdin` when reading a password via `pwned password --stdin`.
 
 ## [0.1.0] - 2026-11-26
 
