@@ -615,6 +615,39 @@ def _render_md_table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join([header_line, sep_line, *data_lines])
 
 
+_MARKDOWN_ATTRIBUTION = (
+    "---\n\n*Data sourced from [Have I Been Pwned](https://haveibeenpwned.com/) (CC BY 4.0).*"
+)
+
+
+def _needs_markdown_attribution(serialized: Any) -> bool:
+    """Return True for HIBP breach, paste, domain, audit, or monitoring payloads."""
+    if isinstance(serialized, dict):
+        if not serialized:
+            return False
+        if (
+            ("total_entries" in serialized and "findings" in serialized)
+            or ("domain" in serialized and "total_exposed_aliases" in serialized)
+            or ("breaches" in serialized and "pastes" in serialized)
+            or ("accounts_checked" in serialized and "domains_checked" in serialized)
+            or "Name" in serialized
+            or ("Source" in serialized and "Id" in serialized)
+        ):
+            return True
+        return _is_str_list_mapping(serialized)
+    if isinstance(serialized, list) and serialized:
+        return all(
+            isinstance(item, dict)
+            and (
+                "Name" in item
+                or ("Source" in item and "Id" in item)
+                or ("account" in item and "breaches" in item)
+            )
+            for item in serialized
+        )
+    return False
+
+
 def _format_markdown(serialized: Any) -> str:
     parts: list[str] = []
     for block in _build_blocks(serialized):
@@ -627,6 +660,8 @@ def _format_markdown(serialized: Any) -> str:
             parts.append("\n".join(f"- {_md_escape(item)}" for item in block.items))
         else:
             parts.append(_md_escape(block.text))
+    if _needs_markdown_attribution(serialized):
+        parts.append(_MARKDOWN_ATTRIBUTION)
     return "\n\n".join(parts)
 
 

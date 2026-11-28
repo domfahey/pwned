@@ -2670,6 +2670,102 @@ class TestMonitorCommand:
         result = cli_runner.invoke(app, ["--api-key", TEST_KEY, "monitor", "--fail-if-found"])
         assert result.exit_code == 8
 
+    def test_monitor_smart_precheck_cli_flag(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        cfg = isolated_env / "pwned.toml"
+        cfg.write_text(
+            '[monitor]\nbaseline_dir = "baselines"\n[[domains]]\ndomain = "example.com"\n',
+            encoding="utf-8",
+        )
+        httpx_mock.add_response(url=f"{BASE}/latestbreach", json={"Name": "LatestOne"})
+        httpx_mock.add_response(
+            url=f"{BASE}/breacheddomain/example.com",
+            json={"alice": ["Adobe"]},
+        )
+        app = _make_cli()
+        res1 = cli_runner.invoke(
+            app,
+            ["--api-key", TEST_KEY, "--json", "monitor", "--save-baselines", "--smart-precheck"],
+        )
+        assert res1.exit_code == 0
+        assert json.loads(res1.output)["domains_skipped"] == 0
+
+        # Second run with unchanged latestBreach skips /breacheddomain/example.com
+        httpx_mock.add_response(url=f"{BASE}/latestbreach", json={"Name": "LatestOne"})
+        res2 = cli_runner.invoke(
+            app,
+            ["--api-key", TEST_KEY, "--json", "monitor", "--smart-precheck"],
+        )
+        assert res2.exit_code == 0
+        data2 = json.loads(res2.output)
+        assert data2["domains_skipped"] == 1
+        assert data2["new_exposures"] == 0
+
+
+class TestDoctorCommand:
+    def test_doctor_no_network_and_offline_db(
+        self, isolated_env: Path, cli_runner: CliRunner
+    ) -> None:
+        sha1_dir = isolated_env / "sha1_dir"
+        sha1_dir.mkdir()
+        prefix, suffix = _sha1_parts("password")
+        (sha1_dir / f"{prefix}.txt").write_text(f"{suffix}:12\r\n", encoding="utf-8")
+        (sha1_dir / ".pwned-index.json").write_text('{"mode":"sha1","etags":{}}', encoding="utf-8")
+
+        app = _make_cli()
+        res_ok = cli_runner.invoke(
+            app,
+            ["--json", "doctor", "--no-network", "--offline-db", str(sha1_dir)],
+        )
+        assert res_ok.exit_code == 0
+        data = json.loads(res_ok.output)
+        assert data["healthy"] is True
+        assert data["offline_db_kind"] == "directory"
+        assert data["offline_db_mode"] == "sha1"
+
+        res_mismatch = cli_runner.invoke(
+            app,
+            ["--json", "doctor", "--no-network", "--offline-db", str(sha1_dir), "--mode", "ntlm"],
+        )
+        assert res_mismatch.exit_code == 1
+        assert json.loads(res_mismatch.output)["healthy"] is False
+
+        res_short_ntlm = cli_runner.invoke(
+            app,
+            ["--json", "doctor", "--no-network", "--offline-db", str(sha1_dir), "-n"],
+        )
+        assert res_short_ntlm.exit_code == 1
+
+    def test_doctor_online_with_api_key_and_error_exit(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{PASSWORDS_BASE}/range/5BAA6",
+            text="1E4C9B93F3F0682250B6CF8331B7EE68FD8:100\n",
+        )
+        httpx_mock.add_response(url=f"{BASE}/latestbreach", json={"Name": "Adobe"})
+        httpx_mock.add_response(
+            url=f"{BASE}/subscription/status",
+            json={
+                "SubscriptionName": "Pwned 1",
+                "Description": "Desc",
+                "SubscribedUntil": "2027-01-01T00:00:00Z",
+                "Rpm": 10,
+                "DomainSearchMaxBreachedAccounts": 0,
+                "IncludesStealerLogs": False,
+            },
+        )
+
+        app = _make_cli()
+        res = cli_runner.invoke(app, ["--api-key", TEST_KEY, "--json", "doctor"])
+        assert res.exit_code == 0
+        data = json.loads(res.output)
+        assert data["healthy"] is True
+        assert data["api_key_source"] == "cli"
+        assert data["subscription_name"] == "Pwned 1"
+        assert data["subscription_rpm"] == 10
+
 
 class TestMcpCommand:
     def test_mcp_defaults_and_options(

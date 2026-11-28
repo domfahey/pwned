@@ -439,6 +439,7 @@ class TestAccountCommand:
         )
         assert "|" in md
         assert "Adobe" in md
+        assert "CC BY 4.0" in md
 
         html = _run_ok(
             "--format",
@@ -732,6 +733,25 @@ class TestMcpCommand:
         pw_payload = json.loads(pw_resp["content"][0]["text"])
         assert pw_payload["pwned"] is True
         assert pw_payload["count"] > 0
+
+
+class TestDoctorCommand:
+    def test_doctor_live_connectivity_and_offline_db(self, tmp_path: Path) -> None:
+        dump_dir = tmp_path / "pwned-sha1"
+        dump_dir.mkdir()
+        (dump_dir / "5BAA6.txt").write_bytes(b"1E4C9B93F3F0682250B6CF8331B7EE68FD8:12345\r\n")
+        (dump_dir / ".pwned-index.json").write_text('{"mode":"sha1","etags":{}}', encoding="utf-8")
+
+        data = _run_json("doctor", "--offline-db", str(dump_dir))
+        assert isinstance(data, dict)
+        assert data["healthy"] is True
+        assert data["offline_db_kind"] == "directory"
+        assert data["offline_db_mode"] == "sha1"
+        by_name = {c["name"]: c for c in data["checks"]}
+        assert by_name["pwned_passwords_api"]["status"] == "ok"
+        assert by_name["hibp_api"]["status"] == "ok"
+        assert by_name["offline_db"]["status"] == "ok"
+        assert by_name["subscription"]["status"] == "skipped"
 
 
 # ── Error handling ───────────────────────────────────────────────────

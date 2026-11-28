@@ -37,6 +37,7 @@ from pwned.config import (
     save_api_key,
     save_api_key_keyring,
 )
+from pwned.doctor import run_doctor
 from pwned.formatting import format_output
 from pwned.mcp_server import MCPServer, serve_stdio
 from pwned.models import BreachedAccountRangeResult, EmailAlias
@@ -813,6 +814,11 @@ def domain_report(
     help="Save updated snapshots to baseline_dir.",
 )
 @click.option(
+    "--smart-precheck",
+    is_flag=True,
+    help="Poll /latestBreach first and skip domain breach queries when unchanged.",
+)
+@click.option(
     "--notify-webhook",
     default=None,
     help="Override webhook URL from config.",
@@ -836,6 +842,7 @@ def monitor(
     ctx: click.Context,
     config_path: Path,
     save_baselines: bool,
+    smart_precheck: bool,
     notify_webhook: str | None,
     webhook_format: str | None,
     fail_if_pwned: bool,
@@ -860,6 +867,7 @@ def monitor(
                 config,
                 client,
                 save_baselines=save_baselines,
+                smart_precheck_override=smart_precheck,
                 webhook_url_override=notify_webhook,
                 webhook_format_override=(
                     cast(WebhookFormat, webhook_format) if webhook_format is not None else None
@@ -944,6 +952,56 @@ def completion(ctx: click.Context, shell: str) -> None:
     click.echo(comp.source())
 
 
+@click.command("doctor")
+@click.option(
+    "--offline-db",
+    type=click.Path(exists=False, path_type=Path),
+    default=None,
+    help="Optional local HIBP password dump file or per-prefix directory to verify.",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(_HASH_MODES),
+    default=None,
+    help="Expected offline DB hash algorithm (sha1 or ntlm); auto-detected if omitted.",
+)
+@click.option(
+    "--ntlm",
+    "-n",
+    is_flag=True,
+    help="Expect NTLM hashes in --offline-db (overrides --mode).",
+)
+@click.option(
+    "--no-network",
+    is_flag=True,
+    help="Skip live HIBP HTTP connectivity and subscription checks.",
+)
+@click.pass_context
+@handle_errors
+def doctor(
+    ctx: click.Context,
+    offline_db: Path | None,
+    mode: str | None,
+    ntlm: bool,
+    no_network: bool,
+) -> None:
+    """Verify HIBP API connectivity, subscription, credentials, cache, and offline DB."""
+    settings = ctx.obj["settings"]
+    cli_api_key: str | None = ctx.obj.get("cli_api_key")
+    expected_ntlm: bool | None = True if ntlm else (None if mode is None else mode == "ntlm")
+    report = run_doctor(
+        api_key=settings.get_api_key(),
+        api_key_source=get_api_key_source(api_key=cli_api_key),
+        user_agent=settings.user_agent,
+        offline_db=offline_db,
+        ntlm=expected_ntlm,
+        check_network=not no_network,
+    )
+    render_output(ctx, report)
+    if not report.healthy:
+        sys.exit(int(ExitCode.ERROR))
+
+
 def register_extra_commands(cli_group: click.Group) -> None:
     """Register additional CLI commands and command groups on a Click group."""
     cli_group.add_command(auth)
@@ -958,3 +1016,4 @@ def register_extra_commands(cli_group: click.Group) -> None:
     cli_group.add_command(mcp)
     cli_group.add_command(cache)
     cli_group.add_command(completion)
+    cli_group.add_command(doctor)

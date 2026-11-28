@@ -725,6 +725,44 @@ class TestFormatMarkdown:
         assert "| Name | Adobe |" in dict_out
         assert "| Count | 5 |" in dict_out
 
+    def test_markdown_cc_by_attribution_footer(self) -> None:
+        footer = "*Data sourced from [Have I Been Pwned](https://haveibeenpwned.com/) (CC BY 4.0).*"
+
+        # Breach, paste, search, domain, monitor, audit, and account-batch shapes include footer.
+        attributed_payloads: list[Any] = [
+            Breach(Name="Adobe", Domain="adobe.com", PwnCount=152445165),
+            [Breach(Name="Adobe", Domain="adobe.com")],
+            [Paste(Source="Pastebin", Id="abc123", EmailCount=10)],
+            SearchResult(breaches=[Breach(Name="Adobe")], pastes=[]),
+            DomainReport(
+                domain="example.com",
+                total_exposed_aliases=1,
+                total_exposures=1,
+                unique_breaches=1,
+            ),
+            AuditSummary(total_entries=1, unique_passwords=1, compromised_entries=0, findings=[]),
+            {"accounts_checked": 1, "domains_checked": 0, "new_exposures": 0},
+            {"alice": ["Adobe"]},
+            [AccountBatchItem(account="a@example.com", breaches=["Adobe"], status="pwned")],
+        ]
+        for payload in attributed_payloads:
+            out = format_output(payload, fmt="markdown")
+            assert out.endswith(footer), f"Expected CC BY footer for {payload!r}, got:\n{out}"
+
+        # Empty, scalar, dataclass lists, password counts, and non-HIBP dicts omit footer.
+        unattributed_payloads: list[Any] = [
+            [],
+            {},
+            "plain text",
+            ["Passwords", "Email addresses"],
+            {"count": 42},
+            [{"Col": "val"}],
+            [PasswordBatchItem(index=1, pwn_count=10, status="pwned")],
+        ]
+        for payload in unattributed_payloads:
+            out = format_output(payload, fmt="markdown")
+            assert "CC BY 4.0" not in out, f"Unexpected CC BY footer for {payload!r}"
+
 
 class TestFormatHtml:
     def _assert_html_envelope(self, raw: str) -> None:
