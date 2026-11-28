@@ -103,7 +103,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: domfahey/pwned@v0.4.1
+      - uses: domfahey/pwned@v0.5.0
         with:
           args: monitor --config pwned.toml --save-baselines --fail-if-pwned
           api-key: ${{ secrets.HIBP_API_KEY }}
@@ -114,7 +114,7 @@ jobs:
 ```yaml
 repos:
   - repo: https://github.com/domfahey/pwned
-    rev: v0.4.1
+    rev: v0.5.0
     hooks:
       - id: pwned-audit
 ```
@@ -125,9 +125,9 @@ Published for `linux/amd64` and `linux/arm64` on every release tag with SLSA bui
 
 ```bash
 # Password check over stdin
-printf 'hunter2\n' | docker run --rm -i ghcr.io/domfahey/pwned:0.4.1 password --stdin
+printf 'hunter2\n' | docker run --rm -i ghcr.io/domfahey/pwned:0.5.0 password --stdin
 
 # Mount a local vault or monitor config read-only
 docker run --rm -v "$(pwd):/data:ro" \
-  ghcr.io/domfahey/pwned:0.4.1 audit /data/vault.json --source bitwarden-json --check-reuse --format markdown
+  ghcr.io/domfahey/pwned:0.5.0 audit /data/vault.json --source bitwarden-json --check-reuse --format markdown
 ```

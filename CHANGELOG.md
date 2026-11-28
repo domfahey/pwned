@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-27
+
 ### Added
 - Exported `ExitCode` (`IntEnum` mirroring official HIBP CLI codes `0`–`9` and `130`) and `BadRequestError` (HTTP `400` subclass of `HIBPError`) from `pwned`.
 - Added `--fail-if-pwned` (exit `8`) to `pwned pastes` and `pwned stealer email|website|domain` for consistent CI scripting across all search commands.
@@ -29,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Changed `pwned offline download` CLI default to per-prefix directory mode (`00000.txt`–`FFFFF.txt` + `.pwned-index.json`) for direct interoperability with official `hibp password download` (use `--single`/`-s` for a merged sorted file), backed by a bounded async worker pool for flat memory usage across 1,048,576 prefixes.
 - Changed `pwned password --file` and multi-line `--stdin` to skip blank lines without hashing `""` while preserving exact 1-based line numbers (`skip_empty=False` in `load_input_file`/`parse_input_lines`).
 - Changed no-match (`404`) search responses on `account`, `domain`, `pastes`, and `stealer` to exit `0` with clean status text (or empty `[]` / `{}` in JSON), reserving non-zero exits for `--fail-if-pwned`, unknown catalog breaches (`breach`), failed domain verification, and errors.
-- Switched `README.md` zero-install `uvx` Quickstart to a pinned, zero-secret public lookup (`@v0.4.1 pwned breach Adobe`) and pinned `uv tool install` examples.
+- Switched `README.md` zero-install `uvx` Quickstart to a pinned, zero-secret public lookup (`@v0.5.0 pwned breach Adobe`) and pinned `uv tool install` examples.
 
 ### Fixed
 - Re-raised `BrokenPipeError` in `handle_errors` for clean Unix piping.
@@ -157,7 +159,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured error hierarchy (`HIBPError`, `NotFoundError`, `UnauthorizedError`, `ForbiddenError`, `RateLimitError`) and automatic 429 retry with capped `Retry-After`
 - Strict `mypy`, `ruff` (including Bandit `S` rules), GitHub Actions CI, and unit + integration test suites
 
-[Unreleased]: https://github.com/domfahey/pwned/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/domfahey/pwned/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/domfahey/pwned/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/domfahey/pwned/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/domfahey/pwned/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/domfahey/pwned/compare/v0.2.0...v0.3.0
