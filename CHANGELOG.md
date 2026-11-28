@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added non-interactive `pwned auth set --stdin` to read `HIBP_API_KEY` from standard input.
 - Added `--full` alias (for `--no-truncate` on `account`/`search`) and `--fail-if-found` alias (for `--fail-if-pwned`).
 - Added per-prefix offline dump directory mode (`00000.txt`–`FFFFF.txt` + `.pwned-index.json` hash-mode & ETag index with periodic checkpointing and atomic per-prefix writes) to `download_offline_db(..., directory=True)` and `pwned offline download` (`--single`/`-s` for merged sorted files, `--max-retries` with unlimited retries when omitted or `0` to disable, `--overwrite` / `-o`, `--force-refresh` ETag rebuild, `ranges_per_second` and `directory` fields in `DownloadStats`, and stderr TTY progress reporting), plus `O(1)` directory lookups with hash-mode validation in `OfflinePasswordsClient` and `--offline-db` across `password`, `audit`, and `mcp`.
+- Added `pwned doctor` CLI subcommand and `run_doctor()` / `DoctorReport` / `DoctorCheck` Python API to verify HIBP API connectivity, subscription tier/RPM, active credential source, OS Keychain availability, local cache size, and optional `--offline-db` integrity (with `--no-network`, `--mode`, and `-n`/`--ntlm`).
+- Added smart `GET /latestBreach` pre-check (`smart_precheck = true` in `pwned.toml` or `pwned monitor --smart-precheck`, plus `domains_skipped` on `MonitorReport`) to skip redundant `GET /breachedDomain/{domain}` queries when no new breach has been added since the last baseline snapshot.
+- Added a compact CC BY 4.0 Have I Been Pwned attribution footer to `--format markdown` breach, paste, domain, vault audit, and monitor reports (matching `README.md` and `--format html`).
 - Added `skip_empty: bool = True` parameter to `parse_input_lines()` and `load_input_file()`.
 
 ### Changed

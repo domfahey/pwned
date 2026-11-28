@@ -10,6 +10,7 @@ Define watched accounts, verified domains, baseline storage, output format, and 
 [monitor]
 baseline_dir = ".pwned-baselines"
 cache = true
+smart_precheck = true
 format = "markdown"
 fail_if_pwned = true
 rpm = 10
@@ -46,6 +47,7 @@ Key behaviors:
 - **Secret-safe TOML:** `${ENV_VAR}` placeholders in `notify.webhook_url` are expanded from environment variables at runtime so secrets never enter git.
 - **Safe baseline filenames:** Per-target snapshots inside `baseline_dir` use deterministic SHA-256 filenames (`account_<hash16>.json`, `domain_<hash16>.json`) to prevent path traversal.
 - **Read-before-save diffing:** When `--save-baselines` is passed, existing baselines are read first to compute `new_exposures` before updating the stored snapshot.
+- **Smart `latestBreach` pre-check:** Enable `smart_precheck = true` in `[monitor]` (or pass `--smart-precheck`) with `baseline_dir` configured to poll unauthenticated `GET /latestBreach` first and skip `GET /breachedDomain/{domain}` queries for already-baselined domains when no new breach has been published (stealer log checks and newly added domains still run).
 - **Zero alert fatigue:** Webhooks fire **only** when `new_exposures > 0`.
 
 ## Ad-Hoc Baseline Diffing
@@ -77,7 +79,7 @@ Supported on `account`, `domain`, `domain-report`, `search`, `audit`, and `monit
 
 | Format | Best For |
 |---|---|
-| `markdown` | GitHub Actions `$GITHUB_STEP_SUMMARY`, pull request comments, security tickets |
+| `markdown` | GitHub Actions `$GITHUB_STEP_SUMMARY`, pull request comments, security tickets (includes CC BY 4.0 HIBP attribution footer on breach, paste, domain, audit, and monitor reports) |
 | `html` | Standalone zero-dependency HTML5 compliance reports (responsive light/dark CSS, strict `html.escape()` XSS defense, CC BY 4.0 attribution) |
 | `sarif` | GitHub Code Scanning / Security tab (`HIBP001`–`HIBP004`, SARIF 2.1.0) |
 | `json` / `jsonl` | Downstream automation, SIEM ingestion, `jq` pipelines |

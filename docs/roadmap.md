@@ -107,15 +107,15 @@ Prioritized from cross-ecosystem research (official `HaveIBeenPwned.Cli` / `have
 - [ ] **Vault breach & stealer-log correlation (`pwned audit --check-breaches`)** — cross-reference vault entry emails and login domains against HIBP breaches and stealer logs to flag accounts on compromised sites even when the password itself has not yet appeared in Pwned Passwords.
 
 ### Offline Scale & Self-Hosted Infrastructure
-- [x] **Per-prefix offline dump directory interop (`00000.txt`–`FFFFF.txt`)** — support directory-per-prefix downloads with ETag index refreshes (`--force` / `--overwrite`) alongside single-file exports in `pwned offline download`, and `O(1)` directory lookups in `OfflinePasswordsClient` for direct interoperability with official `HaveIBeenPwned.Cli` (`hibp password download`).
+- [x] **Per-prefix offline dump directory interop (`00000.txt`–`FFFFF.txt`)** — support directory-per-prefix downloads with ETag index refreshes (`--force-refresh` / `--overwrite`) alongside single-file exports in `pwned offline download`, and `O(1)` directory lookups in `OfflinePasswordsClient` for direct interoperability with official `HaveIBeenPwned.Cli` (`hibp password download`).
 - [ ] **Self-hosted k-anonymity HTTP server / caching proxy (`pwned serve`)** — expose a drop-in `/range/{prefix}` endpoint, `/healthz`, and optional Prometheus `/metrics` backed by `--offline-db` or an upstream TTL cache for air-gapped services and high-QPS auth backends.
 - [ ] **Compact offline hash indexes (`pwned offline build-bloom` / `compact`)** — build sub-1 GB mmap-able Bloom filters for RAM-resident checks in containers/CI runners, plus a fixed-width binary prefix-indexed format (~50% smaller than ASCII dumps with `O(1)` prefix jump).
 
 ### Continuous Monitoring, History & Alerting
-- [ ] **Smart `latestBreach` pre-check in `pwned monitor`** — poll unauthenticated `GET /latestBreach` (Cloudflare-cached) first and skip `GET /breachedDomain/{domain}` queries when no new breach has been added since the last baseline snapshot.
+- [x] **Smart `latestBreach` pre-check in `pwned monitor`** — poll unauthenticated `GET /latestBreach` (Cloudflare-cached) first and skip `GET /breachedDomain/{domain}` queries when no new breach has been added since the last baseline snapshot.
 - [ ] **SQLite exposure history & remediation tracking (`monitor --db`)** — persist first-seen and resolved exposure timestamps in a stdlib `sqlite3` store to track breach trends and rotated credentials across runs, feeding trend summaries into `domain-report`, `--format markdown`, and `--format html`.
 - [ ] **Expanded alert destinations** — add Microsoft Teams (Adaptive Cards), PagerDuty (Events API v2), SMTP email, and GitHub Issue auto-creation/commenting for CI monitoring pipelines.
-- [ ] **CC BY 4.0 attribution footer in Markdown reports** — append a compact HIBP attribution footer to `--format markdown` breach and paste reports (matching `README.md` and `--format html`).
+- [x] **CC BY 4.0 attribution footer in Markdown reports** — append a compact HIBP attribution footer to `--format markdown` breach and paste reports (matching `README.md` and `--format html`).
 
 ### CLI UX & End-User Diagnostics
 - [x] **Enable `--pad` by default on `pwned password`** — send `Add-Padding: true` by default (`--pad/--no-pad`, matching `pwned audit` and `pwned mcp`) so interactive password checks hide response lengths out of the box.
@@ -125,7 +125,7 @@ Prioritized from cross-ecosystem research (official `HaveIBeenPwned.Cli` / `have
 - [x] **Raw 6-char SHA-1 prefix support on `account-range`** — allow passing a pre-hashed 6-char hex prefix directly to `pwned account-range` (matching `hibp account range <prefix>`).
 - [x] **Non-interactive `pwned auth set --stdin`** — read `HIBP_API_KEY` from standard input for scripted setup without exposing secrets in shell history or `ps` output.
 - [x] **Global `--outfile <path>` (+ `--force`)** — write formatted UTF-8 output directly to disk from any data command with safe overwrite protection (avoiding Windows PowerShell UTF-16 redirection issues).
-- [ ] **End-user `pwned doctor` CLI subcommand** — verify HIBP API connectivity, subscription tier/RPM, active credential source, keyring availability, cache size, and offline DB integrity directly from installed `pwned` binaries.
+- [x] **End-user `pwned doctor` CLI subcommand** — verify HIBP API connectivity, subscription tier/RPM, active credential source, keyring availability, cache size, and offline DB integrity directly from installed `pwned` binaries.
 - [x] **Mirrored HIBP CLI semantic exit codes (`0`–`9`, `130`)** — align exit codes with official `HaveIBeenPwned.Cli` (`ExitCode` `IntEnum`, `BadRequestError`, `FileOrStoreError`, exit `8` on `--fail-if-pwned`, `3` auth, `4` forbidden, `5` rate limit, `6` network/5xx, `7` file/store, `9` missing resource/verification failure, `130` cancelled).
 
 ## Backlog / External

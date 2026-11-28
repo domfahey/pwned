@@ -2438,7 +2438,16 @@ class TestMarkdownHtmlAndHelp:
     def test_markdown_shorthand_before_and_after_subcommand(
         self, httpx_mock: HTTPXMock, cli_runner: CliRunner
     ) -> None:
-        expected_table = "| Field | Value |\n| --- | --- |\n| Name | Adobe |\n| Title | Adobe |\n"
+        expected_table = (
+            "| Field | Value |\n"
+            "| --- | --- |\n"
+            "| Name | Adobe |\n"
+            "| Title | Adobe |\n"
+            "\n"
+            "---\n"
+            "\n"
+            "*Data sourced from [Have I Been Pwned](https://haveibeenpwned.com/) (CC BY 4.0).*\n"
+        )
 
         httpx_mock.add_response(
             url=f"{BASE}/breach/Adobe",

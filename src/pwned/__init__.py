@@ -62,6 +62,7 @@ from pwned.config import (
     save_api_key,
     save_api_key_keyring,
 )
+from pwned.doctor import DoctorCheck, DoctorReport, run_doctor
 from pwned.filtering import BREACH_SORT_KEYS, BreachSortKey, filter_breaches
 from pwned.formatting import OutputFormat, format_output
 from pwned.mcp_server import MCP_PROTOCOL_VERSION, MCPServer, serve_stdio
@@ -143,6 +144,8 @@ __all__ = [
     "DataClassDescription",
     "DataClassExposure",
     "DnsToken",
+    "DoctorCheck",
+    "DoctorReport",
     "DomainReport",
     "DownloadStats",
     "EmailAlias",
@@ -219,6 +222,7 @@ __all__ = [
     "parse_pass_store",
     "parse_protonpass_csv",
     "parse_pwdump",
+    "run_doctor",
     "run_monitor",
     "save_api_key",
     "save_api_key_keyring",

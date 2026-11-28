@@ -35,10 +35,11 @@ src/pwned/
 ├── batch.py            # Batch account/password checks with RPM rate limiting and stats
 ├── cache.py            # File-based TTL response caching for public endpoints & ranges
 ├── cli.py              # Click command groups and global option parser
-├── cli_commands.py     # Additional commands (`auth`, `search`, `account-range`, `domain-verify`, `audit`, `offline`, `domain-report`, `monitor`, `mcp`, `cache`, `completion`)
+├── cli_commands.py     # Additional commands (`auth`, `search`, `account-range`, `password-range`, `domain-verify`, `audit`, `offline`, `domain-report`, `monitor`, `mcp`, `cache`, `completion`, `doctor`)
 ├── cli_helpers.py      # CLI output rendering, error handling, and API key validation
 ├── client.py           # Sync HIBP API client (`HIBPClient`)
 ├── config.py           # pydantic-settings configuration with XDG fallback and OS Keychain backend
+├── doctor.py           # End-user environment, credential, cache, offline DB, and API diagnostics (`run_doctor`)
 ├── filtering.py        # Breach filtering and sorting helpers
 ├── formatting.py       # Output formatters (`text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, `html`)
 ├── mcp_server.py       # Local privacy-first stdio Model Context Protocol server

@@ -139,6 +139,9 @@ Remove all cached JSON files from the XDG cache directory (`~/.cache/pwned`).
 #### `pwned completion [bash|zsh|fish]`
 Print shell tab-completion script for eval/sourcing.
 
+#### `pwned doctor`
+Verify HIBP API connectivity, subscription tier/RPM, active credential source, OS Keychain availability, local cache size, and optional local `--offline-db` integrity (`--offline-db PATH`, `--mode [sha1|ntlm]`, `-n`/`--ntlm`, `--no-network`). Exits `0` when healthy or `1` if any check errors.
+
 ---
 
 ### Core / Pro / High RPM (API Key Required)
@@ -172,7 +175,7 @@ List breached aliases for a verified domain (`--baseline`, `--save-baseline`, `-
 Cross-reference a verified domain's breached aliases (and optional `--include-stealer-logs`) with breach catalog metadata to summarize top breaches, recency, and counts by compromised `DataClasses`. Supports `--cache`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned` / `--fail-if-found`, and all `--format` options (`markdown`, `html`, `json`, `table`, etc.).
 
 #### `pwned monitor`
-Run declarative TOML monitoring across accounts and domains (`--config pwned.toml`, `--save-baselines`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned` / `--fail-if-found`). See [Monitoring, Webhooks & CI/CD](monitoring-and-ci.md).
+Run declarative TOML monitoring across accounts and domains (`--config pwned.toml`, `--save-baselines`, `--smart-precheck`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned` / `--fail-if-found`). See [Monitoring, Webhooks & CI/CD](monitoring-and-ci.md).
 
 #### `pwned subscribed-domains [list]` (`sd`)
 List all verified domains associated with your API key (`pwned subscribed-domains` and `pwned subscribed-domains list` are equivalent).
