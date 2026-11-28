@@ -10,10 +10,10 @@
 
 An unofficial, typed Python SDK and security-workflow toolkit for [Troy Hunt](https://www.troyhunt.com)'s [Have I Been Pwned](https://haveibeenpwned.com/) service (API v3): offline password auditing, vault and Active Directory hygiene checks, declarative breach monitoring, and a local stdio MCP server, all built on a full API client.
 
-- **Privacy-first password checks** — *k*-anonymity (SHA-1 & NTLM, 5-char prefix only, padded by default), air-gapped `O(1)` per-prefix range directories, ~50% smaller `PWNB` compact binary indexes, sub-1 GB `PWNL` Bloom filters, `O(log N)` sorted text dumps, and self-hosted `pwned serve` range servers; plaintext passwords never leave your machine.
+- **Privacy-first password checks** — *k*-anonymity (SHA-1 & NTLM, 5-char prefix only, padded by default), air-gapped `O(1)` per-prefix range directories, ~40–45% smaller `PWNB` compact binary indexes, ~1.2 bytes-per-hash `PWNL` Bloom filters, `O(log N)` sorted text dumps, and self-hosted `pwned serve` range servers; plaintext passwords never leave your machine.
 - **18 vault & Active Directory audit sources** — Bitwarden (JSON, PBKDF2/Argon2id encrypted JSON, CSV, live `bw`/`rbw` CLI), 1Password (CSV, 1PUX, live `op` CLI), LastPass, Dashlane, Proton Pass, Chrome/Edge, Firefox, Apple Passwords, generic CSV, KeePass `.kdbx`, AD `pwdump`/`secretsdump` (with hygiene checks & banned wordlists), and live Unix `pass`/`gopass`, plus Watchtower-style breach & stealer-log correlation.
 - **CI/CD & reporting ready** — `text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, and standalone `html` outputs, declarative `pwned.toml` monitoring with SQLite exposure history & baseline diffing, Slack/Discord/Teams/PagerDuty/SMTP/GitHub Issues alerts, GitHub Action, and multi-arch container images.
-- **Python SDK with full HIBP API v3 coverage** — all 21 / 21 endpoints in sync and async clients, strict Pydantic v2 models, and Pydantic/FastAPI/Django password validators ([coverage matrix](docs/hibp-api-coverage.md)).
+- **Python SDK with full HIBP API v3 coverage** — all 21 / 21 endpoints in sync and async clients, strict Pydantic v2 models, and Pydantic/FastAPI password validators with a Django recipe ([coverage matrix](docs/hibp-api-coverage.md)).
 
 ### `pwned` or the official CLI?
 
@@ -67,7 +67,7 @@ Read the hosted docs at **[domfahey.github.io/pwned](https://domfahey.github.io/
 |---|---|
 | [CLI Reference](docs/cli-reference.md) | Commands, short aliases, global flags, output formats, credential precedence, exit codes |
 | [HIBP API v3 Coverage](docs/hibp-api-coverage.md) | 21 / 21 endpoint parity matrix, response models, rate limiting, error handling, test accounts |
-| [Python Library Guide](docs/python-api.md) | Sync/async clients, caching, retry jitter, batching, Pydantic/FastAPI/Django validators |
+| [Python Library Guide](docs/python-api.md) | Sync/async clients, caching, retry jitter, batching, Pydantic/FastAPI validators, Django recipe |
 | [Vault & Active Directory Auditing](docs/vault-auditing.md) | 18 vault/browser/`pwdump`/`pass`/`gopass`/live CLI sources, Argon2id, AD hygiene, banned wordlists, breach correlation, reuse & strength scoring |
 | [Monitoring, Webhooks & CI/CD](docs/monitoring-and-ci.md) | `pwned.toml`, SQLite history, baselines, Slack/Discord/Teams/PagerDuty/SMTP/GitHub Issues, SARIF/Markdown/HTML, GitHub Action, pre-commit, Docker |
 | [Offline Lookups & Local MCP Server](docs/offline-and-mcp.md) | Resumable offline dumps, compact `PWNB`/Bloom `PWNL` indexes, `pwned serve`, `OfflinePasswordsClient`, and `pwned mcp` |
@@ -353,7 +353,7 @@ src/pwned/
 ├── reporting.py        # Domain exposure risk summary reporting
 ├── server.py           # Self-hosted k-anonymity HTTP range server & caching proxy (PwnedRangeServer)
 ├── strength.py         # Password strength heuristics & optional zxcvbn integration
-└── validators.py       # Framework password validators (Pydantic / FastAPI / Django)
+└── validators.py       # Framework password validators (Pydantic / FastAPI)
 
 tests/
 ├── unit/               # Fast unit tests with mocked HTTP (100% branch coverage)

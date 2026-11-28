@@ -1,6 +1,6 @@
 # Roadmap & TODOs
 
-Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/SDK research (`wKovacs64/pwned`, `wKovacs64/hibp`, `brycx/checkpwn`, `philnash/pwned`, `wneessen/go-hibp`).
+Planned and completed improvements for `pwned`. Early releases were prioritized from peer HIBP CLI/SDK research (`wKovacs64/pwned`, `wKovacs64/hibp`, `brycx/checkpwn`, `philnash/pwned`, `wneessen/go-hibp`); later sections note their own sources.
 
 ## Completed (v0.2.0)
 
@@ -16,7 +16,7 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 - [x] **`pwned auth set|show|clear` command** — interactive setup to store/check/clear API key in `~/.config/pwned/.env` with `0600` permissions on POSIX.
 - [x] **Scripting exit codes & thresholds (`--fail-if-pwned`, `--threshold N`)** — clean, predictable exit codes for CI checks, pre-commit hooks, and monitoring scripts.
 - [x] **`PwnedPasswordsClient.is_pwned(password, *, threshold=1) -> bool`** — ergonomic boolean helper for application signup validators.
-- [x] **Batch account & password checks (`--file` / multi-line `--stdin`)** — audit a list of emails or passwords in one run with automatic subscription RPM pacing (`--rpm` override) and TTY progress output on stderr.
+- [x] **Batch account & password checks (`--file` / multi-line `--stdin`)** — audit a list of emails or passwords in one run, with automatic subscription RPM pacing for account checks (`--rpm` override), bounded concurrency for password checks, and TTY progress output on stderr.
 - [x] **Additional output formats (`--format text|json|jsonl|csv|table`)** — structured exports for domain/org audits and cleaner terminal tables (respecting `NO_COLOR` and non-TTY pipes).
 
 ### Async, Caching & Vault Auditing
@@ -40,7 +40,7 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 
 ### Password & Vault Auditing
 - [x] **Pre-hashed password lookups (`--hashed` / `check_hash()`)** — accept 40-char SHA-1 or 32-char NTLM hashes directly on `pwned password` and in `PwnedPasswordsClient` / `AsyncPwnedPasswordsClient` (for AD NTLM dumps and pre-hashed lists).
-- [x] **Async concurrent password batch & vault auditing** — run `batch_check_passwords` and `audit_entries` concurrently via `AsyncPwnedPasswordsClient` with bounded concurrency (`--concurrency`) for ~10x faster vault audits.
+- [x] **Async concurrent password batch & vault auditing** — run `batch_check_passwords` and `audit_entries` concurrently via `AsyncPwnedPasswordsClient` with bounded concurrency (`--concurrency`) for faster vault audits.
 - [x] **Reused-password detection (`pwned audit --check-reuse`)** — report entries sharing duplicate passwords locally during vault audits.
 - [x] **Additional password manager & browser export formats** — add zero-dep parsers for 1Password CSV/1PUX, Chrome/Edge CSV, Firefox CSV, and Apple Passwords CSV, plus optional Bitwarden encrypted JSON decryption (`cryptography` extra).
 
@@ -50,9 +50,9 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 - [x] **Batch summary stats (`--stats`)** — optional stderr summary (`checked / pwned / clean / errors / elapsed`) for batch runs.
 - [x] **Shell completions (`pwned completion bash|zsh|fish`)** — expose Click's built-in tab-completion scripts cleanly in CLI and docs.
 - [x] **Optional short command aliases** — ergonomic shortcuts inspired by `wKovacs64/pwned` (`pw`, `ba`, `bar`, `pa`, `bd`, `sd`, `lb`, `dc`).
-- [x] **Framework password-validator recipes/helpers** — thin validators/docs for Pydantic (`AfterValidator`), FastAPI, and Django built on `is_pwned()` / `AsyncPwnedPasswordsClient.is_pwned()`.
+- [x] **Framework password-validator recipes/helpers** — thin validators for Pydantic (`AfterValidator`) and FastAPI, plus a Django recipe in the docs, built on `is_pwned()` / `AsyncPwnedPasswordsClient.is_pwned()`.
 
-## Completed (v0.3.0 — Offline Lookups, Monitoring & CI Integrations)
+### Offline Lookups, Monitoring & CI Integrations
 
 - [x] **Offline sorted hash file lookup (`--offline-db <path>` / `OfflinePasswordsClient`)** — `O(log N)` binary search via `seek`/`mmap` (stdlib only) over official `PwnedPasswordsDownloader` SHA-1/NTLM dumps for air-gapped and high-scale checks.
 - [x] **Baseline diffing (`--baseline` / `--save-baseline`)** — snapshot known breaches/pastes/stealer logs to JSON and report/exit non-zero only on newly discovered exposures for cron/CI monitoring.
@@ -86,7 +86,7 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 
 ### Ecosystem & Distribution
 - [x] **Local stdio MCP server (`pwned mcp`, built-in zero-dependency)** — local-only privacy tools complementing HIBP's remote MCP server for workflows that shouldn't cross a chat prompt: local k-anonymity/offline password checks, local vault auditing, and baseline diffing.
-- [x] **Container image (`ghcr.io/domfahey/pwned`)** — publish a minimal distroless/alpine image via `release.yml` for air-gapped, Kubernetes CronJob, and non-Python CI environments.
+- [x] **Container image (`ghcr.io/domfahey/pwned`)** — publish a minimal multi-stage `python:3.12-slim` image via `release.yml` for air-gapped, Kubernetes CronJob, and non-Python CI environments.
 - [x] **Async account batching (`async_batch_check_accounts`) + retry jitter** — mirror `async_batch_check_passwords` for async applications, with jittered 429 backoff.
 
 ## Completed (v0.4.1)
@@ -103,7 +103,7 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 - [x] **CLI password range lookup (`pwned password-range <5-hex>`)** — expose `get_password_range()` on the CLI (`--ntlm`, padding stripped) alongside `pwned password`.
 - [x] **Raw 6-char SHA-1 prefix support on `account-range`** — allow passing a pre-hashed 6-char hex prefix directly to `pwned account-range` (matching `hibp account range <prefix>`).
 - [x] **Non-interactive `pwned auth set --stdin`** — read `HIBP_API_KEY` from standard input for scripted setup without exposing secrets in shell history or `ps` output.
-- [x] **Global `--outfile <path>` (+ `--force`) and CLI shorthands** — write formatted UTF-8 output directly to disk from any data command with safe overwrite protection, plus global `--markdown`, `--mode sha1|ntlm`, `-n`, and `--parallelism`/`-p`.
+- [x] **Global `--outfile <path>` (+ `--force`) and CLI shorthands** — write formatted UTF-8 output directly to disk from any data command with safe overwrite protection, plus global `--markdown` and per-command `--mode sha1|ntlm`, `-n`, and `--parallelism`/`-p` shorthands.
 - [x] **Per-prefix offline dump directory interop (`00000.txt`–`FFFFF.txt`)** — directory-per-prefix downloads with compact `.pwned-index.json` hash-mode & ETag checkpoints (`--force-refresh` / `--overwrite`), atomic shard writes, and `O(1)` directory lookups in `OfflinePasswordsClient` for direct interoperability with official `HaveIBeenPwned.Cli` (`hibp password download`).
 - [x] **End-user `pwned doctor` CLI subcommand** — verify HIBP API connectivity, subscription tier/RPM, active credential source, keyring availability, cache size, and offline DB integrity directly from installed `pwned` binaries.
 - [x] **Smart `latestBreach` pre-check in `pwned monitor`** — poll unauthenticated `GET /latestBreach` (Cloudflare-cached) first and skip `GET /breachedDomain/{domain}` queries when no new breach has been added since each domain's last baseline snapshot.
@@ -123,11 +123,32 @@ Prioritized from cross-ecosystem research (official `HaveIBeenPwned.Cli` / `have
 
 ### Offline Scale & Self-Hosted Infrastructure
 - [x] **Self-hosted k-anonymity HTTP server / caching proxy (`pwned serve`)** — expose a drop-in `/range/{prefix}` endpoint, `/healthz`, and optional Prometheus `/metrics` backed by `--offline-db` or an upstream TTL cache for air-gapped services and high-QPS auth backends.
-- [x] **Compact offline hash indexes (`pwned offline build-bloom` / `compact`)** — build sub-1 GB mmap-able Bloom filters for RAM-resident checks in containers/CI runners, plus a fixed-width binary prefix-indexed format (~50% smaller than ASCII dumps with `O(1)` prefix jump).
+- [x] **Compact offline hash indexes (`pwned offline build-bloom` / `compact`)** — build mmap-able Bloom filters (~1.2 bytes per hash at 1% FPR; under 1 GB at `--fpr 0.02`) for RAM-resident checks in containers/CI runners, plus a fixed-width binary prefix-indexed format (~40–45% smaller than ASCII dumps with `O(1)` prefix jump).
 
 ### Continuous Monitoring, History & Alerting
 - [x] **SQLite exposure history & remediation tracking (`monitor --db`)** — persist first-seen and resolved exposure timestamps in a stdlib `sqlite3` store to track breach trends and rotated credentials across runs, feeding trend summaries into `domain-report`, `--format markdown`, and `--format html`.
+- [x] **Release supply-chain assets** — attach a CycloneDX SBOM (`pwned-<version>.cdx.json`) and the Sigstore-signed build provenance bundle to each GitHub Release.
 - [x] **Expanded alert destinations** — add Microsoft Teams (Adaptive Cards), PagerDuty (Events API v2), SMTP email, and GitHub Issue auto-creation/commenting for CI monitoring pipelines.
+
+## Planned
+
+Focused on workflows outside the official [`hibp` CLI](https://haveibeenpwned.com/cli), which covers one-off API lookups. Items marked **(priority)** come first.
+
+### Organizations
+- [ ] **Directory matching (priority)** — pull users from Entra ID, Okta, or Google Workspace and join them to domain search and stealer-log results to separate active from departed staff, attach managers, and optionally force password resets through the identity provider's API (provider SDKs as optional extras).
+- [ ] **Multi-tenant mode for managed service providers** — one config covering many client domains, with a branded `domain-report` per client and alerts routed to each client's own channels.
+- [ ] **Stealer logs vs. SaaS inventory** — compare stealer-log website domains against a list of approved company apps to flag infected devices signing into sanctioned tools.
+- [ ] **SIEM export** — send findings to Splunk (HEC) or Elastic in the OCSF security-event format, alongside the existing SARIF output.
+
+### Blocking Breached Passwords at the Source
+- [ ] **Linux password filter (priority)** — a PAM hook (via `pam_exec`) that rejects breached passwords on `passwd` using the local `PWNL` Bloom filter, with no network calls.
+- [ ] **Login-time checks for web apps** — FastAPI/Starlette middleware and Flask/Django hooks that recheck passwords on successful login (NIST 800-63B). Prerequisites: a `base_url` option on `PwnedPasswordsClient` / `AsyncPwnedPasswordsClient` so validators can target `pwned serve`, and an offline validator backed by the local Bloom filter.
+- [ ] **Deploying `pwned serve`** — Helm chart and scheduled index refreshes for air-gapped deployments of a self-hosted Pwned Passwords API (`/healthz` and Prometheus `/metrics` already ship in v0.6.0).
+
+### Compliance & Analysis
+- [ ] **Compliance evidence (priority)** — a report showing breached-password screening is in place, mapped to NIST 800-63B, PCI DSS 4.0, and SOC 2 controls, built from `audit` reports and `monitor --db` exposure history.
+- [ ] **Password-policy simulator** — run a proposed policy (length, complexity rules) against breached passwords to measure how many would still be allowed.
+- [ ] **Breach-trend analysis** — load the breach catalogue into pandas (as an optional extra) to analyze trends by data class, industry, or year.
 
 ## Backlog / External
 
@@ -135,3 +156,4 @@ Prioritized from cross-ecosystem research (official `HaveIBeenPwned.Cli` / `have
 - [ ] **Homebrew tap (`domfahey/homebrew-tap`)** — publish `packaging/homebrew/pwned.rb` and automate formula URL/SHA256 updates on release tags.
 - [ ] **GitHub Marketplace Action listing** — check **Publish this Action to the GitHub Marketplace** on the `v0.6.0` release UI after accepting the GitHub Marketplace Developer Agreement.
 - [ ] **OpenSSF Best Practices badge** — manual web registration on `bestpractices.dev`.
+- [ ] **OpenSSF Scorecard `CodeReviewID` alert** — PRs (e.g. #28) merge without an approving review; add a second reviewer or a required-review rule, or dismiss the alert with a documented rationale.
