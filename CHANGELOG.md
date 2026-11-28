@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Repositioned `README.md` around the Python SDK and security-workflow toolkit, with a comparison table recommending the official `hibp` CLI for one-off lookups.
 - Added a Planned section to `docs/roadmap.md` (directory matching, multi-tenant reports, PAM password filter, compliance evidence, and more).
+- Updated the Homebrew formula template (`packaging/homebrew/pwned.rb`) from the v0.4.0 tarball to v0.6.0.
 
 ### Fixed
 - Corrected documentation claims carried in earlier release notes: `PWNL` Bloom filters need ~1.2 bytes per hash at the default 1% FPR (sub-1 GB only at `--fpr 0.02` for ~900M hashes, not at the default as stated in 0.6.0); `PWNB` indexes are ~40–45% smaller than ASCII dumps (not ~50%, as stated in 0.6.0); `--mode`, `-n`, and `--parallelism`/`-p` are per-command options, not global (as stated in 0.5.0); Django support is a documented recipe, not a validator factory (as stated in 0.3.0).
