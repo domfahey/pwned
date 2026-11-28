@@ -164,6 +164,12 @@ def test_tools_list_exposes_all_expected_tools() -> None:
         assert schema["type"] == "object"
         assert isinstance(schema["properties"], dict)
 
+    audit_tool = next(tool for tool in tools if tool["name"] == "audit_vault")
+    check_breaches_prop = audit_tool["inputSchema"]["properties"]["check_breaches"]
+    assert check_breaches_prop["type"] == "boolean"
+    assert check_breaches_prop["default"] is False
+    assert "Correlate vault entry domains" in check_breaches_prop["description"]
+
 
 def test_tools_call_invalid_params_and_unknown_tool() -> None:
     server = MCPServer()
@@ -476,6 +482,160 @@ def test_audit_vault_ad_hygiene_exclude_machines_and_custom_wordlist(tmp_path: P
         )
     )
     assert err_missing
+
+
+def test_audit_vault_cli_sources_allow_optional_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    seen_calls: list[tuple[Path | None, str, bool]] = []
+
+    def _fake_load_export(
+        path: Path | None,
+        *,
+        source: str,
+        exclude_machines: bool = False,
+    ) -> list[AuditEntry]:
+        seen_calls.append((path, source, exclude_machines))
+        return [AuditEntry(name="GitHub", username="alice@example.com", password="secret")]
+
+    monkeypatch.setattr("pwned.mcp_server.load_export", _fake_load_export)
+
+    digest = _sha1_hex("secret")
+    offline_db = tmp_path / "offline.txt"
+    offline_db.write_text(f"{digest}:4\n", encoding="utf-8")
+    server = MCPServer(offline_db=offline_db)
+
+    for src in ("bitwarden-cli", "1password-cli"):
+        is_err, payload = _parse_tool_result(_call_tool(server, "audit_vault", {"source": src}))
+        assert not is_err
+        assert payload["compromised_entries"] == 1
+
+    is_err_filtered, payload_filtered = _parse_tool_result(
+        _call_tool(server, "audit_vault", {"source": "1password-cli", "path": "Work"})
+    )
+    assert not is_err_filtered
+    assert payload_filtered["total_entries"] == 1
+
+    assert seen_calls == [
+        (None, "bitwarden-cli", False),
+        (None, "1password-cli", False),
+        (Path("Work"), "1password-cli", False),
+    ]
+
+
+def test_audit_vault_check_breaches(
+    httpx_mock: HTTPXMock,
+    tmp_path: Path,
+) -> None:
+    vault_path = tmp_path / "bw.json"
+    vault_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "name": "Adobe",
+                        "login": {
+                            "username": "alice@example.com",
+                            "password": "UniqueStrongPassword99!",
+                            "uris": [{"uri": "https://adobe.com/login"}],
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    offline_db = tmp_path / "offline.txt"
+    offline_db.write_text(f"{'0' * 40}:1\n", encoding="utf-8")
+
+    # 1. check_breaches=False does not call HIBPClient at all
+    server_no_key = MCPServer(offline_db=offline_db)
+    is_err_off, payload_off = _parse_tool_result(
+        _call_tool(
+            server_no_key,
+            "audit_vault",
+            {"path": str(vault_path), "check_reuse": False, "check_strength": False},
+        )
+    )
+    assert not is_err_off
+    assert "breach_findings" not in payload_off
+    assert len(httpx_mock.get_requests()) == 0
+
+    # 2. check_breaches=True without API key checks site domain catalog only
+    httpx_mock.add_response(
+        url="https://haveibeenpwned.com/api/v3/breaches",
+        json=[SAMPLE_BREACH],
+    )
+    cache = ResponseCache(tmp_path / "cache", ttl_seconds=300)
+    cached_server = MCPServer(offline_db=offline_db, user_agent="mcp-breach", cache=cache)
+    is_err_pub, payload_pub = _parse_tool_result(
+        _call_tool(
+            cached_server,
+            "audit_vault",
+            {
+                "path": str(vault_path),
+                "check_reuse": False,
+                "check_strength": False,
+                "check_breaches": True,
+            },
+        )
+    )
+    assert not is_err_pub
+    assert payload_pub["breach_correlated_entries"] == 1
+    assert payload_pub["breach_findings"] == [
+        {
+            "name": "Adobe",
+            "username": "alice@example.com",
+            "source": "site_domain",
+            "domain": "adobe.com",
+            "breaches": ["Adobe"],
+        }
+    ]
+    reqs = httpx_mock.get_requests()
+    assert len(reqs) == 1
+    assert reqs[0].headers["user-agent"] == "mcp-breach"
+
+    # 3. check_breaches=True with API key checks both site domains and account emails
+    httpx_mock.add_response(
+        url="https://haveibeenpwned.com/api/v3/breachedaccount/alice%40example.com",
+        json=[{"Name": "Dropbox"}],
+    )
+    authed_server = MCPServer(
+        api_key="mcp-secret-key",
+        user_agent="mcp-breach",
+        offline_db=offline_db,
+        cache=cache,
+    )
+    is_err_auth, payload_auth = _parse_tool_result(
+        _call_tool(
+            authed_server,
+            "audit_vault",
+            {
+                "path": str(vault_path),
+                "check_reuse": False,
+                "check_strength": False,
+                "check_breaches": True,
+            },
+        )
+    )
+    assert not is_err_auth
+    assert payload_auth["breach_correlated_entries"] == 1
+    sources = {(f["source"], tuple(f["breaches"])) for f in payload_auth["breach_findings"]}
+    assert sources == {("site_domain", ("Adobe",)), ("account_breach", ("Dropbox",))}
+    acct_req = httpx_mock.get_requests()[-1]
+    assert acct_req.headers["hibp-api-key"] == "mcp-secret-key"
+
+    # 4. Invalid check_breaches type -> isError=True
+    err_bad, msg_bad = _parse_tool_result(
+        _call_tool(
+            server_no_key,
+            "audit_vault",
+            {"path": str(vault_path), "check_breaches": "yes"},
+        )
+    )
+    assert err_bad
+    assert "check_breaches" in msg_bad
 
 
 def test_diff_baseline_all_kinds_and_errors(tmp_path: Path) -> None:

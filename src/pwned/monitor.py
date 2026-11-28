@@ -21,10 +21,17 @@ from pwned.baseline import (
 from pwned.client import HIBPClient, HIBPError, NotFoundError
 from pwned.filtering import filter_breaches
 from pwned.formatting import OutputFormat
+from pwned.history import (
+    ExposureCategory,
+    ExposureHistoryStore,
+    ExposureTargetType,
+    HistoryTrendSummary,
+)
 from pwned.models import Breach, NonNegativeInt, SearchResult, _HIBPBase
 from pwned.notify import WebhookFormat, send_webhook_notification
 
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
+_ObservedExposure = tuple[ExposureTargetType, str, ExposureCategory, str]
 
 
 def _validate_non_empty(value: str, *, field_name: str) -> str:
@@ -76,6 +83,7 @@ class MonitorConfig(_HIBPBase):
     """Declarative monitoring configuration loaded from pwned.toml."""
 
     baseline_dir: Path | None = None
+    db_path: Path | None = None
     cache: bool = False
     format: OutputFormat | None = None
     fail_if_pwned: bool = False
@@ -114,9 +122,11 @@ class MonitorReport(_HIBPBase):
     domains_checked: NonNegativeInt
     domains_skipped: NonNegativeInt = 0
     new_exposures: NonNegativeInt
+    resolved_exposures: NonNegativeInt = 0
     accounts: list[MonitorAccountResult] = Field(default_factory=list)
     domains: list[MonitorDomainResult] = Field(default_factory=list)
     webhook_sent: bool = False
+    history_summary: HistoryTrendSummary | None = None
 
 
 def _expand_env_vars(value: str) -> str:
@@ -171,6 +181,17 @@ def load_monitor_config(path: Path) -> MonitorConfig:
             baseline_path = path.parent / baseline_path
         monitor_data["baseline_dir"] = baseline_path
 
+    raw_db = monitor_data.pop("db", None)
+    if raw_db is None:
+        raw_db = monitor_data.get("db_path")
+    if raw_db is not None:
+        if not isinstance(raw_db, (str, Path)):
+            raise ValueError("monitor.db must be a string path.")
+        resolved_db = Path(raw_db)
+        if not resolved_db.is_absolute():
+            resolved_db = path.parent / resolved_db
+        monitor_data["db_path"] = resolved_db
+
     config = MonitorConfig.model_validate(
         {
             **monitor_data,
@@ -211,13 +232,43 @@ def _apply_account_filters(result: SearchResult, target: MonitorAccountTarget) -
     )
 
 
+def _account_observed_exposures(email: str, result: SearchResult) -> list[_ObservedExposure]:
+    observed: list[_ObservedExposure] = [
+        ("account", email, "breach", breach.name) for breach in result.breaches
+    ]
+    observed.extend(
+        ("account", email, "paste", f"{paste.source}:{paste.id}") for paste in result.pastes
+    )
+    observed.extend(("account", email, "stealer_log", log) for log in (result.stealer_logs or []))
+    return observed
+
+
+def _domain_observed_exposures(
+    domain: str,
+    *,
+    domain_breaches: dict[str, list[str]],
+    stealer_logs: dict[str, list[str]],
+) -> list[_ObservedExposure]:
+    observed: list[_ObservedExposure] = [
+        ("domain", domain, "alias_breach", f"{alias}:{breach}")
+        for alias, breaches in domain_breaches.items()
+        for breach in breaches
+    ]
+    observed.extend(
+        ("domain", domain, "alias_stealer_log", f"{alias}:{log}")
+        for alias, logs in stealer_logs.items()
+        for log in logs
+    )
+    return observed
+
+
 def _check_account_target(
     target: MonitorAccountTarget,
     client: HIBPClient,
     *,
     baseline_dir: Path | None,
     save_baselines: bool,
-) -> tuple[MonitorAccountResult, int]:
+) -> tuple[MonitorAccountResult, int, list[_ObservedExposure]]:
     try:
         result = client.search_account(
             target.email,
@@ -237,9 +288,11 @@ def _check_account_target(
                 error=str(exc),
             ),
             0,
+            [],
         )
 
     result = _apply_account_filters(result, target)
+    observed = _account_observed_exposures(target.email, result)
     if baseline_dir is not None:
         path = _baseline_path(baseline_dir, "account", target.email)
         previous = load_baseline(path) if path.is_file() else None
@@ -263,6 +316,7 @@ def _check_account_target(
             status=status,
         ),
         count,
+        observed,
     )
 
 
@@ -283,7 +337,7 @@ def _check_domain_target(
     baseline_dir: Path | None,
     save_baselines: bool,
     latest_breach_marker: dict[str, str | None] | None = None,
-) -> tuple[MonitorDomainResult, int, bool]:
+) -> tuple[MonitorDomainResult, int, bool, list[_ObservedExposure]]:
     path: Path | None = None
     previous: dict[str, Any] | None = None
     if baseline_dir is not None:
@@ -300,7 +354,7 @@ def _check_domain_target(
         and previous.get("latest_breach") == latest_breach_marker
     ):
         if not target.include_stealer_logs:
-            return MonitorDomainResult(domain=target.domain, status="clean"), 0, True
+            return MonitorDomainResult(domain=target.domain, status="clean"), 0, True, []
         prev_breaches = previous.get("breaches")
         prev_logs = previous.get("stealer_logs")
         try:
@@ -318,6 +372,7 @@ def _check_domain_target(
                 ),
                 0,
                 True,
+                [],
             )
         if save_baselines and path is not None:
             save_baseline(
@@ -328,6 +383,9 @@ def _check_domain_target(
                     "latest_breach": latest_breach_marker,
                 },
             )
+        observed = _domain_observed_exposures(
+            target.domain, domain_breaches={}, stealer_logs=stealer_logs
+        )
         new_stealer_logs = diff_domain_breaches(
             stealer_logs, {} if prev_logs is None else prev_logs
         )
@@ -341,6 +399,7 @@ def _check_domain_target(
             ),
             count,
             True,
+            observed,
         )
 
     try:
@@ -358,6 +417,7 @@ def _check_domain_target(
             ),
             0,
             False,
+            [],
         )
 
     stealer_logs = {}
@@ -377,8 +437,12 @@ def _check_domain_target(
                 ),
                 0,
                 False,
+                [],
             )
 
+    observed = _domain_observed_exposures(
+        target.domain, domain_breaches=domain_breaches, stealer_logs=stealer_logs
+    )
     if path is not None:
         if save_baselines:
             snapshot: dict[str, Any] = {
@@ -417,6 +481,7 @@ def _check_domain_target(
         ),
         count,
         False,
+        observed,
     )
 
 
@@ -426,6 +491,7 @@ def run_monitor(
     *,
     save_baselines: bool = False,
     smart_precheck_override: bool = False,
+    db_path_override: Path | None = None,
     webhook_url_override: str | None = None,
     webhook_format_override: WebhookFormat | None = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -435,12 +501,14 @@ def run_monitor(
     delay = 60.0 / config.rpm if config.rpm is not None else 0.0
     account_results: list[MonitorAccountResult] = []
     domain_results: list[MonitorDomainResult] = []
+    checked_targets: list[tuple[ExposureTargetType, str]] = []
+    observed_exposures: list[_ObservedExposure] = []
     total_exposures = 0
 
     for idx, account_target in enumerate(config.accounts, start=1):
         if idx > 1 and delay > 0.0:
             sleep(delay)
-        result, count = _check_account_target(
+        result, count, acc_observed = _check_account_target(
             account_target,
             client,
             baseline_dir=config.baseline_dir,
@@ -448,6 +516,9 @@ def run_monitor(
         )
         account_results.append(result)
         total_exposures += count
+        if result.status != "error":
+            checked_targets.append(("account", account_target.email))
+            observed_exposures.extend(acc_observed)
 
     effective_precheck = config.smart_precheck or smart_precheck_override
     current_marker: dict[str, str | None] | None = None
@@ -459,7 +530,7 @@ def run_monitor(
 
     domains_skipped = 0
     for domain_target in config.domains:
-        dom_result, count, was_skipped = _check_domain_target(
+        dom_result, count, was_skipped, dom_observed = _check_domain_target(
             domain_target,
             client,
             baseline_dir=config.baseline_dir,
@@ -468,18 +539,42 @@ def run_monitor(
         )
         if was_skipped:
             domains_skipped += 1
+        elif dom_result.status != "error":
+            checked_targets.append(("domain", domain_target.domain))
+        observed_exposures.extend(dom_observed)
         domain_results.append(dom_result)
         total_exposures += count
 
-    report = MonitorReport(
-        accounts_checked=len(config.accounts),
-        domains_checked=len(config.domains),
-        domains_skipped=domains_skipped,
-        new_exposures=total_exposures,
-        accounts=account_results,
-        domains=domain_results,
-        webhook_sent=False,
-    )
+    effective_db_path = db_path_override if db_path_override is not None else config.db_path
+    if effective_db_path is not None:
+        with ExposureHistoryStore(effective_db_path) as store:
+            sync = store.record_snapshot(
+                checked_targets=checked_targets,
+                observed_exposures=observed_exposures,
+                accounts_checked=len(config.accounts),
+                domains_checked=len(config.domains),
+            )
+        report = MonitorReport(
+            accounts_checked=len(config.accounts),
+            domains_checked=len(config.domains),
+            domains_skipped=domains_skipped,
+            new_exposures=total_exposures,
+            resolved_exposures=sync.resolved_exposures,
+            accounts=account_results,
+            domains=domain_results,
+            webhook_sent=False,
+            history_summary=sync.summary,
+        )
+    else:
+        report = MonitorReport(
+            accounts_checked=len(config.accounts),
+            domains_checked=len(config.domains),
+            domains_skipped=domains_skipped,
+            new_exposures=total_exposures,
+            accounts=account_results,
+            domains=domain_results,
+            webhook_sent=False,
+        )
 
     effective_url = webhook_url_override or config.notify.webhook_url
     if effective_url:

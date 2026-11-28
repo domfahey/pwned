@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Literal, TypedDict
+from urllib.parse import urlparse
 
 from pydantic import Field
 
@@ -29,7 +30,9 @@ from pwned._parsers import (
     parse_input_lines,
     parse_pwdump_records,
 )
-from pwned.models import NonNegativeInt, PasswordChecker, _HIBPBase
+from pwned.async_client import AsyncHIBPClient
+from pwned.client import HIBPClient, HIBPError, NotFoundError
+from pwned.models import Breach, NonNegativeInt, PasswordChecker, _HIBPBase
 from pwned.passwords import AsyncPwnedPasswordsClient, _hash_password
 from pwned.strength import compute_vault_risk_score, evaluate_password_strength
 
@@ -37,8 +40,10 @@ ExportSource = Literal[
     "bitwarden-json",
     "bitwarden-encrypted-json",
     "bitwarden-csv",
+    "bitwarden-cli",
     "1password-csv",
     "1password-1pux",
+    "1password-cli",
     "chrome-csv",
     "firefox-csv",
     "apple-csv",
@@ -55,6 +60,7 @@ ExportSource = Literal[
 
 ADHygieneIssue = Literal["empty_ntlm", "lm_hash_present", "username_as_password"]
 WordlistMatchType = Literal["exact", "case_insensitive", "case_variant"]
+BreachCorrelationSource = Literal["site_domain", "account_breach", "stealer_log"]
 
 
 @dataclass(frozen=True)
@@ -67,6 +73,7 @@ class AuditEntry:
     is_hash: bool = False
     hash_type: Literal["sha1", "ntlm"] | None = None
     has_lm_hash: bool = False
+    domains: tuple[str, ...] = field(default=(), compare=False)
 
 
 class AuditFinding(_HIBPBase):
@@ -111,6 +118,16 @@ class WordlistFinding(_HIBPBase):
     match_type: WordlistMatchType
 
 
+class BreachCorrelationFinding(_HIBPBase):
+    """Breach or stealer-log correlation finding without exposing secrets."""
+
+    name: str
+    username: str
+    source: BreachCorrelationSource
+    domain: str = ""
+    breaches: list[str] = Field(default_factory=list)
+
+
 class AuditSummary(_HIBPBase):
     """Summary of an audited password-manager export."""
 
@@ -125,6 +142,48 @@ class AuditSummary(_HIBPBase):
     ad_findings: list[ADHygieneFinding] = Field(default_factory=list)
     wordlist_matches: NonNegativeInt = 0
     wordlist_findings: list[WordlistFinding] = Field(default_factory=list)
+    breach_findings: list[BreachCorrelationFinding] = Field(default_factory=list)
+    breach_correlated_entries: NonNegativeInt = 0
+
+
+def extract_domain(raw_url: str) -> str | None:
+    """Extract a normalized domain name from a URL or bare hostname."""
+    cleaned = raw_url.strip()
+    if not cleaned:
+        return None
+    try:
+        parsed = urlparse(cleaned)
+        if not parsed.scheme and "." in cleaned and not any(ch.isspace() for ch in cleaned):
+            parsed = urlparse(f"https://{cleaned}")
+    except ValueError:
+        return None
+    host = parsed.hostname
+    if not host:
+        return None
+    normalized = host.lower().rstrip(".").removeprefix("www.")
+    if "." not in normalized:
+        return None
+    return normalized
+
+
+def _collect_domains(raw_urls: Sequence[str]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(domain for raw in raw_urls if (domain := extract_domain(raw)) is not None)
+    )
+
+
+def _extract_uri_domains(raw_uris: object) -> tuple[str, ...]:
+    if not isinstance(raw_uris, list):
+        return ()
+    values: list[str] = []
+    for item in raw_uris:
+        if isinstance(item, str):
+            values.append(item)
+        elif isinstance(item, dict):
+            uri = item.get("uri")
+            if isinstance(uri, str):
+                values.append(uri)
+    return _collect_domains(values)
 
 
 def _extract_bitwarden_entries(data: object) -> list[AuditEntry]:
@@ -148,6 +207,7 @@ def _extract_bitwarden_entries(data: object) -> list[AuditEntry]:
                 name=raw_name if isinstance(raw_name, str) else "",
                 username=raw_username if isinstance(raw_username, str) else "",
                 password=password,
+                domains=_extract_uri_domains(login.get("uris")),
             )
         )
     return entries
@@ -321,6 +381,21 @@ def _first_non_empty(row: Mapping[str, str | None], header_map: dict[str, str], 
     return ""
 
 
+def _extract_row_domains(
+    row: Mapping[str, str | None],
+    header_map: dict[str, str],
+    url_keys: tuple[str, ...],
+) -> tuple[str, ...]:
+    raw_urls: list[str] = []
+    for key in url_keys:
+        column = header_map.get(key)
+        if column is not None:
+            value = row.get(column)
+            if value:
+                raw_urls.append(value)
+    return _collect_domains(raw_urls)
+
+
 def _parse_csv_columns(
     path: Path,
     *,
@@ -328,6 +403,7 @@ def _parse_csv_columns(
     name_keys: tuple[str, ...],
     username_keys: tuple[str, ...],
     missing_col_message: str,
+    url_keys: tuple[str, ...] = ("url", "domain"),
 ) -> list[AuditEntry]:
     with path.open(encoding="utf-8-sig", newline="") as fh:
         reader = csv.DictReader(fh)
@@ -346,6 +422,7 @@ def _parse_csv_columns(
                     name=_first_non_empty(row, header_map, *name_keys),
                     username=_first_non_empty(row, header_map, *username_keys),
                     password=password,
+                    domains=_extract_row_domains(row, header_map, url_keys),
                 )
             )
     return entries
@@ -359,6 +436,7 @@ def parse_bitwarden_csv(path: Path) -> list[AuditEntry]:
         name_keys=("name",),
         username_keys=("login_username",),
         missing_col_message="Bitwarden CSV export is missing the 'login_password' column.",
+        url_keys=("login_uri",),
     )
 
 
@@ -400,11 +478,25 @@ def _extract_1pux_item(item: object) -> AuditEntry | None:
     if not password:
         return None
     overview = item.get("overview")
-    raw_title = overview.get("title") if isinstance(overview, dict) else None
+    raw_title: object = None
+    raw_urls: list[str] = []
+    if isinstance(overview, dict):
+        raw_title = overview.get("title")
+        primary_url = overview.get("url")
+        if isinstance(primary_url, str):
+            raw_urls.append(primary_url)
+        extra_urls = overview.get("urls")
+        if isinstance(extra_urls, list):
+            for url_obj in extra_urls:
+                if isinstance(url_obj, dict):
+                    url_val = url_obj.get("url")
+                    if isinstance(url_val, str):
+                        raw_urls.append(url_val)
     return AuditEntry(
         name=raw_title if isinstance(raw_title, str) else "",
         username=username,
         password=password,
+        domains=_collect_domains(raw_urls),
     )
 
 
@@ -500,11 +592,13 @@ def parse_keepass(path: Path, *, master_password: str) -> list[AuditEntry]:
         password = entry.password
         if not isinstance(password, str) or not password:
             continue
+        raw_url = getattr(entry, "url", None)
         entries.append(
             AuditEntry(
                 name=entry.title or "",
                 username=entry.username or "",
                 password=password,
+                domains=_collect_domains((raw_url,)) if isinstance(raw_url, str) else (),
             )
         )
     return entries
@@ -579,20 +673,29 @@ def _parse_pass_entry_output(entry_name: str, output: str) -> AuditEntry | None:
         return None
 
     username = ""
+    raw_urls: list[str] = []
     for raw_line in raw_lines[1:]:
         stripped = raw_line.rstrip("\r").lstrip()
         lowered = stripped.lower()
-        for prefix in ("username:", "login:", "user:"):
-            if lowered.startswith(prefix):
-                _, _, value = stripped.partition(":")
-                candidate = value.strip()
-                if candidate:
-                    username = candidate
-                    break
-        if username:
-            break
+        if not username and any(
+            lowered.startswith(prefix) for prefix in ("username:", "login:", "user:")
+        ):
+            _, _, value = stripped.partition(":")
+            candidate = value.strip()
+            if candidate:
+                username = candidate
+        elif any(lowered.startswith(prefix) for prefix in ("url:", "website:", "site:")):
+            _, _, value = stripped.partition(":")
+            candidate = value.strip()
+            if candidate:
+                raw_urls.append(candidate)
 
-    return AuditEntry(name=entry_name, username=username, password=password)
+    return AuditEntry(
+        name=entry_name,
+        username=username,
+        password=password,
+        domains=_collect_domains(raw_urls),
+    )
 
 
 def _run_store_cli(cmd: list[str], *, env: dict[str, str], label: str) -> str:
@@ -677,6 +780,168 @@ def parse_gopass_store(store_dir: Path | None = None) -> list[AuditEntry]:
     return entries
 
 
+def parse_bitwarden_cli(target: Path | str | None = None) -> list[AuditEntry]:
+    """Parse unlocked Bitwarden entries directly in memory via 'bw' or 'rbw' CLI."""
+    filter_term = str(target).strip() if target is not None else ""
+    if filter_term.startswith("-"):
+        raise ValueError("Invalid target filter starting with '-'.")
+
+    bw_exe = shutil.which("bw")
+    if bw_exe is not None:
+        cmd = [bw_exe, "list", "items"]
+        if filter_term:
+            cmd.extend(["--search", filter_term])
+        stdout = _run_store_cli(cmd, env=os.environ.copy(), label="bw list items")
+        try:
+            items = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON from bw list items: {exc}") from exc
+        if not isinstance(items, list):
+            raise ValueError("Bitwarden CLI 'bw list items' must return a JSON list.")
+        return _extract_bitwarden_entries({"items": items})
+
+    rbw_exe = shutil.which("rbw")
+    if rbw_exe is None:
+        raise RuntimeError("Neither 'bw' nor 'rbw' CLI is installed or on PATH.")
+
+    env = os.environ.copy()
+    list_stdout = _run_store_cli(
+        [rbw_exe, "list", "--fields", "id,name,user"],
+        env=env,
+        label="rbw list",
+    )
+    needle = filter_term.casefold()
+    item_ids: list[str] = []
+    for raw_line in list_stdout.splitlines():
+        if not raw_line.strip():
+            continue
+        parts = raw_line.split("\t")
+        item_id = parts[0].strip()
+        if not item_id or item_id.startswith("-"):
+            continue
+        if needle:
+            name_field = parts[1] if len(parts) > 1 else ""
+            user_field = parts[2] if len(parts) > 2 else ""
+            if needle not in name_field.casefold() and needle not in user_field.casefold():
+                continue
+        item_ids.append(item_id)
+
+    entries: list[AuditEntry] = []
+    for item_id in item_ids:
+        raw_json = _run_store_cli(
+            [rbw_exe, "get", "--raw", item_id],
+            env=env,
+            label=f"rbw get {item_id}",
+        )
+        try:
+            item = json.loads(raw_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON from rbw get {item_id}: {exc}") from exc
+        if not isinstance(item, dict):
+            continue
+        data = item.get("data")
+        if not isinstance(data, dict):
+            continue
+        password = data.get("password")
+        if not isinstance(password, str) or not password:
+            continue
+        raw_name = item.get("name")
+        raw_username = data.get("username")
+        entries.append(
+            AuditEntry(
+                name=raw_name if isinstance(raw_name, str) else "",
+                username=raw_username if isinstance(raw_username, str) else "",
+                password=password,
+                domains=_extract_uri_domains(data.get("uris")),
+            )
+        )
+    return entries
+
+
+def parse_1password_cli(vault: Path | str | None = None) -> list[AuditEntry]:
+    """Parse unlocked 1Password Login items directly in memory via the 'op' CLI."""
+    vault_name = str(vault).strip() if vault is not None else ""
+    if vault_name.startswith("-"):
+        raise ValueError("Invalid 1Password vault name starting with '-'.")
+
+    op_exe = shutil.which("op")
+    if op_exe is None:
+        raise RuntimeError("The 'op' (1Password) CLI is not installed or not on PATH.")
+
+    env = os.environ.copy()
+    list_cmd = [op_exe, "item", "list", "--categories", "Login", "--format", "json"]
+    if vault_name:
+        list_cmd.extend(["--vault", vault_name])
+    list_stdout = _run_store_cli(list_cmd, env=env, label="op item list")
+    try:
+        items = json.loads(list_stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON from op item list: {exc}") from exc
+    if not isinstance(items, list):
+        raise ValueError("1Password CLI 'op item list' must return a JSON list.")
+
+    entries: list[AuditEntry] = []
+    for summary_item in items:
+        if not isinstance(summary_item, dict):
+            continue
+        raw_id = summary_item.get("id")
+        if not isinstance(raw_id, str):
+            continue
+        item_id = raw_id.strip()
+        if not item_id or item_id.startswith("-"):
+            continue
+
+        get_cmd = [op_exe, "item", "get", item_id, "--format", "json"]
+        if vault_name:
+            get_cmd.extend(["--vault", vault_name])
+        item_stdout = _run_store_cli(get_cmd, env=env, label=f"op item get {item_id}")
+        try:
+            detail = json.loads(item_stdout)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON from op item get {item_id}: {exc}") from exc
+        if not isinstance(detail, dict):
+            continue
+
+        raw_fields = detail.get("fields")
+        if not isinstance(raw_fields, list):
+            continue
+        username = ""
+        password = ""
+        for field_obj in raw_fields:
+            if not isinstance(field_obj, dict):
+                continue
+            value = field_obj.get("value")
+            if not isinstance(value, str):
+                continue
+            purpose = field_obj.get("purpose")
+            field_id = field_obj.get("id")
+            if (purpose == "USERNAME" or field_id == "username") and not username:
+                username = value
+            elif (purpose == "PASSWORD" or field_id == "password") and not password:
+                password = value
+        if not password:
+            continue
+
+        raw_title = detail.get("title")
+        raw_urls = detail.get("urls")
+        url_values: list[str] = []
+        if isinstance(raw_urls, list):
+            for url_obj in raw_urls:
+                if isinstance(url_obj, dict):
+                    href = url_obj.get("href")
+                    if isinstance(href, str):
+                        url_values.append(href)
+        entries.append(
+            AuditEntry(
+                name=raw_title if isinstance(raw_title, str) else "",
+                username=username,
+                password=password,
+                domains=_collect_domains(url_values),
+            )
+        )
+    return entries
+
+
 _SIMPLE_PARSERS: dict[str, Callable[[Path], list[AuditEntry]]] = {
     "bitwarden-json": parse_bitwarden_json,
     "bitwarden-csv": parse_bitwarden_csv,
@@ -705,6 +970,10 @@ def load_export(
         entries = parse_pass_store(path)
     elif source == "gopass":
         entries = parse_gopass_store(path)
+    elif source == "bitwarden-cli":
+        entries = parse_bitwarden_cli(path)
+    elif source == "1password-cli":
+        entries = parse_1password_cli(path)
     else:
         if source not in ("keepass", "bitwarden-encrypted-json") and source not in _SIMPLE_PARSERS:
             raise ValueError(f"Unsupported export source: {source!r}")
@@ -738,6 +1007,228 @@ class _OptionalSummaryFields(TypedDict, total=False):
     ad_findings: list[ADHygieneFinding]
     wordlist_matches: int
     wordlist_findings: list[WordlistFinding]
+    breach_findings: list[BreachCorrelationFinding]
+    breach_correlated_entries: int
+
+
+_MISSING = object()
+
+
+def _client_has_api_key(hibp_client: object) -> bool:
+    api_key = getattr(hibp_client, "api_key", _MISSING)
+    if api_key is not _MISSING:
+        return bool(api_key)
+    inner_client = getattr(hibp_client, "_client", None)
+    headers = getattr(inner_client, "headers", None)
+    if isinstance(headers, Mapping):
+        return bool(headers.get("hibp-api-key"))
+    return True
+
+
+def _normalize_email(username: str) -> str | None:
+    cleaned = username.strip().lower()
+    if "@" not in cleaned or any(ch.isspace() for ch in cleaned):
+        return None
+    local, _, domain = cleaned.partition("@")
+    if not local or not domain:
+        return None
+    return cleaned
+
+
+def _domain_candidates(domain: str) -> tuple[str, ...]:
+    parts = domain.split(".")
+    return tuple(".".join(parts[idx:]) for idx in range(len(parts) - 1))
+
+
+def _index_breach_catalog(catalog: Sequence[Breach]) -> dict[str, list[str]]:
+    by_domain: dict[str, set[str]] = {}
+    for breach in catalog:
+        domain = extract_domain(breach.domain)
+        if domain is not None:
+            by_domain.setdefault(domain, set()).add(breach.name)
+    return {domain: sorted(names) for domain, names in by_domain.items()}
+
+
+def _collect_breach_findings(
+    entries: Sequence[AuditEntry],
+    *,
+    catalog: Sequence[Breach],
+    account_breaches_by_email: Mapping[str, list[str]],
+    stealer_logs_by_email: Mapping[str, list[str]],
+) -> tuple[list[BreachCorrelationFinding], int]:
+    catalog_index = _index_breach_catalog(catalog)
+    findings: list[BreachCorrelationFinding] = []
+    correlated_indices: set[int] = set()
+
+    for idx, entry in enumerate(entries):
+        matched_domains: set[str] = set()
+        for raw_domain in entry.domains:
+            normalized = extract_domain(raw_domain)
+            if normalized is None:
+                continue
+            for candidate in _domain_candidates(normalized):
+                breach_names = catalog_index.get(candidate)
+                if breach_names is not None:
+                    if candidate not in matched_domains:
+                        matched_domains.add(candidate)
+                        findings.append(
+                            BreachCorrelationFinding(
+                                name=entry.name,
+                                username=entry.username,
+                                source="site_domain",
+                                domain=candidate,
+                                breaches=list(breach_names),
+                            )
+                        )
+                        correlated_indices.add(idx)
+                    break
+
+        email = _normalize_email(entry.username)
+        if email is not None:
+            acct_breaches = account_breaches_by_email.get(email)
+            if acct_breaches:
+                findings.append(
+                    BreachCorrelationFinding(
+                        name=entry.name,
+                        username=entry.username,
+                        source="account_breach",
+                        domain="",
+                        breaches=list(acct_breaches),
+                    )
+                )
+                correlated_indices.add(idx)
+            stealer_domains = stealer_logs_by_email.get(email)
+            if stealer_domains:
+                findings.append(
+                    BreachCorrelationFinding(
+                        name=entry.name,
+                        username=entry.username,
+                        source="stealer_log",
+                        domain="",
+                        breaches=list(stealer_domains),
+                    )
+                )
+                correlated_indices.add(idx)
+
+    findings.sort(
+        key=lambda finding: (finding.source, finding.name, finding.username, finding.domain)
+    )
+    return findings, len(correlated_indices)
+
+
+def _correlate_breaches_sync(
+    entries: Sequence[AuditEntry],
+    *,
+    breach_catalog: Sequence[Breach] | None,
+    hibp_client: HIBPClient | None,
+    include_stealer_logs: bool,
+) -> tuple[list[BreachCorrelationFinding], int]:
+    catalog: Sequence[Breach]
+    if breach_catalog is not None:
+        catalog = breach_catalog
+    elif hibp_client is not None and any(entry.domains for entry in entries):
+        try:
+            catalog = hibp_client.get_breaches()
+        except HIBPError:
+            catalog = []
+    else:
+        catalog = []
+
+    account_breaches_by_email: dict[str, list[str]] = {}
+    stealer_logs_by_email: dict[str, list[str]] = {}
+    if hibp_client is not None and _client_has_api_key(hibp_client):
+        unique_emails = list(
+            dict.fromkeys(
+                email
+                for entry in entries
+                if (email := _normalize_email(entry.username)) is not None
+            )
+        )
+        for email in unique_emails:
+            try:
+                breaches = hibp_client.get_account_breaches(email, truncate=True)
+            except NotFoundError:
+                breaches = []
+            if breaches:
+                account_breaches_by_email[email] = sorted({b.name for b in breaches})
+            if include_stealer_logs:
+                try:
+                    stealer_domains = hibp_client.get_stealer_logs_by_email(email)
+                except NotFoundError:
+                    stealer_domains = []
+                if stealer_domains:
+                    stealer_logs_by_email[email] = sorted(set(stealer_domains))
+
+    return _collect_breach_findings(
+        entries,
+        catalog=catalog,
+        account_breaches_by_email=account_breaches_by_email,
+        stealer_logs_by_email=stealer_logs_by_email,
+    )
+
+
+async def _correlate_breaches_async(
+    entries: Sequence[AuditEntry],
+    *,
+    breach_catalog: Sequence[Breach] | None,
+    hibp_client: AsyncHIBPClient | None,
+    include_stealer_logs: bool,
+    semaphore: asyncio.Semaphore,
+) -> tuple[list[BreachCorrelationFinding], int]:
+    catalog: Sequence[Breach]
+    if breach_catalog is not None:
+        catalog = breach_catalog
+    elif hibp_client is not None and any(entry.domains for entry in entries):
+        try:
+            catalog = await hibp_client.get_breaches()
+        except HIBPError:
+            catalog = []
+    else:
+        catalog = []
+
+    account_breaches_by_email: dict[str, list[str]] = {}
+    stealer_logs_by_email: dict[str, list[str]] = {}
+    if hibp_client is not None and _client_has_api_key(hibp_client):
+        unique_emails = list(
+            dict.fromkeys(
+                email
+                for entry in entries
+                if (email := _normalize_email(entry.username)) is not None
+            )
+        )
+        active_client = hibp_client
+
+        async def _fetch_email(email: str) -> tuple[str, list[str], list[str]]:
+            async with semaphore:
+                try:
+                    breaches = await active_client.get_account_breaches(email, truncate=True)
+                except NotFoundError:
+                    breaches = []
+                stealer_domains: list[str] = []
+                if include_stealer_logs:
+                    try:
+                        stealer_domains = await active_client.get_stealer_logs_by_email(email)
+                    except NotFoundError:
+                        stealer_domains = []
+                return (
+                    email,
+                    sorted({b.name for b in breaches}),
+                    sorted(set(stealer_domains)),
+                )
+
+        email_results = await asyncio.gather(*(_fetch_email(email) for email in unique_emails))
+        for email, breach_names, stealer_domains in email_results:
+            if breach_names:
+                account_breaches_by_email[email] = breach_names
+            if stealer_domains:
+                stealer_logs_by_email[email] = stealer_domains
+
+    return _collect_breach_findings(
+        entries,
+        catalog=catalog,
+        account_breaches_by_email=account_breaches_by_email,
+        stealer_logs_by_email=stealer_logs_by_email,
+    )
 
 
 def _case_variants(value: str) -> tuple[str, ...]:
@@ -933,6 +1424,7 @@ def _build_audit_summary(
     min_strength_score: int,
     check_ad_hygiene: bool,
     custom_wordlist: Sequence[str] | AbstractSet[str] | None,
+    breach_correlation: tuple[list[BreachCorrelationFinding], int] | None = None,
 ) -> AuditSummary:
     findings = [
         AuditFinding(
@@ -1001,6 +1493,11 @@ def _build_audit_summary(
         extra["wordlist_matches"] = len(wordlist_findings)
         extra["wordlist_findings"] = wordlist_findings
 
+    if breach_correlation is not None:
+        breach_findings, breach_correlated_entries = breach_correlation
+        extra["breach_findings"] = breach_findings
+        extra["breach_correlated_entries"] = breach_correlated_entries
+
     return AuditSummary(
         total_entries=len(entries),
         unique_passwords=len(counts),
@@ -1022,6 +1519,10 @@ def audit_entries(
     min_strength_score: int = 2,
     check_ad_hygiene: bool = False,
     custom_wordlist: Sequence[str] | AbstractSet[str] | None = None,
+    check_breaches: bool = False,
+    breach_catalog: Sequence[Breach] | None = None,
+    hibp_client: HIBPClient | None = None,
+    include_stealer_logs: bool = False,
 ) -> AuditSummary:
     """Check unique entry passwords against Pwned Passwords via k-anonymity."""
     _validate_audit_options(threshold, min_strength_score)
@@ -1043,6 +1544,17 @@ def audit_entries(
                     pad=pad,
                 )
 
+    breach_correlation = (
+        _correlate_breaches_sync(
+            entries,
+            breach_catalog=breach_catalog,
+            hibp_client=hibp_client,
+            include_stealer_logs=include_stealer_logs,
+        )
+        if check_breaches
+        else None
+    )
+
     return _build_audit_summary(
         entries,
         counts,
@@ -1053,6 +1565,7 @@ def audit_entries(
         min_strength_score=min_strength_score,
         check_ad_hygiene=check_ad_hygiene,
         custom_wordlist=custom_wordlist,
+        breach_correlation=breach_correlation,
     )
 
 
@@ -1069,6 +1582,10 @@ async def async_audit_entries(
     concurrency: int = 10,
     check_ad_hygiene: bool = False,
     custom_wordlist: Sequence[str] | AbstractSet[str] | None = None,
+    check_breaches: bool = False,
+    breach_catalog: Sequence[Breach] | None = None,
+    hibp_client: AsyncHIBPClient | None = None,
+    include_stealer_logs: bool = False,
 ) -> AuditSummary:
     """Concurrently check unique entry passwords against Pwned Passwords."""
     _validate_audit_options(threshold, min_strength_score)
@@ -1094,6 +1611,18 @@ async def async_audit_entries(
     results = await asyncio.gather(*(_check_one(key) for key in unique_keys))
     counts = dict(results)
 
+    breach_correlation = (
+        await _correlate_breaches_async(
+            entries,
+            breach_catalog=breach_catalog,
+            hibp_client=hibp_client,
+            include_stealer_logs=include_stealer_logs,
+            semaphore=semaphore,
+        )
+        if check_breaches
+        else None
+    )
+
     return _build_audit_summary(
         entries,
         counts,
@@ -1104,4 +1633,5 @@ async def async_audit_entries(
         min_strength_score=min_strength_score,
         check_ad_hygiene=check_ad_hygiene,
         custom_wordlist=custom_wordlist,
+        breach_correlation=breach_correlation,
     )

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import date
+from pathlib import Path
 
 from pydantic import Field, NonNegativeInt
 
 from pwned.client import HIBPClient, HIBPError, NotFoundError
+from pwned.history import ExposureHistoryStore, HistoryTrendSummary
 from pwned.models import Breach, _HIBPBase
 
 
@@ -36,6 +38,7 @@ class DomainReport(_HIBPBase):
     stealer_log_aliases: NonNegativeInt | None = None
     top_breaches: list[BreachExposureSummary] = Field(default_factory=list)
     data_classes: list[DataClassExposure] = Field(default_factory=list)
+    history_summary: HistoryTrendSummary | None = None
 
 
 def build_domain_report(
@@ -44,6 +47,7 @@ def build_domain_report(
     catalog: Sequence[Breach],
     *,
     stealer_logs: Mapping[str, Sequence[str]] | None = None,
+    history_summary: HistoryTrendSummary | None = None,
 ) -> DomainReport:
     catalog_map = {b.name.lower(): b for b in catalog}
 
@@ -137,6 +141,20 @@ def build_domain_report(
         key=lambda item: (-item.exposed_aliases, -item.breach_count, item.data_class)
     )
 
+    if history_summary is not None:
+        return DomainReport(
+            domain=domain,
+            total_exposed_aliases=total_exposed_aliases,
+            total_exposures=total_exposures,
+            unique_breaches=unique_breaches,
+            most_recent_breach_date=most_recent_breach_date,
+            sensitive_breach_count=sensitive_breach_count,
+            stealer_log_aliases=stealer_log_aliases,
+            top_breaches=top_breaches_list,
+            data_classes=data_classes_list,
+            history_summary=history_summary,
+        )
+
     return DomainReport(
         domain=domain,
         total_exposed_aliases=total_exposed_aliases,
@@ -155,6 +173,7 @@ def generate_domain_report(
     domain: str,
     *,
     include_stealer_logs: bool = False,
+    history_db: Path | None = None,
 ) -> DomainReport:
     try:
         domain_breaches = client.get_domain_breaches(domain)
@@ -175,9 +194,15 @@ def generate_domain_report(
         except NotFoundError:
             stealer_logs = {}
 
+    history_summary: HistoryTrendSummary | None = None
+    if history_db is not None:
+        with ExposureHistoryStore(history_db) as store:
+            history_summary = store.get_trend_summary(target_type="domain", target=domain)
+
     return build_domain_report(
         domain,
         domain_breaches,
         catalog,
         stealer_logs=stealer_logs,
+        history_summary=history_summary,
     )

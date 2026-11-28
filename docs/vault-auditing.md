@@ -1,6 +1,6 @@
 # Vault & Active Directory Auditing
 
-`pwned audit` checks password-manager exports, browser exports, Active Directory NTLM hash dumps, and live Unix password stores **entirely locally** using *k*-anonymity (only 5-character hash prefixes leave the machine) or an air-gapped `--offline-db` dump. Plaintext passwords are never stored in output reports, logs, or webhook payloads.
+`pwned audit` checks password-manager exports, browser exports, Active Directory NTLM hash dumps, live Unix password stores, and unlocked cloud vault CLIs (`bw`/`rbw`, `op`) **entirely locally** using *k*-anonymity (only 5-character hash prefixes leave the machine) or an air-gapped `--offline-db` dump. Plaintext passwords are never stored in output reports, logs, or webhook payloads.
 
 ## Supported Sources (`--source`)
 
@@ -9,8 +9,10 @@
 | `bitwarden-json` *(default)* | Bitwarden unencrypted JSON | None | Reads login `items[].login.password` |
 | `bitwarden-encrypted-json` | Bitwarden password-protected encrypted JSON | `pwned[crypto]` (`cryptography>=44.0`) | Supports both **PBKDF2-SHA256 (`kdfType=0`)** and **Argon2id (`kdfType=1`)**; prompts for export password |
 | `bitwarden-csv` | Bitwarden CSV | None | `name`, `login_username`, `login_password` |
+| `bitwarden-cli` | Live Bitwarden CLI (`bw` / `rbw`) | None (`bw` or `rbw` CLI on `PATH`) | Reads unlocked vault entries in memory without plaintext exports (`PATH` optional; acts as a search filter) |
 | `1password-csv` | 1Password CSV | None | `Title`/`URL`, `Username`, `Password` |
 | `1password-1pux` | 1Password `.1pux` ZIP archive | None | Reads `export.data` across accounts and vaults |
+| `1password-cli` | Live 1Password CLI (`op`) | None (`op` CLI on `PATH`) | Reads unlocked Login items in memory via `op item list`/`get` (`PATH` optional; specifies a vault name) |
 | `lastpass-csv` | LastPass CSV | None | `name`/`url`, `username`, `password` |
 | `dashlane-csv` | Dashlane `credentials.csv` | None | `title`/`domain`/`url`, `username`/`login`/`username2`, `password` |
 | `protonpass-csv` | Proton Pass CSV | None | `name`/`url`, `username`/`email`, `password` |
@@ -79,7 +81,7 @@ pwned audit vault.json \
   - Plaintext vaults report `exact` and full `casefold()` `case_insensitive` matches.
   - Pre-hashed `pwdump` / SHA-1 dumps cannot be case-folded directly, so they report exact digest matches (`exact`) and common capitalization variants (`lower`, `upper`, `capitalize`, `title`) explicitly as `case_variant` — list any custom mixed-case organizational variants directly in your wordlist file for guaranteed hash coverage.
 - For `--format sarif`, emits `HIBP005` (`ADCredentialHygiene`) and `HIBP006` (`BannedWordlistPassword`) alongside `HIBP002` (`CompromisedPassword`).
-- With `--fail-if-pwned`, exits with code `8` if compromised entries, AD hygiene findings, or custom wordlist matches are found.
+- With `--fail-if-pwned`, exits with code `8` if compromised entries, AD hygiene findings, custom wordlist matches, or breach correlation findings are found.
 
 ### Live Unix `pass` / `gopass` Store Audit (Zero Plaintext Exports)
 ```bash
@@ -87,6 +89,47 @@ pwned audit --source pass --check-reuse --check-strength --fail-if-pwned
 pwned audit ~/.my-pass-store --source pass --format table
 pwned audit --source gopass --check-reuse
 ```
+
+### Live Cloud Vault Auditing (`bitwarden-cli` & `1password-cli`)
+Audit unlocked Bitwarden (`bw` or `rbw`) and 1Password (`op`) vaults directly in memory without writing plaintext exports to disk:
+
+```bash
+# Audit all unlocked Bitwarden logins (prefers `bw`, falls back to `rbw`)
+pwned audit --source bitwarden-cli
+
+# Optionally filter Bitwarden items by a search term
+pwned audit github --source bitwarden-cli --check-reuse --format table
+
+# Audit a specific 1Password vault with reuse and breach correlation
+pwned audit Work --source 1password-cli --check-reuse --check-breaches
+```
+
+## Vault Breach & Stealer-Log Correlation (`--check-breaches`, `--include-stealer-logs`)
+
+Enable `--check-breaches` to cross-reference vault entry login domains and email usernames against Have I Been Pwned so compromised accounts are flagged even when the password itself has not yet appeared in Pwned Passwords:
+
+```bash
+# Zero-API-key domain catalog correlation (caches GET /breaches locally with --cache)
+pwned audit vault.json --source bitwarden-json --check-breaches --cache --format markdown
+
+# Authenticated email breach + Pro-tier stealer-log correlation in CI
+export HIBP_API_KEY="..."
+pwned audit Work --source 1password-cli \
+  --check-breaches \
+  --include-stealer-logs \
+  --cache \
+  --format sarif \
+  --fail-if-pwned
+```
+
+- **Zero-API-key site-domain catalog correlation (`source="site_domain"`):** Extracts normalized login domains from vault entry URLs/URIs and matches them (exact hostname or parent domain) against HIBP's public `GET /breaches` catalog. Combine with `--cache` to reuse the catalog across runs without hitting the API repeatedly.
+- **Authenticated account email breach correlation (`source="account_breach"`):** When `HIBP_API_KEY` is configured, deduplicates email usernames across vault entries and queries `GET /breachedAccount/{email}` (truncated) for each unique email.
+- **Optional stealer-log correlation (`--include-stealer-logs`, `source="stealer_log"`):** Requires an HIBP Pro API key; additionally queries `GET /stealerLogsByEmail/{email}` to surface website domains captured by infostealers for each vault email.
+- **Reports, SARIF & CI exit codes:**
+  - Reported in `AuditSummary.breach_findings` (`BreachCorrelationFinding`) and `breach_correlated_entries` without exposing plaintext passwords.
+  - `--format markdown` and `--format html` render dedicated breach correlation tables alongside compromised, reused, weak, AD hygiene, and banned-wordlist tables.
+  - `--format sarif` emits rule **`HIBP007`** (`VaultBreachCorrelation`).
+  - `--fail-if-pwned` exits with code **`8`** when breach correlation findings exist (as well as compromised passwords, AD hygiene findings, or custom wordlist matches).
 
 ## Reuse Detection & Strength Scoring
 
@@ -99,4 +142,4 @@ pwned audit --source gopass --check-reuse
 - Use `--cache` during online audits to cache 5-character `/range/{prefix}` buckets locally across repeated runs.
 - Tune `--concurrency` (default `10`) for large vaults.
 - Response padding (`Add-Padding: true`) is **enabled by default** on `pwned audit` via `--pad/--no-pad` (disable only if needed via `--no-pad`).
-- Delete any plaintext CSV/JSON vault exports immediately after auditing; prefer `bitwarden-encrypted-json`, `keepass`, `pass`, `gopass`, or `pwdump` whenever possible.
+- Delete any plaintext CSV/JSON vault exports immediately after auditing; prefer `bitwarden-encrypted-json`, `bitwarden-cli`, `1password-cli`, `keepass`, `pass`, `gopass`, or `pwdump` whenever possible.

@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 import pytest
 
+from pwned.audit import AuditSummary, BreachCorrelationFinding
 from pwned.client import HIBPError
 from pwned.notify import (
     build_webhook_payload,
@@ -59,6 +60,7 @@ def test_has_exposures() -> None:
             "strength_findings": [],
             "ad_findings": [],
             "wordlist_findings": [],
+            "breach_findings": [],
         }
     )
     assert has_exposures({"findings": [{"account": "alice"}]})
@@ -66,6 +68,42 @@ def test_has_exposures() -> None:
     assert has_exposures({"strength_findings": [{"account": "bob"}]})
     assert has_exposures({"findings": [], "ad_findings": [{"issue": "empty_ntlm"}]})
     assert has_exposures({"findings": [], "wordlist_findings": [{"match_type": "exact"}]})
+    assert has_exposures(
+        {
+            "findings": [],
+            "breach_findings": [
+                {"source": "site_domain", "domain": "adobe.com", "breaches": ["Adobe"]}
+            ],
+        }
+    )
+    assert has_exposures(
+        AuditSummary(
+            total_entries=1,
+            unique_passwords=1,
+            compromised_entries=0,
+            findings=[],
+            breach_correlated_entries=1,
+            breach_findings=[
+                BreachCorrelationFinding(
+                    name="Adobe",
+                    username="alice@example.com",
+                    source="site_domain",
+                    domain="adobe.com",
+                    breaches=["Adobe"],
+                )
+            ],
+        )
+    )
+    assert not has_exposures(
+        AuditSummary(
+            total_entries=1,
+            unique_passwords=1,
+            compromised_entries=0,
+            findings=[],
+            breach_correlated_entries=0,
+            breach_findings=[],
+        )
+    )
 
     assert not has_exposures({"new_exposures": 0})
     assert has_exposures({"new_exposures": 1})

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
 
 from pwned.client import HIBPClient, HIBPError, NotFoundError
+from pwned.history import ExposureHistoryStore, HistoryTrendSummary
 from pwned.models import Breach
 from pwned.reporting import (
     BreachExposureSummary,
@@ -194,3 +196,69 @@ def test_generate_domain_report_stealer_not_found(
 
     report = generate_domain_report(client, "example.com", include_stealer_logs=True)
     assert report.stealer_log_aliases == 0
+
+
+def test_build_domain_report_history_summary_unset_vs_set() -> None:
+    report_without = build_domain_report("example.com", {}, [])
+    assert report_without.history_summary is None
+    assert "history_summary" not in report_without.model_dump(exclude_unset=True)
+
+    trend = HistoryTrendSummary(
+        total_runs=3,
+        active_exposures=2,
+        new_in_latest_run=1,
+        resolved_in_latest_run=1,
+        total_resolved=2,
+        remediation_rate=50.0,
+    )
+    report_with = build_domain_report(
+        "example.com",
+        {"alice": ["Adobe"]},
+        [],
+        history_summary=trend,
+    )
+    assert report_with.history_summary == trend
+    dumped = report_with.model_dump(exclude_unset=True)
+    assert dumped["history_summary"] == trend.model_dump()
+
+
+def test_generate_domain_report_with_history_db(tmp_path: Path) -> None:
+    db_path = tmp_path / "history.db"
+    with ExposureHistoryStore(db_path) as store:
+        store.record_snapshot(
+            checked_targets=[("domain", "example.com"), ("domain", "other.com")],
+            observed_exposures=[
+                ("domain", "example.com", "alias_breach", "alice:Adobe"),
+                ("domain", "example.com", "alias_breach", "bob:LinkedIn"),
+                ("domain", "other.com", "alias_breach", "carol:Adobe"),
+            ],
+            domains_checked=2,
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        store.record_snapshot(
+            checked_targets=[("domain", "example.com"), ("domain", "other.com")],
+            observed_exposures=[
+                ("domain", "example.com", "alias_breach", "alice:Adobe"),
+                ("domain", "other.com", "alias_breach", "carol:Adobe"),
+            ],
+            domains_checked=2,
+            timestamp=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+    client = MagicMock(spec=HIBPClient)
+    client.get_domain_breaches.return_value = {"alice": ["Adobe"]}
+    client.get_breaches.return_value = []
+
+    report_with_db = generate_domain_report(client, "example.com", history_db=db_path)
+    assert report_with_db.history_summary is not None
+    assert report_with_db.history_summary.total_runs == 2
+    assert report_with_db.history_summary.active_exposures == 1
+    assert report_with_db.history_summary.new_in_latest_run == 0
+    assert report_with_db.history_summary.resolved_in_latest_run == 1
+    assert report_with_db.history_summary.total_resolved == 1
+    assert report_with_db.history_summary.remediation_rate == 50.0
+    assert "history_summary" in report_with_db.model_dump(exclude_unset=True)
+
+    report_without_db = generate_domain_report(client, "example.com")
+    assert report_without_db.history_summary is None
+    assert "history_summary" not in report_without_db.model_dump(exclude_unset=True)

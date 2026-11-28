@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 from pytest_httpx import HTTPXMock
 
+from pwned.async_client import AsyncHIBPClient
 from pwned.audit import (
     EMPTY_LM_HASH,
     EMPTY_NTLM_HASH,
@@ -22,6 +23,8 @@ from pwned.audit import (
     AuditEntry,
     AuditFinding,
     AuditSummary,
+    BreachCorrelationFinding,
+    BreachCorrelationSource,
     ExportSource,
     ReuseGroup,
     StrengthFinding,
@@ -29,11 +32,14 @@ from pwned.audit import (
     _parse_pass_entry_output,
     async_audit_entries,
     audit_entries,
+    extract_domain,
     load_custom_wordlist,
     load_export,
     parse_1password_1pux,
+    parse_1password_cli,
     parse_1password_csv,
     parse_apple_csv,
+    parse_bitwarden_cli,
     parse_bitwarden_csv,
     parse_bitwarden_encrypted_json,
     parse_bitwarden_json,
@@ -48,6 +54,8 @@ from pwned.audit import (
     parse_protonpass_csv,
     parse_pwdump,
 )
+from pwned.client import ForbiddenError, HIBPClient, HIBPError, NotFoundError
+from pwned.models import Breach
 from pwned.passwords import AsyncPwnedPasswordsClient, PwnedPasswordsClient, _hash_password
 
 
@@ -133,8 +141,10 @@ class TestAuditModels:
             "bitwarden-json",
             "bitwarden-encrypted-json",
             "bitwarden-csv",
+            "bitwarden-cli",
             "1password-csv",
             "1password-1pux",
+            "1password-cli",
             "chrome-csv",
             "firefox-csv",
             "apple-csv",
@@ -2429,3 +2439,1134 @@ class TestADHygieneAndCustomWordlist:
         assert summary.wordlist_findings == [
             WordlistFinding(name="CORP", username="jdoe", match_type="exact")
         ]
+
+
+class TestExtractDomainAndParserDomains:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("", None),
+            ("   ", None),
+            ("https://www.GitHub.com:8443/login?next=/", "github.com"),
+            ("https://sub.example.com./path", "sub.example.com"),
+            ("http://WWW.Adobe.COM/", "adobe.com"),
+            ("github.com/org/repo", "github.com"),
+            ("www.example.com", "example.com"),
+            ("  login.corp.example.co.uk  ", "login.corp.example.co.uk"),
+            ("localhost", None),
+            ("https://localhost/login", None),
+            ("https://www.", None),
+            ("https://www.com", None),
+            ("https://.", None),
+            ("foo bar.com", None),
+            ("mailto:alice@example.com", None),
+            ("not-a-domain", None),
+            ("http://[invalid", None),
+            ("[bad.host", None),
+        ],
+    )
+    def test_extract_domain(self, raw: str, expected: str | None) -> None:
+        assert extract_domain(raw) == expected
+
+    def test_audit_entry_domains_default_and_equality(self) -> None:
+        plain = AuditEntry(name="GitHub", username="alice", password="pw")
+        with_domains = AuditEntry(
+            name="GitHub",
+            username="alice",
+            password="pw",
+            domains=("github.com",),
+        )
+        assert plain.domains == ()
+        assert with_domains.domains == ("github.com",)
+        assert plain == with_domains
+        assert hash(plain) == hash(with_domains)
+
+    def test_bitwarden_json_extracts_domains(self, tmp_path: Path) -> None:
+        p = tmp_path / "bw.json"
+        payload = {
+            "items": [
+                {
+                    "name": "GitHub",
+                    "login": {
+                        "username": "alice",
+                        "password": "pw1",
+                        "uris": [
+                            {"uri": "https://www.github.com/login"},
+                            {"uri": "https://api.github.com"},
+                            {"uri": "https://github.com/settings"},
+                            {"uri": None},
+                            "not-a-valid-host",
+                            "gist.github.com",
+                            123,
+                        ],
+                    },
+                },
+                {
+                    "name": "NoUris",
+                    "login": {"username": "bob", "password": "pw2", "uris": "invalid"},
+                },
+            ]
+        }
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        entries = parse_bitwarden_json(p)
+        assert len(entries) == 2
+        assert entries[0].domains == ("github.com", "api.github.com", "gist.github.com")
+        assert entries[1].domains == ()
+
+    def test_csv_parsers_extract_domains(self, tmp_path: Path) -> None:
+        bw_csv = tmp_path / "bw.csv"
+        bw_csv.write_text(
+            "name,login_uri,login_username,login_password\n"
+            "GitHub,https://www.github.com/login,alice,pw1\n"
+            "Blank,,bob,pw2\n",
+            encoding="utf-8",
+        )
+        bw_entries = parse_bitwarden_csv(bw_csv)
+        assert bw_entries[0].domains == ("github.com",)
+        assert bw_entries[1].domains == ()
+
+        dl_csv = tmp_path / "dl.csv"
+        dl_csv.write_text(
+            "title,url,domain,username,password\n"
+            "Adobe,https://login.adobe.com/auth,adobe.com,alice,pw1\n"
+            "Same,https://www.example.com,example.com,bob,pw2\n",
+            encoding="utf-8",
+        )
+        dl_entries = parse_dashlane_csv(dl_csv)
+        assert dl_entries[0].domains == ("login.adobe.com", "adobe.com")
+        assert dl_entries[1].domains == ("example.com",)
+
+        gen_csv = tmp_path / "gen.csv"
+        gen_csv.write_text(
+            "name,url,domain,username,password\nSite,https://a.test,b.test,alice,pw1\n",
+            encoding="utf-8",
+        )
+        assert parse_generic_csv(gen_csv)[0].domains == ("a.test", "b.test")
+
+    def test_1pux_extracts_domains(self, tmp_path: Path) -> None:
+        p = tmp_path / "export.1pux"
+        payload = {
+            "accounts": [
+                {
+                    "vaults": [
+                        {
+                            "items": [
+                                {
+                                    "overview": {
+                                        "title": "Acme",
+                                        "url": "https://www.acme.com/login",
+                                        "urls": [
+                                            {"url": "https://sso.acme.com"},
+                                            {"url": "https://acme.com"},
+                                            {"url": 42},
+                                            "not-a-dict",
+                                        ],
+                                    },
+                                    "details": {
+                                        "loginFields": [
+                                            {"designation": "username", "value": "alice"},
+                                            {"designation": "password", "value": "pw1"},
+                                        ]
+                                    },
+                                },
+                                {
+                                    "overview": {
+                                        "title": "NoUrls",
+                                        "url": None,
+                                        "urls": "not-a-list",
+                                    },
+                                    "details": {
+                                        "loginFields": [
+                                            {"designation": "password", "value": "pw2"},
+                                        ]
+                                    },
+                                },
+                                {
+                                    "overview": "bad-overview",
+                                    "details": {
+                                        "loginFields": [
+                                            {"designation": "password", "value": "pw3"},
+                                        ]
+                                    },
+                                },
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+        with zipfile.ZipFile(p, "w") as zf:
+            zf.writestr("export.data", json.dumps(payload))
+        entries = parse_1password_1pux(p)
+        assert [e.domains for e in entries] == [
+            ("acme.com", "sso.acme.com"),
+            (),
+            (),
+        ]
+
+    def test_keepass_extracts_domains(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        kdbx = tmp_path / "vault.kdbx"
+        kdbx.write_bytes(b"fake")
+        fake_entries = [
+            SimpleNamespace(
+                title="GitHub",
+                username="alice",
+                password="pw1",
+                url="https://www.github.com/login",
+            ),
+            SimpleNamespace(title="NoUrl", username="bob", password="pw2", url=None),
+            SimpleNamespace(title="NoAttr", username="carol", password="pw3"),
+        ]
+        fake_module = ModuleType("pykeepass")
+        fake_module.PyKeePass = MagicMock(  # type: ignore[attr-defined]
+            return_value=SimpleNamespace(entries=fake_entries)
+        )
+        monkeypatch.setitem(sys.modules, "pykeepass", fake_module)
+        entries = parse_keepass(kdbx, master_password="pw")
+        assert [e.domains for e in entries] == [("github.com",), (), ()]
+
+    def test_pass_entry_output_extracts_domains(self) -> None:
+        output = (
+            "s3cr3t\n"
+            "username: alice@example.com\n"
+            "login: ignored-second-user\n"
+            "url: https://www.github.com/login\n"
+            "Website: https://api.github.com\n"
+            "site: \n"
+            "SITE: example.org/auth\n"
+            "note: unrelated\n"
+        )
+        entry = _parse_pass_entry_output("work/github", output)
+        assert entry is not None
+        assert entry.username == "alice@example.com"
+        assert entry.domains == ("github.com", "api.github.com", "example.org")
+
+
+class TestParseBitwardenCli:
+    def test_missing_both_bw_and_rbw_raises_runtime_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("pwned.audit.shutil.which", lambda _: None)
+        with pytest.raises(
+            RuntimeError, match=r"Neither 'bw' nor 'rbw' CLI is installed or on PATH\."
+        ):
+            parse_bitwarden_cli()
+
+    @pytest.mark.parametrize("bad_target", ["-flag", "--search", " -evil", Path("-x")])
+    def test_invalid_target_starting_with_dash_raises_value_error(
+        self, bad_target: Path | str
+    ) -> None:
+        with pytest.raises(ValueError, match="starting with '-'"):
+            parse_bitwarden_cli(bad_target)
+
+    def test_bw_preferred_lists_and_parses_items_with_and_without_target(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+        items_payload = [
+            {
+                "name": "GitHub",
+                "login": {
+                    "username": "alice@example.com",
+                    "password": "pw1",
+                    "uris": [{"uri": "https://www.github.com/login"}],
+                },
+            },
+            {"name": "Note", "login": None},
+            {"name": "Empty", "login": {"username": "bob", "password": ""}},
+        ]
+
+        def _fake_which(name: str) -> str | None:
+            return f"/usr/bin/{name}"
+
+        def _fake_run(cmd: list[str], **kw: object) -> SimpleNamespace:
+            calls.append(cmd)
+            return SimpleNamespace(returncode=0, stdout=json.dumps(items_payload), stderr="")
+
+        monkeypatch.setattr("pwned.audit.shutil.which", _fake_which)
+        monkeypatch.setattr("pwned.audit.subprocess.run", _fake_run)
+
+        entries = parse_bitwarden_cli()
+        assert calls == [["/usr/bin/bw", "list", "items"]]
+        assert entries == [AuditEntry(name="GitHub", username="alice@example.com", password="pw1")]
+        assert entries[0].domains == ("github.com",)
+
+        calls.clear()
+        parse_bitwarden_cli("   ")
+        assert calls == [["/usr/bin/bw", "list", "items"]]
+
+        calls.clear()
+        parse_bitwarden_cli(Path("github"))
+        assert calls == [["/usr/bin/bw", "list", "items", "--search", "github"]]
+
+    def test_bw_invalid_json_non_list_and_nonzero_exit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "pwned.audit.shutil.which", lambda n: "/usr/bin/bw" if n == "bw" else None
+        )
+
+        monkeypatch.setattr(
+            "pwned.audit.subprocess.run",
+            lambda *a, **kw: SimpleNamespace(returncode=0, stdout="{bad", stderr=""),
+        )
+        with pytest.raises(ValueError, match="Invalid JSON from bw list items"):
+            parse_bitwarden_cli()
+
+        monkeypatch.setattr(
+            "pwned.audit.subprocess.run",
+            lambda *a, **kw: SimpleNamespace(returncode=0, stdout='{"not": "list"}', stderr=""),
+        )
+        with pytest.raises(ValueError, match="JSON list"):
+            parse_bitwarden_cli()
+
+        monkeypatch.setattr(
+            "pwned.audit.subprocess.run",
+            lambda *a, **kw: SimpleNamespace(returncode=1, stdout="", stderr="Vault is locked"),
+        )
+        with pytest.raises(RuntimeError, match="Vault is locked"):
+            parse_bitwarden_cli()
+
+    def test_rbw_fallback_lists_filters_and_parses_entries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+        list_stdout = (
+            "\n"
+            "   \n"
+            "\tMissingId\talice\n"
+            "-bad-id\tInjected\talice\n"
+            "id-1\tGitHub\talice@example.com\n"
+            "id-2\tGitLab\tbob@corp.test\n"
+            "id-3\tNoUserOnlyName\n"
+            "id-4\tNoteItem\tcarol\n"
+            "id-5\tBadShape\tdave\n"
+            "id-6\tEmptyPw\teve\n"
+        )
+        raw_items: dict[str, object] = {
+            "id-1": {
+                "name": "GitHub",
+                "data": {
+                    "username": "alice@example.com",
+                    "password": "pw1",
+                    "uris": [{"uri": "https://github.com"}, "api.github.com"],
+                },
+            },
+            "id-2": {
+                "name": None,
+                "data": {
+                    "username": None,
+                    "password": "pw2",
+                    "uris": None,
+                },
+            },
+            "id-3": {
+                "name": "NoUserOnlyName",
+                "data": {"username": "", "password": "pw3", "uris": ["https://onlyname.test"]},
+            },
+            "id-4": {"name": "NoteItem", "data": "not-a-dict"},
+            "id-5": ["not-a-dict"],
+            "id-6": {"name": "EmptyPw", "data": {"username": "eve", "password": ""}},
+        }
+
+        def _fake_which(name: str) -> str | None:
+            return "/usr/bin/rbw" if name == "rbw" else None
+
+        def _fake_run(cmd: list[str], **kw: object) -> SimpleNamespace:
+            calls.append(cmd)
+            if cmd[1] == "list":
+                return SimpleNamespace(returncode=0, stdout=list_stdout, stderr="")
+            item_id = cmd[3]
+            return SimpleNamespace(returncode=0, stdout=json.dumps(raw_items[item_id]), stderr="")
+
+        monkeypatch.setattr("pwned.audit.shutil.which", _fake_which)
+        monkeypatch.setattr("pwned.audit.subprocess.run", _fake_run)
+
+        all_entries = parse_bitwarden_cli()
+        assert all_entries == [
+            AuditEntry(name="GitHub", username="alice@example.com", password="pw1"),
+            AuditEntry(name="", username="", password="pw2"),
+            AuditEntry(name="NoUserOnlyName", username="", password="pw3"),
+        ]
+        assert all_entries[0].domains == ("github.com", "api.github.com")
+        assert all_entries[1].domains == ()
+        assert all_entries[2].domains == ("onlyname.test",)
+        assert calls[0] == ["/usr/bin/rbw", "list", "--fields", "id,name,user"]
+        assert ["/usr/bin/rbw", "get", "--raw", "id-1"] in calls
+
+        # Filter by name case-insensitively
+        calls.clear()
+        by_name = parse_bitwarden_cli("github")
+        assert by_name == [AuditEntry(name="GitHub", username="alice@example.com", password="pw1")]
+        assert calls == [
+            ["/usr/bin/rbw", "list", "--fields", "id,name,user"],
+            ["/usr/bin/rbw", "get", "--raw", "id-1"],
+        ]
+
+        # Filter by user case-insensitively
+        calls.clear()
+        by_user = parse_bitwarden_cli("CORP.TEST")
+        assert by_user == [AuditEntry(name="", username="", password="pw2")]
+        assert calls == [
+            ["/usr/bin/rbw", "list", "--fields", "id,name,user"],
+            ["/usr/bin/rbw", "get", "--raw", "id-2"],
+        ]
+
+    def test_rbw_invalid_json_and_nonzero_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "pwned.audit.shutil.which", lambda n: "/usr/bin/rbw" if n == "rbw" else None
+        )
+
+        def _bad_get(cmd: list[str], **kw: object) -> SimpleNamespace:
+            if cmd[1] == "list":
+                return SimpleNamespace(returncode=0, stdout="id-1\tGitHub\talice\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="{invalid", stderr="")
+
+        monkeypatch.setattr("pwned.audit.subprocess.run", _bad_get)
+        with pytest.raises(ValueError, match="Invalid JSON from rbw get id-1"):
+            parse_bitwarden_cli()
+
+        monkeypatch.setattr(
+            "pwned.audit.subprocess.run",
+            lambda *a, **kw: SimpleNamespace(returncode=1, stdout="", stderr="rbw locked"),
+        )
+        with pytest.raises(RuntimeError, match="rbw locked"):
+            parse_bitwarden_cli()
+
+        def _get_fails(cmd: list[str], **kw: object) -> SimpleNamespace:
+            if cmd[1] == "list":
+                return SimpleNamespace(returncode=0, stdout="id-1\tGitHub\talice\n", stderr="")
+            return SimpleNamespace(returncode=2, stdout="", stderr="item missing")
+
+        monkeypatch.setattr("pwned.audit.subprocess.run", _get_fails)
+        with pytest.raises(RuntimeError, match="item missing"):
+            parse_bitwarden_cli()
+
+
+class TestParse1PasswordCli:
+    def test_missing_op_cli_raises_runtime_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("pwned.audit.shutil.which", lambda _: None)
+        with pytest.raises(
+            RuntimeError, match=r"The 'op' \(1Password\) CLI is not installed or not on PATH\."
+        ):
+            parse_1password_cli()
+
+    @pytest.mark.parametrize("bad_vault", ["-v", "--vault", " -bad", Path("-x")])
+    def test_invalid_vault_starting_with_dash_raises_value_error(
+        self, bad_vault: Path | str
+    ) -> None:
+        with pytest.raises(ValueError, match="starting with '-'"):
+            parse_1password_cli(bad_vault)
+
+    def test_lists_and_parses_login_items_with_and_without_vault(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[list[str]] = []
+        list_payload: list[object] = [
+            {"id": "item-1"},
+            {"id": "  item-2  "},
+            {"id": "-bad-id"},
+            {"id": "   "},
+            {"id": 123},
+            "not-a-dict",
+            {"id": "item-non-dict"},
+            {"id": "item-no-fields"},
+            {"id": "item-empty-pw"},
+        ]
+        detail_map: dict[str, object] = {
+            "item-1": {
+                "title": "GitHub",
+                "fields": [
+                    "not-a-dict",
+                    {"purpose": "USERNAME", "value": 123},
+                    {"purpose": "USERNAME", "value": "alice@example.com"},
+                    {"id": "username", "value": "duplicate-ignored"},
+                    {"purpose": "PASSWORD", "value": "pw1"},
+                    {"id": "password", "value": "duplicate-pw-ignored"},
+                    {"purpose": "NOTES", "value": "note"},
+                ],
+                "urls": [
+                    {"href": "https://www.github.com/login"},
+                    {"href": "https://api.github.com"},
+                    {"href": None},
+                    "bad-url-obj",
+                ],
+            },
+            "item-2": {
+                "title": None,
+                "fields": [
+                    {"id": "username", "value": "bob"},
+                    {"id": "password", "value": "pw2"},
+                ],
+                "urls": "not-a-list",
+            },
+            "item-non-dict": ["not-a-dict"],
+            "item-no-fields": {"title": "NoFields", "fields": None},
+            "item-empty-pw": {
+                "title": "EmptyPw",
+                "fields": [
+                    {"purpose": "USERNAME", "value": "carol"},
+                    {"purpose": "PASSWORD", "value": ""},
+                ],
+            },
+        }
+
+        def _fake_run(cmd: list[str], **kw: object) -> SimpleNamespace:
+            calls.append(cmd)
+            if cmd[2] == "list":
+                return SimpleNamespace(returncode=0, stdout=json.dumps(list_payload), stderr="")
+            item_id = cmd[3]
+            return SimpleNamespace(returncode=0, stdout=json.dumps(detail_map[item_id]), stderr="")
+
+        monkeypatch.setattr("pwned.audit.shutil.which", lambda _: "/usr/bin/op")
+        monkeypatch.setattr("pwned.audit.subprocess.run", _fake_run)
+
+        entries = parse_1password_cli()
+        assert entries == [
+            AuditEntry(name="GitHub", username="alice@example.com", password="pw1"),
+            AuditEntry(name="", username="bob", password="pw2"),
+        ]
+        assert entries[0].domains == ("github.com", "api.github.com")
+        assert entries[1].domains == ()
+        assert calls[0] == [
+            "/usr/bin/op",
+            "item",
+            "list",
+            "--categories",
+            "Login",
+            "--format",
+            "json",
+        ]
+        assert calls[1] == ["/usr/bin/op", "item", "get", "item-1", "--format", "json"]
+
+        # Whitespace-only vault omits --vault
+        calls.clear()
+        parse_1password_cli("   ")
+        assert calls[0] == [
+            "/usr/bin/op",
+            "item",
+            "list",
+            "--categories",
+            "Login",
+            "--format",
+            "json",
+        ]
+
+        # With explicit vault name (also test Path)
+        calls.clear()
+        parse_1password_cli(Path("Private"))
+        assert calls[0] == [
+            "/usr/bin/op",
+            "item",
+            "list",
+            "--categories",
+            "Login",
+            "--format",
+            "json",
+            "--vault",
+            "Private",
+        ]
+        assert calls[1] == [
+            "/usr/bin/op",
+            "item",
+            "get",
+            "item-1",
+            "--format",
+            "json",
+            "--vault",
+            "Private",
+        ]
+
+    def test_invalid_json_non_list_and_nonzero_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("pwned.audit.shutil.which", lambda _: "/usr/bin/op")
+
+        monkeypatch.setattr(
+            "pwned.audit.subprocess.run",
+            lambda *a, **kw: SimpleNamespace(returncode=0, stdout="{bad", stderr=""),
+        )
+        with pytest.raises(ValueError, match="Invalid JSON from op item list"):
+            parse_1password_cli()
+
+        monkeypatch.setattr(
+            "pwned.audit.subprocess.run",
+            lambda *a, **kw: SimpleNamespace(returncode=0, stdout='{"not": "list"}', stderr=""),
+        )
+        with pytest.raises(ValueError, match="JSON list"):
+            parse_1password_cli()
+
+        def _bad_get(cmd: list[str], **kw: object) -> SimpleNamespace:
+            if cmd[2] == "list":
+                return SimpleNamespace(returncode=0, stdout='[{"id": "i1"}]', stderr="")
+            return SimpleNamespace(returncode=0, stdout="{bad", stderr="")
+
+        monkeypatch.setattr("pwned.audit.subprocess.run", _bad_get)
+        with pytest.raises(ValueError, match="Invalid JSON from op item get i1"):
+            parse_1password_cli()
+
+        monkeypatch.setattr(
+            "pwned.audit.subprocess.run",
+            lambda *a, **kw: SimpleNamespace(returncode=1, stdout="", stderr="not signed in"),
+        )
+        with pytest.raises(RuntimeError, match="not signed in"):
+            parse_1password_cli()
+
+
+class TestLoadExportCliSources:
+    def test_dispatches_bitwarden_cli_and_1password_cli_with_exclude_machines(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        bw_calls: list[Path | str | None] = []
+        op_calls: list[Path | str | None] = []
+
+        def _fake_bw(target: Path | str | None = None) -> list[AuditEntry]:
+            bw_calls.append(target)
+            return [
+                AuditEntry(name="GitHub", username="alice", password="pw1"),
+                AuditEntry(name="AD", username="DC01$", password="pw2"),
+            ]
+
+        def _fake_op(vault: Path | str | None = None) -> list[AuditEntry]:
+            op_calls.append(vault)
+            return [
+                AuditEntry(name="GitLab", username="bob", password="pw3"),
+                AuditEntry(name="AD", username="SRV01$", password="pw4"),
+            ]
+
+        monkeypatch.setattr("pwned.audit.parse_bitwarden_cli", _fake_bw)
+        monkeypatch.setattr("pwned.audit.parse_1password_cli", _fake_op)
+
+        assert load_export(None, source="bitwarden-cli") == [
+            AuditEntry(name="GitHub", username="alice", password="pw1"),
+            AuditEntry(name="AD", username="DC01$", password="pw2"),
+        ]
+        assert load_export(Path("work"), source="bitwarden-cli", exclude_machines=True) == [
+            AuditEntry(name="GitHub", username="alice", password="pw1"),
+        ]
+        assert bw_calls == [None, Path("work")]
+
+        assert load_export(None, source="1password-cli") == [
+            AuditEntry(name="GitLab", username="bob", password="pw3"),
+            AuditEntry(name="AD", username="SRV01$", password="pw4"),
+        ]
+        assert load_export(Path("Private"), source="1password-cli", exclude_machines=True) == [
+            AuditEntry(name="GitLab", username="bob", password="pw3"),
+        ]
+        assert op_calls == [None, Path("Private")]
+
+
+class TestBreachCorrelation:
+    def test_breach_correlation_model_and_exclude_unset(self) -> None:
+        assert set(get_args(BreachCorrelationSource)) == {
+            "site_domain",
+            "account_breach",
+            "stealer_log",
+        }
+        finding = BreachCorrelationFinding(
+            name="Adobe",
+            username="alice@example.com",
+            source="site_domain",
+            domain="adobe.com",
+            breaches=["Adobe"],
+        )
+        assert "password" not in BreachCorrelationFinding.model_fields
+        assert finding.model_dump() == {
+            "name": "Adobe",
+            "username": "alice@example.com",
+            "source": "site_domain",
+            "domain": "adobe.com",
+            "breaches": ["Adobe"],
+        }
+
+        pw_client = MagicMock(spec=PwnedPasswordsClient)
+        pw_client.check_password.return_value = 0
+        entries = [
+            AuditEntry(
+                name="Adobe",
+                username="alice@example.com",
+                password="secret-pw-value",
+                domains=("adobe.com",),
+            )
+        ]
+
+        # Off by default -> fields stay unset
+        plain = audit_entries(entries, pw_client)
+        assert plain.breach_findings == []
+        assert plain.breach_correlated_entries == 0
+        plain_dumped = plain.model_dump(exclude_unset=True)
+        assert "breach_findings" not in plain_dumped
+        assert "breach_correlated_entries" not in plain_dumped
+
+        # Enabled with no catalog / no hibp_client -> fields present with [] / 0
+        empty_corr = audit_entries(entries, pw_client, check_breaches=True)
+        empty_dumped = empty_corr.model_dump(exclude_unset=True)
+        assert empty_dumped["breach_findings"] == []
+        assert empty_dumped["breach_correlated_entries"] == 0
+
+    def test_site_domain_correlation_catalog_subdomains_dedup_and_sorting(self) -> None:
+        catalog = [
+            Breach(Name="Adobe2", Domain="www.Adobe.com"),
+            Breach(Name="Adobe", Domain="adobe.com"),
+            Breach(Name="SubPortal", Domain="auth.adobe.com"),
+            Breach(Name="Dropbox", Domain="dropbox.com"),
+            Breach(Name="Collection1", Domain=""),
+        ]
+        entries = [
+            AuditEntry(
+                name="Adobe Login",
+                username="alice",
+                password="pw1",
+                domains=(
+                    "login.adobe.com",
+                    "account.adobe.com",
+                    "https://www.dropbox.com/home",
+                    "not-a-domain",
+                ),
+            ),
+            AuditEntry(
+                name="Adobe Auth",
+                username="bob",
+                password="pw2",
+                domains=("auth.adobe.com",),
+            ),
+            AuditEntry(
+                name="Safe Site",
+                username="carol",
+                password="pw3",
+                domains=("safe.example.org",),
+            ),
+            AuditEntry(
+                name="Adobe Auth",
+                username="bob",
+                password="pw4",
+                domains=("auth.adobe.com",),
+            ),
+        ]
+
+        pw_client = MagicMock(spec=PwnedPasswordsClient)
+        pw_client.check_password.return_value = 0
+        hibp_client = MagicMock(spec=HIBPClient)
+        hibp_client.api_key = None
+
+        summary = audit_entries(
+            entries,
+            pw_client,
+            check_breaches=True,
+            breach_catalog=catalog,
+            hibp_client=hibp_client,
+        )
+        # Explicit breach_catalog must not call get_breaches()
+        hibp_client.get_breaches.assert_not_called()
+        hibp_client.get_account_breaches.assert_not_called()
+        # 3 distinct entries by index (including two with identical name/username)
+        assert summary.breach_correlated_entries == 3
+        assert summary.breach_findings == [
+            BreachCorrelationFinding(
+                name="Adobe Auth",
+                username="bob",
+                source="site_domain",
+                domain="auth.adobe.com",
+                breaches=["SubPortal"],
+            ),
+            BreachCorrelationFinding(
+                name="Adobe Auth",
+                username="bob",
+                source="site_domain",
+                domain="auth.adobe.com",
+                breaches=["SubPortal"],
+            ),
+            BreachCorrelationFinding(
+                name="Adobe Login",
+                username="alice",
+                source="site_domain",
+                domain="adobe.com",
+                breaches=["Adobe", "Adobe2"],
+            ),
+            BreachCorrelationFinding(
+                name="Adobe Login",
+                username="alice",
+                source="site_domain",
+                domain="dropbox.com",
+                breaches=["Dropbox"],
+            ),
+        ]
+
+    def test_sync_and_async_full_correlation_parity_and_errors(self) -> None:
+        catalog = [
+            Breach(Name="Adobe", Domain="adobe.com"),
+        ]
+        entries = [
+            AuditEntry(
+                name="Adobe",
+                username="Alice@Example.com",
+                password="pw-super-secret-1",
+                domains=("login.adobe.com",),
+            ),
+            AuditEntry(
+                name="GitHub",
+                username="  alice@example.com ",
+                password="pw-super-secret-2",
+                domains=("github.com",),
+            ),
+            AuditEntry(
+                name="CleanMail",
+                username="clean@example.com",
+                password="pw-super-secret-3",
+            ),
+            AuditEntry(
+                name="Router",
+                username="admin",
+                password="pw-super-secret-4",
+            ),
+            AuditEntry(
+                name="BadAt1",
+                username="@example.com",
+                password="pw-super-secret-5",
+            ),
+            AuditEntry(
+                name="BadAt2",
+                username="alice@",
+                password="pw-super-secret-6",
+            ),
+            AuditEntry(
+                name="SpaceEmail",
+                username="a b@example.com",
+                password="pw-super-secret-7",
+            ),
+        ]
+
+        sync_pw = MagicMock(spec=PwnedPasswordsClient)
+        sync_pw.check_password.return_value = 0
+
+        class _FakeSyncHIBP:
+            def __init__(self) -> None:
+                self.api_key = "test-key"
+                self.breach_calls: list[tuple[str, bool]] = []
+                self.stealer_calls: list[str] = []
+                self.catalog_calls = 0
+
+            def get_breaches(self) -> list[Breach]:
+                self.catalog_calls += 1
+                return list(catalog)
+
+            def get_account_breaches(self, email: str, *, truncate: bool = True) -> list[Breach]:
+                self.breach_calls.append((email, truncate))
+                if email == "alice@example.com":
+                    return [Breach(Name="LinkedIn"), Breach(Name="Adobe")]
+                raise NotFoundError("not found")
+
+            def get_stealer_logs_by_email(self, email: str) -> list[str]:
+                self.stealer_calls.append(email)
+                if email == "alice@example.com":
+                    return ["shop.test", "adobe.com", "shop.test"]
+                raise NotFoundError("not found")
+
+        class _FakeAsyncPW:
+            async def check_password(
+                self, password: str, *, ntlm: bool = False, pad: bool = True
+            ) -> int:
+                return 0
+
+        class _FakeAsyncHIBP:
+            def __init__(self) -> None:
+                self.api_key = "test-key"
+                self.breach_calls: list[tuple[str, bool]] = []
+                self.stealer_calls: list[str] = []
+                self.catalog_calls = 0
+
+            async def get_breaches(self) -> list[Breach]:
+                self.catalog_calls += 1
+                return list(catalog)
+
+            async def get_account_breaches(
+                self, email: str, *, truncate: bool = True
+            ) -> list[Breach]:
+                self.breach_calls.append((email, truncate))
+                if email == "alice@example.com":
+                    return [Breach(Name="LinkedIn"), Breach(Name="Adobe")]
+                raise NotFoundError("not found")
+
+            async def get_stealer_logs_by_email(self, email: str) -> list[str]:
+                self.stealer_calls.append(email)
+                if email == "alice@example.com":
+                    return ["shop.test", "adobe.com", "shop.test"]
+                raise NotFoundError("not found")
+
+        sync_hibp = _FakeSyncHIBP()
+        async_hibp = _FakeAsyncHIBP()
+
+        sync_summary = audit_entries(
+            entries,
+            sync_pw,
+            check_breaches=True,
+            hibp_client=sync_hibp,  # type: ignore[arg-type]
+            include_stealer_logs=True,
+        )
+        async_summary = asyncio.run(
+            async_audit_entries(
+                entries,
+                _FakeAsyncPW(),  # type: ignore[arg-type]
+                check_breaches=True,
+                hibp_client=async_hibp,  # type: ignore[arg-type]
+                include_stealer_logs=True,
+            )
+        )
+
+        assert sync_summary == async_summary
+        assert sync_hibp.catalog_calls == 1
+        assert async_hibp.catalog_calls == 1
+        # Deduplicated emails: alice@example.com and clean@example.com only
+        assert sync_hibp.breach_calls == [
+            ("alice@example.com", True),
+            ("clean@example.com", True),
+        ]
+        assert async_hibp.breach_calls == [
+            ("alice@example.com", True),
+            ("clean@example.com", True),
+        ]
+        assert sync_hibp.stealer_calls == ["alice@example.com", "clean@example.com"]
+        assert async_hibp.stealer_calls == ["alice@example.com", "clean@example.com"]
+
+        # Distinct entries correlated: Adobe (index 0) and GitHub (index 1)
+        assert sync_summary.breach_correlated_entries == 2
+        assert sync_summary.breach_findings == [
+            BreachCorrelationFinding(
+                name="Adobe",
+                username="Alice@Example.com",
+                source="account_breach",
+                domain="",
+                breaches=["Adobe", "LinkedIn"],
+            ),
+            BreachCorrelationFinding(
+                name="GitHub",
+                username="  alice@example.com ",
+                source="account_breach",
+                domain="",
+                breaches=["Adobe", "LinkedIn"],
+            ),
+            BreachCorrelationFinding(
+                name="Adobe",
+                username="Alice@Example.com",
+                source="site_domain",
+                domain="adobe.com",
+                breaches=["Adobe"],
+            ),
+            BreachCorrelationFinding(
+                name="Adobe",
+                username="Alice@Example.com",
+                source="stealer_log",
+                domain="",
+                breaches=["adobe.com", "shop.test"],
+            ),
+            BreachCorrelationFinding(
+                name="GitHub",
+                username="  alice@example.com ",
+                source="stealer_log",
+                domain="",
+                breaches=["adobe.com", "shop.test"],
+            ),
+        ]
+
+        # Never leak plaintext passwords
+        dumped_json = sync_summary.model_dump_json()
+        for idx in range(1, 8):
+            assert f"pw-super-secret-{idx}" not in dumped_json
+
+    def test_get_breaches_error_fallback_and_stealer_logs_disabled_or_forbidden(self) -> None:
+        entries = [
+            AuditEntry(
+                name="Adobe",
+                username="alice@example.com",
+                password="pw1",
+                domains=("adobe.com",),
+            ),
+        ]
+        sync_pw = MagicMock(spec=PwnedPasswordsClient)
+        sync_pw.check_password.return_value = 0
+
+        # MagicMock(spec=HIBPClient) has no api_key or _client -> treated as authenticated
+        sync_hibp = MagicMock(spec=HIBPClient)
+        sync_hibp.get_breaches.side_effect = HIBPError("catalog down")
+        sync_hibp.get_account_breaches.return_value = []
+
+        summary = audit_entries(
+            entries,
+            sync_pw,
+            check_breaches=True,
+            hibp_client=sync_hibp,
+            include_stealer_logs=False,
+        )
+        assert summary.breach_findings == []
+        assert summary.breach_correlated_entries == 0
+        sync_hibp.get_stealer_logs_by_email.assert_not_called()
+
+        # ForbiddenError from get_stealer_logs_by_email propagates
+        sync_hibp.get_stealer_logs_by_email.side_effect = ForbiddenError("requires Pwned Pro")
+        with pytest.raises(ForbiddenError, match="requires Pwned Pro"):
+            audit_entries(
+                entries,
+                sync_pw,
+                check_breaches=True,
+                hibp_client=sync_hibp,
+                include_stealer_logs=True,
+            )
+
+        # Async: get_breaches HIBPError fallback, include_stealer_logs=False, and ForbiddenError
+        class _AsyncPW:
+            async def check_password(
+                self, password: str, *, ntlm: bool = False, pad: bool = True
+            ) -> int:
+                return 0
+
+        class _FailingAsyncHIBP:
+            async def get_breaches(self) -> list[Breach]:
+                raise HIBPError("catalog down")
+
+            async def get_account_breaches(
+                self, email: str, *, truncate: bool = True
+            ) -> list[Breach]:
+                return []
+
+            async def get_stealer_logs_by_email(self, email: str) -> list[str]:
+                raise ForbiddenError("requires Pwned Pro")
+
+        async_summary = asyncio.run(
+            async_audit_entries(
+                entries,
+                _AsyncPW(),  # type: ignore[arg-type]
+                check_breaches=True,
+                hibp_client=_FailingAsyncHIBP(),  # type: ignore[arg-type]
+                include_stealer_logs=False,
+            )
+        )
+        assert async_summary.breach_findings == []
+        assert async_summary.breach_correlated_entries == 0
+
+        with pytest.raises(ForbiddenError, match="requires Pwned Pro"):
+            asyncio.run(
+                async_audit_entries(
+                    entries,
+                    _AsyncPW(),  # type: ignore[arg-type]
+                    check_breaches=True,
+                    hibp_client=_FailingAsyncHIBP(),  # type: ignore[arg-type]
+                    include_stealer_logs=True,
+                )
+            )
+
+    def test_real_unauthenticated_and_authenticated_hibp_clients(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        entries = [
+            AuditEntry(
+                name="Adobe",
+                username="alice@example.com",
+                password="pw1",
+                domains=("adobe.com",),
+            ),
+        ]
+        sync_pw = MagicMock(spec=PwnedPasswordsClient)
+        sync_pw.check_password.return_value = 0
+
+        # 1) Unauthenticated sync HIBPClient: fetches /breaches, skips /breachedaccount
+        httpx_mock.add_response(
+            url="https://haveibeenpwned.com/api/v3/breaches",
+            json=[{"Name": "Adobe", "Domain": "adobe.com"}],
+        )
+        with HIBPClient(api_key=None, user_agent="test-agent") as unauthed_sync:
+            unauthed_summary = audit_entries(
+                entries,
+                sync_pw,
+                check_breaches=True,
+                hibp_client=unauthed_sync,
+                include_stealer_logs=True,
+            )
+        assert unauthed_summary.breach_findings == [
+            BreachCorrelationFinding(
+                name="Adobe",
+                username="alice@example.com",
+                source="site_domain",
+                domain="adobe.com",
+                breaches=["Adobe"],
+            )
+        ]
+        assert unauthed_summary.breach_correlated_entries == 1
+
+        # 2) Unauthenticated async AsyncHIBPClient: fetches /breaches, skips /breachedaccount
+        httpx_mock.add_response(
+            url="https://haveibeenpwned.com/api/v3/breaches",
+            json=[{"Name": "Adobe", "Domain": "adobe.com"}],
+        )
+
+        class _AsyncPW:
+            async def check_password(
+                self, password: str, *, ntlm: bool = False, pad: bool = True
+            ) -> int:
+                return 0
+
+        async def _run_unauthed_async() -> AuditSummary:
+            async with AsyncHIBPClient(api_key=None, user_agent="test-agent") as unauthed_async:
+                return await async_audit_entries(
+                    entries,
+                    _AsyncPW(),  # type: ignore[arg-type]
+                    check_breaches=True,
+                    hibp_client=unauthed_async,
+                    include_stealer_logs=True,
+                )
+
+        assert asyncio.run(_run_unauthed_async()) == unauthed_summary
+
+        # 3) Authenticated sync HIBPClient with no-domain entries skips /breaches
+        no_domain_entries = [
+            AuditEntry(name="Mail", username="alice@example.com", password="pw1"),
+        ]
+        httpx_mock.add_response(
+            url="https://haveibeenpwned.com/api/v3/breachedaccount/alice%40example.com",
+            json=[{"Name": "LinkedIn"}],
+        )
+        with HIBPClient(api_key="live-key", user_agent="test-agent") as authed_sync:
+            authed_summary = audit_entries(
+                no_domain_entries,
+                sync_pw,
+                check_breaches=True,
+                hibp_client=authed_sync,
+            )
+        assert authed_summary.breach_findings == [
+            BreachCorrelationFinding(
+                name="Mail",
+                username="alice@example.com",
+                source="account_breach",
+                domain="",
+                breaches=["LinkedIn"],
+            )
+        ]
+
+        # 4) Authenticated async AsyncHIBPClient with explicit breach_catalog skips /breaches
+        httpx_mock.add_response(
+            url="https://haveibeenpwned.com/api/v3/breachedaccount/alice%40example.com",
+            json=[{"Name": "LinkedIn"}],
+        )
+
+        async def _run_authed_async() -> AuditSummary:
+            async with AsyncHIBPClient(api_key="live-key", user_agent="test-agent") as authed_async:
+                return await async_audit_entries(
+                    no_domain_entries,
+                    _AsyncPW(),  # type: ignore[arg-type]
+                    check_breaches=True,
+                    breach_catalog=[],
+                    hibp_client=authed_async,
+                )
+
+        assert asyncio.run(_run_authed_async()) == authed_summary
+
+        # 5) Async with check_breaches=True, no breach_catalog, no hibp_client -> 0 findings
+        async_empty = asyncio.run(
+            async_audit_entries(
+                no_domain_entries,
+                _AsyncPW(),  # type: ignore[arg-type]
+                check_breaches=True,
+            )
+        )
+        assert async_empty.breach_findings == []
+        assert async_empty.breach_correlated_entries == 0
+        assert "breach_findings" in async_empty.model_dump(exclude_unset=True)

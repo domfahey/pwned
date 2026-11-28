@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -8,6 +9,7 @@ from typing import Any, cast
 import click
 import click.shell_completion
 
+from pwned.async_client import AsyncHIBPClient
 from pwned.audit import (
     AuditSummary,
     ExportSource,
@@ -48,14 +50,17 @@ from pwned.offline import OfflinePasswordsClient
 from pwned.offline_download import download_offline_db
 from pwned.passwords import AsyncPwnedPasswordsClient, PwnedPasswordsClient
 from pwned.reporting import generate_domain_report
+from pwned.server import DEFAULT_HOST, DEFAULT_PORT, create_range_server
 
 _EMAIL_ALIASES = ("admin", "hostmaster", "info", "security", "webmaster")
 _AUDIT_SOURCES = (
     "bitwarden-json",
     "bitwarden-encrypted-json",
     "bitwarden-csv",
+    "bitwarden-cli",
     "1password-csv",
     "1password-1pux",
+    "1password-cli",
     "chrome-csv",
     "firefox-csv",
     "apple-csv",
@@ -68,6 +73,8 @@ _AUDIT_SOURCES = (
     "pass",
     "gopass",
 )
+_CLI_VAULT_SOURCES = ("bitwarden-cli", "1password-cli")
+_STORE_SOURCES = ("pass", "gopass")
 _AUTH_BACKENDS = ("auto", "file", "keyring")
 _COMPLETION_SHELLS = ("bash", "zsh", "fish")
 _HASH_MODES = ("sha1", "ntlm")
@@ -459,7 +466,9 @@ def domain_verify_meta_check(ctx: click.Context, domain: str) -> None:
 
 
 @click.command()
-@click.argument("path", required=False, type=click.Path(exists=True, dir_okay=True, path_type=Path))
+@click.argument(
+    "path", required=False, type=click.Path(exists=False, dir_okay=True, path_type=Path)
+)
 @click.option(
     "--source",
     type=click.Choice(_AUDIT_SOURCES),
@@ -520,6 +529,16 @@ def domain_verify_meta_check(ctx: click.Context, domain: str) -> None:
     help="Path to a newline-delimited custom banned wordlist file.",
 )
 @click.option(
+    "--check-breaches",
+    is_flag=True,
+    help="Correlate vault domains and account emails against HIBP breaches.",
+)
+@click.option(
+    "--include-stealer-logs",
+    is_flag=True,
+    help="Include HIBP stealer-log correlation (requires --check-breaches and API key).",
+)
+@click.option(
     "--concurrency",
     "--parallelism",
     "-p",
@@ -551,7 +570,7 @@ def domain_verify_meta_check(ctx: click.Context, domain: str) -> None:
     "--fail-if-found",
     "fail_if_pwned",
     is_flag=True,
-    help="Exit with code 8 if compromised, banned-wordlist, or AD hygiene findings exist.",
+    help="Exit with code 8 if compromised, banned-wordlist, AD hygiene, or breach findings exist.",
 )
 @click.pass_context
 @handle_errors
@@ -568,6 +587,8 @@ def audit(
     check_ad_hygiene: bool,
     exclude_machines: bool,
     custom_wordlist: Path | None,
+    check_breaches: bool,
+    include_stealer_logs: bool,
     concurrency: int,
     offline_db: Path | None,
     notify_webhook: str | None,
@@ -575,11 +596,20 @@ def audit(
     fail_if_pwned: bool,
 ) -> None:
     """Audit a password-manager export locally via k-anonymity."""
-    if source not in ("pass", "gopass"):
+    if source not in (*_STORE_SOURCES, *_CLI_VAULT_SOURCES):
         if path is None:
             raise click.UsageError(f"PATH is required for --source {source}.")
+        if not path.exists():
+            raise click.UsageError(f"Path '{path}' does not exist.")
         if path.is_dir():
             raise click.UsageError(f"PATH must be a file for --source {source}.")
+    elif source in _STORE_SOURCES and path is not None and not path.exists():
+        raise click.UsageError(f"Path '{path}' does not exist.")
+
+    if include_stealer_logs and not check_breaches:
+        raise click.UsageError("--include-stealer-logs requires --check-breaches.")
+    if include_stealer_logs:
+        require_api_key(ctx)
 
     master_password: str | None = None
     if source == "keepass":
@@ -607,17 +637,38 @@ def audit(
         except ValueError as exc:
             raise click.UsageError(str(exc)) from exc
         with offline_cm as offline_client:
-            summary = audit_entries(
-                entries,
-                offline_client,
-                threshold=threshold,
-                ntlm=effective_ntlm,
-                pad=pad,
-                check_reuse=check_reuse,
-                check_strength=check_strength,
-                check_ad_hygiene=check_ad_hygiene,
-                custom_wordlist=wordlist_terms,
-            )
+            if check_breaches:
+                with HIBPClient(
+                    api_key=settings.get_api_key(),
+                    user_agent=settings.user_agent,
+                    cache=get_cache(ctx),
+                ) as hibp_client:
+                    summary = audit_entries(
+                        entries,
+                        offline_client,
+                        threshold=threshold,
+                        ntlm=effective_ntlm,
+                        pad=pad,
+                        check_reuse=check_reuse,
+                        check_strength=check_strength,
+                        check_ad_hygiene=check_ad_hygiene,
+                        custom_wordlist=wordlist_terms,
+                        check_breaches=True,
+                        hibp_client=hibp_client,
+                        include_stealer_logs=include_stealer_logs,
+                    )
+            else:
+                summary = audit_entries(
+                    entries,
+                    offline_client,
+                    threshold=threshold,
+                    ntlm=effective_ntlm,
+                    pad=pad,
+                    check_reuse=check_reuse,
+                    check_strength=check_strength,
+                    check_ad_hygiene=check_ad_hygiene,
+                    custom_wordlist=wordlist_terms,
+                )
     else:
 
         async def _run_online_audit() -> AuditSummary:
@@ -625,6 +676,27 @@ def audit(
                 user_agent=settings.user_agent,
                 cache=get_cache(ctx),
             ) as pw_client:
+                if check_breaches:
+                    async with AsyncHIBPClient(
+                        api_key=settings.get_api_key(),
+                        user_agent=settings.user_agent,
+                        cache=get_cache(ctx),
+                    ) as hibp_client:
+                        return await async_audit_entries(
+                            entries,
+                            pw_client,
+                            threshold=threshold,
+                            ntlm=effective_ntlm,
+                            pad=pad,
+                            check_reuse=check_reuse,
+                            check_strength=check_strength,
+                            concurrency=concurrency,
+                            check_ad_hygiene=check_ad_hygiene,
+                            custom_wordlist=wordlist_terms,
+                            check_breaches=True,
+                            hibp_client=hibp_client,
+                            include_stealer_logs=include_stealer_logs,
+                        )
                 return await async_audit_entries(
                     entries,
                     pw_client,
@@ -647,7 +719,10 @@ def audit(
         title="pwned Vault Audit Alert",
     )
     if fail_if_pwned and (
-        summary.compromised_entries > 0 or summary.wordlist_matches > 0 or bool(summary.ad_findings)
+        summary.compromised_entries > 0
+        or summary.wordlist_matches > 0
+        or bool(summary.ad_findings)
+        or summary.breach_correlated_entries > 0
     ):
         sys.exit(int(ExitCode.FINDINGS))
 
@@ -778,6 +853,12 @@ def offline_download(
     help="Include stealer log alias exposure counts.",
 )
 @click.option(
+    "--history-db",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="SQLite history database from 'pwned monitor --db' to include remediation trends.",
+)
+@click.option(
     "--notify-webhook",
     default=None,
     help="HTTPS webhook URL to notify on exposures.",
@@ -801,6 +882,7 @@ def domain_report(
     ctx: click.Context,
     domain: str,
     include_stealer_logs: bool,
+    history_db: Path | None,
     notify_webhook: str | None,
     webhook_format: str,
     fail_if_pwned: bool,
@@ -817,6 +899,7 @@ def domain_report(
             client,
             domain,
             include_stealer_logs=include_stealer_logs,
+            history_db=history_db,
         )
     render_output(ctx, report)
     _maybe_notify(
@@ -849,6 +932,13 @@ def domain_report(
     help="Poll /latestBreach first and skip domain breach queries when unchanged.",
 )
 @click.option(
+    "--db",
+    "db_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="SQLite database path for exposure history and remediation tracking.",
+)
+@click.option(
     "--notify-webhook",
     default=None,
     help="Override webhook URL from config.",
@@ -873,6 +963,7 @@ def monitor(
     config_path: Path,
     save_baselines: bool,
     smart_precheck: bool,
+    db_path: Path | None,
     notify_webhook: str | None,
     webhook_format: str | None,
     fail_if_pwned: bool,
@@ -898,6 +989,7 @@ def monitor(
                 client,
                 save_baselines=save_baselines,
                 smart_precheck_override=smart_precheck,
+                db_path_override=db_path,
                 webhook_url_override=notify_webhook,
                 webhook_format_override=(
                     cast(WebhookFormat, webhook_format) if webhook_format is not None else None
@@ -1032,6 +1124,98 @@ def doctor(
         sys.exit(int(ExitCode.ERROR))
 
 
+@click.command("serve")
+@click.option(
+    "--host",
+    default=DEFAULT_HOST,
+    show_default=True,
+    help="Host interface to bind the range HTTP server.",
+)
+@click.option(
+    "--port",
+    type=click.IntRange(min=0, max=65535),
+    default=DEFAULT_PORT,
+    show_default=True,
+    help="TCP port to listen on (0 selects an ephemeral port).",
+)
+@click.option(
+    "--offline-db",
+    type=click.Path(exists=True, dir_okay=True, path_type=Path),
+    default=None,
+    help="Local HIBP password dump file or per-prefix directory to serve offline.",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(_HASH_MODES),
+    default="sha1",
+    show_default=True,
+    help="Hash algorithm for --offline-db: sha1 or ntlm.",
+)
+@click.option(
+    "--ntlm",
+    "-n",
+    is_flag=True,
+    help="Use NTLM hash mode for --offline-db (overrides --mode).",
+)
+@click.option(
+    "--pad/--no-pad",
+    default=True,
+    show_default=True,
+    help="Request padded upstream responses in proxy mode.",
+)
+@click.option(
+    "--metrics/--no-metrics",
+    default=True,
+    show_default=True,
+    help="Expose Prometheus metrics at GET /metrics.",
+)
+@click.option(
+    "--access-log",
+    is_flag=True,
+    help="Write HTTP access logs to stderr.",
+)
+@click.pass_context
+@handle_errors
+def serve(
+    ctx: click.Context,
+    host: str,
+    port: int,
+    offline_db: Path | None,
+    mode: str,
+    ntlm: bool,
+    pad: bool,
+    metrics: bool,
+    access_log: bool,
+) -> None:
+    """Run a self-hosted HIBP k-anonymity password range HTTP server or caching proxy."""
+    settings = ctx.obj["settings"]
+    effective_ntlm = ntlm or mode == "ntlm"
+    try:
+        server = create_range_server(
+            host=host,
+            port=port,
+            offline_db=offline_db,
+            ntlm=effective_ntlm,
+            user_agent=settings.user_agent,
+            cache=get_cache(ctx),
+            upstream_pad=pad,
+            enable_metrics=metrics,
+            access_log=access_log,
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    except OSError as exc:
+        raise FileOrStoreError(str(exc)) from exc
+
+    with server:
+        click.echo(
+            f"Serving pwned range API ({server.backend}, mode={server.mode}) on {server.url}",
+            err=True,
+        )
+        with contextlib.suppress(KeyboardInterrupt):
+            server.serve_forever()
+
+
 def register_extra_commands(cli_group: click.Group) -> None:
     """Register additional CLI commands and command groups on a Click group."""
     cli_group.add_command(auth)
@@ -1044,6 +1228,7 @@ def register_extra_commands(cli_group: click.Group) -> None:
     cli_group.add_command(domain_report)
     cli_group.add_command(monitor)
     cli_group.add_command(mcp)
+    cli_group.add_command(serve)
     cli_group.add_command(cache)
     cli_group.add_command(completion)
     cli_group.add_command(doctor)

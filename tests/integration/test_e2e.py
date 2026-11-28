@@ -15,14 +15,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
 from pwned._parsers import _md4
 from pwned.cli import cli
+from pwned.server import create_range_server
 
 TEST_KEY = "00000000000000000000000000000000"
 DOMAIN = "hibp-integration-tests.com"
@@ -738,6 +741,67 @@ class TestAuditCommand:
             {"name": "CORP", "username": "banned", "match_type": "exact"}
         ]
         assert "AcmeOrgUnlikelyToken2026!" not in out
+
+    def test_audit_check_breaches_catalog_domain(self, tmp_path: Path) -> None:
+        vault = tmp_path / "adobe_vault.csv"
+        vault.write_text(
+            "name,username,password,url\n"
+            "AdobePortal,alice,xK9#mL2$vQ7@nR4!pW8&jF5*hT3^bY6,https://adobe.com/login\n",
+            encoding="utf-8",
+        )
+        code, out = _run(
+            "--json",
+            "audit",
+            str(vault),
+            "--source",
+            "csv",
+            "--check-breaches",
+            "--fail-if-pwned",
+        )
+        assert code == 8
+        data = json.loads(out)
+        assert data["total_entries"] == 1
+        assert data["compromised_entries"] == 0
+        assert data["breach_correlated_entries"] == 1
+        assert len(data["breach_findings"]) == 1
+        finding = data["breach_findings"][0]
+        assert finding["source"] == "site_domain"
+        assert finding["domain"] == "adobe.com"
+        assert "Adobe" in finding["breaches"]
+
+
+class TestServeLiveProxy:
+    def test_serve_live_proxy_range_health_and_metrics(self) -> None:
+        server = create_range_server(host="127.0.0.1", port=0, user_agent="pwned-e2e-test")
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
+        thread.daemon = True
+        thread.start()
+        try:
+            with httpx.Client(base_url=server.url, timeout=15.0) as client:
+                health_resp = client.get("/healthz")
+                assert health_resp.status_code == 200
+                health = health_resp.json()
+                assert health["status"] == "ok"
+                assert health["backend"] == "proxy"
+
+                range_resp = client.get("/range/5BAA6", headers={"Add-Padding": "true"})
+                assert range_resp.status_code == 200
+                assert range_resp.headers.get("Add-Padding") == "true"
+                lines = [ln for ln in range_resp.text.splitlines() if ln]
+                assert len(lines) >= 800
+                assert any(
+                    ln.startswith("1E4C9B93F3F0682250B6CF8331B7EE68FD8:") and not ln.endswith(":0")
+                    for ln in lines
+                )
+
+                metrics_resp = client.get("/metrics")
+                assert metrics_resp.status_code == 200
+                assert "pwned_range_requests_total 1" in metrics_resp.text
+                assert "pwned_range_padded_responses_total 1" in metrics_resp.text
+        finally:
+            server.shutdown()
+            thread.join(timeout=5.0)
+            server.close()
 
 
 class TestMcpCommand:
