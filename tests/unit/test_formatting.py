@@ -502,16 +502,20 @@ class TestFormatSarif:
         assert len(results) == 3
         assert all(r["ruleId"] == "HIBP007" for r in results)
         assert all(r["level"] == "warning" for r in results)
-        assert "site_domain" in results[0]["message"]["text"]
-        assert "Adobe" in results[0]["message"]["text"]
-        assert "alice@example.com" in results[0]["message"]["text"]
-        assert "adobe.com" in results[0]["message"]["text"]
-        assert "account_breach" in results[1]["message"]["text"]
-        assert "Email" in results[1]["message"]["text"]
-        assert "Adobe, Dropbox" in results[1]["message"]["text"]
-        assert "domain:" not in results[1]["message"]["text"]
-        assert "stealer_log" in results[2]["message"]["text"]
-        assert "evil.example" in results[2]["message"]["text"]
+        assert (
+            results[0]["message"]["text"]
+            == "Vault breach correlation (site_domain) for Adobe (alice@example.com) "
+            "[domain: adobe.com]: Adobe."
+        )
+        assert (
+            results[1]["message"]["text"]
+            == "Vault breach correlation (account_breach) for Email (alice@example.com): "
+            "Adobe, Dropbox."
+        )
+        assert (
+            results[2]["message"]["text"]
+            == "Vault breach correlation (stealer_log) for Portal (bob@example.com): evil.example."
+        )
 
         empty_summary = AuditSummary(
             total_entries=1,

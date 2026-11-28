@@ -87,6 +87,7 @@ class ExposureHistoryStore:
                     category TEXT NOT NULL,
                     identifier TEXT NOT NULL,
                     first_seen_at TEXT NOT NULL,
+                    activated_at TEXT NOT NULL,
                     last_seen_at TEXT NOT NULL,
                     resolved_at TEXT,
                     times_seen INTEGER NOT NULL,
@@ -110,15 +111,29 @@ class ExposureHistoryStore:
         *,
         checked_targets: Sequence[tuple[ExposureTargetType, str]],
         observed_exposures: Sequence[tuple[ExposureTargetType, str, ExposureCategory, str]],
+        reconcile_scopes: Sequence[tuple[ExposureTargetType, str, ExposureCategory]] | None = None,
         accounts_checked: int = 0,
         domains_checked: int = 0,
         timestamp: datetime | None = None,
     ) -> HistorySyncResult:
-        """Record a monitoring run snapshot and update active/resolved exposure state."""
+        """Record a monitoring run snapshot and update active/resolved exposure state.
+
+        When ``reconcile_scopes`` is supplied, only active exposures matching one of the
+        explicit ``(target_type, target, category)`` scopes are reconciled for resolution;
+        categories outside the queried scope are preserved untouched.
+        """
         ts = _format_timestamp(timestamp)
         normalized_targets: set[tuple[ExposureTargetType, str]] = {
             (target_type, target.lower()) for target_type, target in checked_targets
         }
+        normalized_scopes: set[tuple[ExposureTargetType, str, ExposureCategory]] | None = (
+            {
+                (target_type, target.lower(), category)
+                for target_type, target, category in reconcile_scopes
+            }
+            if reconcile_scopes is not None
+            else None
+        )
         normalized_exposures: set[tuple[ExposureTargetType, str, ExposureCategory, str]] = {
             (target_type, target.lower(), category, identifier)
             for target_type, target, category, identifier in observed_exposures
@@ -146,22 +161,24 @@ class ExposureHistoryStore:
                             category,
                             identifier,
                             first_seen_at,
+                            activated_at,
                             last_seen_at,
                             resolved_at,
                             times_seen
-                        ) VALUES (?, ?, ?, ?, ?, ?, NULL, 1)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 1)
                         """,
-                        (target_type, target_norm, category, identifier, ts, ts),
+                        (target_type, target_norm, category, identifier, ts, ts, ts),
                     )
                     new_count += 1
                 elif existing["resolved_at"] is not None:
                     self._conn.execute(
                         """
                         UPDATE exposures
-                        SET last_seen_at = ?, resolved_at = NULL, times_seen = times_seen + 1
+                        SET activated_at = ?, last_seen_at = ?, resolved_at = NULL,
+                            times_seen = times_seen + 1
                         WHERE target_type = ? AND target = ? AND category = ? AND identifier = ?
                         """,
-                        (ts, target_type, target_norm, category, identifier),
+                        (ts, ts, target_type, target_norm, category, identifier),
                     )
                     new_count += 1
                 else:
@@ -174,32 +191,58 @@ class ExposureHistoryStore:
                         (ts, target_type, target_norm, category, identifier),
                     )
 
-            for target_type, target_norm in sorted(normalized_targets):
-                active_rows = self._conn.execute(
-                    """
-                    SELECT category, identifier
-                    FROM exposures
-                    WHERE target_type = ? AND target = ? AND resolved_at IS NULL
-                    """,
-                    (target_type, target_norm),
-                ).fetchall()
-                for row in active_rows:
-                    key = (
-                        target_type,
-                        target_norm,
-                        cast(ExposureCategory, row["category"]),
-                        str(row["identifier"]),
-                    )
-                    if key not in normalized_exposures:
-                        self._conn.execute(
-                            """
-                            UPDATE exposures
-                            SET resolved_at = ?
-                            WHERE target_type = ? AND target = ? AND category = ? AND identifier = ?
-                            """,
-                            (ts, target_type, target_norm, key[2], key[3]),
+            if normalized_scopes is not None:
+                for target_type, target_norm, category in sorted(normalized_scopes):
+                    active_rows = self._conn.execute(
+                        """
+                        SELECT identifier
+                        FROM exposures
+                        WHERE target_type = ? AND target = ? AND category = ?
+                          AND resolved_at IS NULL
+                        """,
+                        (target_type, target_norm, category),
+                    ).fetchall()
+                    for row in active_rows:
+                        key = (target_type, target_norm, category, str(row["identifier"]))
+                        if key not in normalized_exposures:
+                            self._conn.execute(
+                                """
+                                UPDATE exposures
+                                SET resolved_at = ?
+                                WHERE target_type = ? AND target = ? AND category = ?
+                                  AND identifier = ?
+                                """,
+                                (ts, target_type, target_norm, category, key[3]),
+                            )
+                            resolved_count += 1
+            else:
+                for target_type, target_norm in sorted(normalized_targets):
+                    active_rows = self._conn.execute(
+                        """
+                        SELECT category, identifier
+                        FROM exposures
+                        WHERE target_type = ? AND target = ? AND resolved_at IS NULL
+                        """,
+                        (target_type, target_norm),
+                    ).fetchall()
+                    for row in active_rows:
+                        key = (
+                            target_type,
+                            target_norm,
+                            cast(ExposureCategory, row["category"]),
+                            str(row["identifier"]),
                         )
-                        resolved_count += 1
+                        if key not in normalized_exposures:
+                            self._conn.execute(
+                                """
+                                UPDATE exposures
+                                SET resolved_at = ?
+                                WHERE target_type = ? AND target = ? AND category = ?
+                                  AND identifier = ?
+                                """,
+                                (ts, target_type, target_norm, key[2], key[3]),
+                            )
+                            resolved_count += 1
 
             active_row = self._conn.execute(
                 "SELECT COUNT(*) AS active_count FROM exposures WHERE resolved_at IS NULL"
@@ -330,7 +373,7 @@ class ExposureHistoryStore:
                     COALESCE(
                         SUM(
                             CASE
-                                WHEN first_seen_at = ? AND resolved_at IS NULL THEN 1
+                                WHEN activated_at = ? AND resolved_at IS NULL THEN 1
                                 ELSE 0
                             END
                         ),

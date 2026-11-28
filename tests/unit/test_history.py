@@ -124,6 +124,7 @@ def test_store_creates_parent_dirs_wal_mode_and_empty_summary(tmp_path: Path) ->
             "category",
             "identifier",
             "first_seen_at",
+            "activated_at",
             "last_seen_at",
             "resolved_at",
             "times_seen",
@@ -274,7 +275,7 @@ def test_record_snapshot_lifecycle_new_active_resolved_reappeared(tmp_path: Path
         assert account_summary == HistoryTrendSummary(
             total_runs=3,
             active_exposures=3,
-            new_in_latest_run=0,
+            new_in_latest_run=1,
             resolved_in_latest_run=0,
             total_resolved=0,
             remediation_rate=0.0,
@@ -386,3 +387,62 @@ def test_record_snapshot_default_timestamp_empty_snapshot_and_rounding(tmp_path:
         ]
     finally:
         conn.close()
+
+
+def test_reconcile_scopes_and_reopened_filtered_domain_summary(tmp_path: Path) -> None:
+    db_path = tmp_path / "scoped.db"
+    ts1 = datetime(2026, 3, 1, tzinfo=UTC)
+    ts2 = datetime(2026, 3, 2, tzinfo=UTC)
+    ts3 = datetime(2026, 3, 3, tzinfo=UTC)
+
+    with ExposureHistoryStore(db_path) as store:
+        # Run 1: observe breach + stealer_log on account and alias exposures on domain
+        store.record_snapshot(
+            checked_targets=[("account", "alice@example.com"), ("domain", "example.com")],
+            reconcile_scopes=[
+                ("account", "alice@example.com", "breach"),
+                ("account", "alice@example.com", "stealer_log"),
+                ("domain", "example.com", "alias_breach"),
+                ("domain", "example.com", "alias_stealer_log"),
+            ],
+            observed_exposures=[
+                ("account", "alice@example.com", "breach", "Adobe"),
+                ("account", "alice@example.com", "stealer_log", "evil.test"),
+                ("domain", "example.com", "alias_breach", "alice:Adobe"),
+                ("domain", "example.com", "alias_stealer_log", "alice:evil.test"),
+            ],
+            timestamp=ts1,
+        )
+
+        # Run 2: only reconcile breach and alias_breach (stealer logs not queried -> untouched!)
+        sync2 = store.record_snapshot(
+            checked_targets=[("account", "alice@example.com"), ("domain", "example.com")],
+            reconcile_scopes=[
+                ("account", "alice@example.com", "breach"),
+                ("domain", "example.com", "alias_breach"),
+            ],
+            observed_exposures=[
+                ("account", "alice@example.com", "breach", "Adobe"),
+            ],
+            timestamp=ts2,
+        )
+        assert sync2.resolved_exposures == 1  # only alias_breach resolved
+        active = store.list_exposures()
+        assert [(r.target_type, r.category, r.identifier) for r in active] == [
+            ("account", "breach", "Adobe"),
+            ("account", "stealer_log", "evil.test"),
+            ("domain", "alias_stealer_log", "alice:evil.test"),
+        ]
+
+        # Run 3: alice:Adobe reappears on domain -> domain-filtered new_in_latest_run MUST be 1
+        sync3 = store.record_snapshot(
+            checked_targets=[("domain", "example.com")],
+            reconcile_scopes=[("domain", "example.com", "alias_breach")],
+            observed_exposures=[("domain", "example.com", "alias_breach", "alice:Adobe")],
+            timestamp=ts3,
+        )
+        assert sync3.new_exposures == 1
+        domain_summary = store.get_trend_summary(target_type="domain", target="example.com")
+        assert domain_summary.new_in_latest_run == 1
+        assert domain_summary.active_exposures == 2
+        assert domain_summary.total_resolved == 0

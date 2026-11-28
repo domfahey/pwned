@@ -32,6 +32,36 @@ from pwned.notify import WebhookFormat, send_webhook_notification
 
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 _ObservedExposure = tuple[ExposureTargetType, str, ExposureCategory, str]
+_ReconcileScope = tuple[ExposureTargetType, str, ExposureCategory]
+
+
+def _account_reconcile_scopes(target: MonitorAccountTarget) -> list[_ReconcileScope]:
+    scopes: list[_ReconcileScope] = [("account", target.email, "paste")]
+    if (
+        target.domain is None
+        and target.include_unverified
+        and target.since is None
+        and target.data_class is None
+        and not target.verified_only
+        and not target.exclude_retired
+    ):
+        scopes.append(("account", target.email, "breach"))
+    if target.include_stealer_logs:
+        scopes.append(("account", target.email, "stealer_log"))
+    return scopes
+
+
+def _domain_reconcile_scopes(
+    target: MonitorDomainTarget,
+    *,
+    was_skipped: bool,
+) -> list[_ReconcileScope]:
+    scopes: list[_ReconcileScope] = []
+    if not was_skipped:
+        scopes.append(("domain", target.domain, "alias_breach"))
+    if target.include_stealer_logs:
+        scopes.append(("domain", target.domain, "alias_stealer_log"))
+    return scopes
 
 
 def _validate_non_empty(value: str, *, field_name: str) -> str:
@@ -502,6 +532,7 @@ def run_monitor(
     account_results: list[MonitorAccountResult] = []
     domain_results: list[MonitorDomainResult] = []
     checked_targets: list[tuple[ExposureTargetType, str]] = []
+    reconcile_scopes: list[_ReconcileScope] = []
     observed_exposures: list[_ObservedExposure] = []
     total_exposures = 0
 
@@ -518,6 +549,7 @@ def run_monitor(
         total_exposures += count
         if result.status != "error":
             checked_targets.append(("account", account_target.email))
+            reconcile_scopes.extend(_account_reconcile_scopes(account_target))
             observed_exposures.extend(acc_observed)
 
     effective_precheck = config.smart_precheck or smart_precheck_override
@@ -539,8 +571,12 @@ def run_monitor(
         )
         if was_skipped:
             domains_skipped += 1
-        elif dom_result.status != "error":
-            checked_targets.append(("domain", domain_target.domain))
+        if dom_result.status != "error":
+            if not was_skipped:
+                checked_targets.append(("domain", domain_target.domain))
+            reconcile_scopes.extend(
+                _domain_reconcile_scopes(domain_target, was_skipped=was_skipped)
+            )
         observed_exposures.extend(dom_observed)
         domain_results.append(dom_result)
         total_exposures += count
@@ -551,6 +587,7 @@ def run_monitor(
             sync = store.record_snapshot(
                 checked_targets=checked_targets,
                 observed_exposures=observed_exposures,
+                reconcile_scopes=reconcile_scopes,
                 accounts_checked=len(config.accounts),
                 domains_checked=len(config.domains),
             )

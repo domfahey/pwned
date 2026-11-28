@@ -1093,3 +1093,88 @@ def test_run_monitor_history_tracking_with_baselines_errors_and_precheck(tmp_pat
         )
         assert paste_rec.resolved_at is None
         assert paste_rec.times_seen == 3
+
+
+def test_run_monitor_history_reconciliation_respects_queried_scope(tmp_path: Path) -> None:
+    from datetime import UTC, date, datetime
+
+    baseline_dir = tmp_path / "baselines"
+    db_path = tmp_path / "scoped_history.db"
+    latest_v1 = Breach(Name="BreachV1", AddedDate=datetime(2026, 1, 1, tzinfo=UTC))
+
+    # Run 1: full unfiltered monitoring with stealer logs enabled for both account & domain
+    cfg_full = MonitorConfig(
+        baseline_dir=baseline_dir,
+        db_path=db_path,
+        smart_precheck=True,
+        accounts=[MonitorAccountTarget(email="alice@example.com", include_stealer_logs=True)],
+        domains=[MonitorDomainTarget(domain="example.com", include_stealer_logs=True)],
+    )
+    stub1 = _StubHIBPClient(
+        accounts={
+            "alice@example.com": SearchResult(
+                breaches=[Breach(Name="Adobe")],
+                pastes=[Paste(Source="Pastebin", Id="p1")],
+                stealer_logs=["evil.test"],
+            )
+        },
+        domain_breaches={"example.com": {"bob": ["LinkedIn"]}},
+        domain_stealer_logs={"example.com": {"bob": ["stealer1.test"]}},
+        latest_breach=latest_v1,
+    )
+    report1 = run_monitor(cfg_full, stub1, save_baselines=True)  # type: ignore[arg-type]
+    assert report1.history_summary is not None
+    assert report1.history_summary.active_exposures == 5
+
+    # Run 2: disable stealer logs AND add a breach filter (since=...) on the account.
+    # Neither unqueried stealer logs nor filtered-out breaches may be falsely marked resolved!
+    cfg_narrow = MonitorConfig(
+        baseline_dir=baseline_dir,
+        db_path=db_path,
+        smart_precheck=False,
+        accounts=[
+            MonitorAccountTarget(
+                email="alice@example.com",
+                include_stealer_logs=False,
+                since="2025-01-01",
+            )
+        ],
+        domains=[MonitorDomainTarget(domain="example.com", include_stealer_logs=False)],
+    )
+    stub2 = _StubHIBPClient(
+        accounts={
+            "alice@example.com": SearchResult(
+                breaches=[Breach(Name="Adobe", BreachDate=date(2013, 10, 4))],
+                pastes=[Paste(Source="Pastebin", Id="p1")],
+            )
+        },
+        domain_breaches={"example.com": {"bob": ["LinkedIn"]}},
+        latest_breach=latest_v1,
+    )
+    report2 = run_monitor(cfg_narrow, stub2, save_baselines=False)  # type: ignore[arg-type]
+    assert report2.resolved_exposures == 0
+    assert report2.history_summary is not None
+    assert report2.history_summary.active_exposures == 5
+
+    # Run 3: smart_precheck skips domain breaches while stealer logs ARE queried and cleared.
+    # alias_stealer_log resolves cleanly while alias_breach stays active!
+    stub3 = _StubHIBPClient(
+        accounts={
+            "alice@example.com": SearchResult(
+                breaches=[Breach(Name="Adobe")],
+                pastes=[Paste(Source="Pastebin", Id="p1")],
+                stealer_logs=["evil.test"],
+            )
+        },
+        domain_breaches={},
+        domain_stealer_logs={"example.com": {}},
+        latest_breach=latest_v1,
+    )
+    report3 = run_monitor(cfg_full, stub3, save_baselines=False)  # type: ignore[arg-type]
+    assert report3.domains_skipped == 1
+    assert report3.resolved_exposures == 1
+    with ExposureHistoryStore(db_path) as store:
+        dom_active = store.list_exposures(target_type="domain", target="example.com")
+        assert [(r.category, r.identifier) for r in dom_active] == [
+            ("alias_breach", "bob:LinkedIn")
+        ]
