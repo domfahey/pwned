@@ -50,9 +50,9 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 - [x] **Batch summary stats (`--stats`)** — optional stderr summary (`checked / pwned / clean / errors / elapsed`) for batch runs.
 - [x] **Shell completions (`pwned completion bash|zsh|fish`)** — expose Click's built-in tab-completion scripts cleanly in CLI and docs.
 - [x] **Optional short command aliases** — ergonomic shortcuts inspired by `wKovacs64/pwned` (`pw`, `ba`, `bar`, `pa`, `bd`, `sd`, `lb`, `dc`).
-- [x] **Framework password-validator recipes/helpers** — thin validators/docs for Pydantic (`AfterValidator`), FastAPI, and Django built on `is_pwned()` / `AsyncPwnedPasswordsClient.is_pwned()`.
+- [x] **Framework password-validator recipes/helpers** — thin validators for Pydantic (`AfterValidator`) and FastAPI, plus a Django recipe in the docs, built on `is_pwned()` / `AsyncPwnedPasswordsClient.is_pwned()`.
 
-## Completed (v0.3.0 — Offline Lookups, Monitoring & CI Integrations)
+### Offline Lookups, Monitoring & CI Integrations
 
 - [x] **Offline sorted hash file lookup (`--offline-db <path>` / `OfflinePasswordsClient`)** — `O(log N)` binary search via `seek`/`mmap` (stdlib only) over official `PwnedPasswordsDownloader` SHA-1/NTLM dumps for air-gapped and high-scale checks.
 - [x] **Baseline diffing (`--baseline` / `--save-baseline`)** — snapshot known breaches/pastes/stealer logs to JSON and report/exit non-zero only on newly discovered exposures for cron/CI monitoring.
@@ -86,7 +86,7 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 
 ### Ecosystem & Distribution
 - [x] **Local stdio MCP server (`pwned mcp`, built-in zero-dependency)** — local-only privacy tools complementing HIBP's remote MCP server for workflows that shouldn't cross a chat prompt: local k-anonymity/offline password checks, local vault auditing, and baseline diffing.
-- [x] **Container image (`ghcr.io/domfahey/pwned`)** — publish a minimal distroless/alpine image via `release.yml` for air-gapped, Kubernetes CronJob, and non-Python CI environments.
+- [x] **Container image (`ghcr.io/domfahey/pwned`)** — publish a minimal multi-stage `python:3.12-slim` image via `release.yml` for air-gapped, Kubernetes CronJob, and non-Python CI environments.
 - [x] **Async account batching (`async_batch_check_accounts`) + retry jitter** — mirror `async_batch_check_passwords` for async applications, with jittered 429 backoff.
 
 ## Completed (v0.4.1)
@@ -142,7 +142,7 @@ Focused on workflows outside the official [`hibp` CLI](https://haveibeenpwned.co
 ### Blocking Breached Passwords at the Source
 - [ ] **Linux password filter (priority)**: a PAM hook (via `pam_exec`) that rejects breached passwords on `passwd` using the local `PWNL` Bloom filter, with no network calls.
 - [ ] **Login-time checks for web apps**: FastAPI/Starlette middleware and Flask/Django hooks that recheck passwords on successful login (NIST 800-63B), backed by `pwned serve` or a local Bloom filter.
-- [ ] **Hardening `pwned serve`**: Helm chart, health checks, and scheduled index refreshes for air-gapped deployments of a self-hosted Pwned Passwords API.
+- [ ] **Deploying `pwned serve`**: Helm chart and scheduled index refreshes for air-gapped deployments of a self-hosted Pwned Passwords API (`/healthz` and Prometheus `/metrics` already ship in v0.6.0).
 
 ### Compliance & Analysis
 - [ ] **Compliance evidence (priority)**: a report showing breached-password screening is in place, mapped to NIST 800-63B, PCI DSS 4.0, and SOC 2 controls, built from `audit`, `history`, and validator data.
