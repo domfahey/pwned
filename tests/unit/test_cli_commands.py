@@ -14,11 +14,13 @@ from pytest_httpx import HTTPXMock
 
 from pwned.audit import AuditEntry
 from pwned.cache import ResponseCache
-from pwned.cli_commands import register_extra_commands
+from pwned.cli_commands import _maybe_notify, register_extra_commands
 from pwned.client import HIBPError
 from pwned.config import get_config_file, load_settings, save_api_key
 from pwned.history import ExposureHistoryStore
+from pwned.offline import OfflinePasswordsClient
 from pwned.offline_download import DownloadStats
+from pwned.offline_index import build_bloom_filter, build_compact_index
 from pwned.passwords import _ntlm_hash
 
 BASE = "https://haveibeenpwned.com/api/v3"
@@ -79,6 +81,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.delenv("HIBP_API_KEY", raising=False)
+    monkeypatch.delenv("PAGERDUTY_ROUTING_KEY", raising=False)
     monkeypatch.setattr("pwned.config.get_keyring_api_key", lambda: None)
     monkeypatch.chdir(tmp_path)
     return tmp_path
@@ -844,6 +847,82 @@ class TestSearchCommand:
         )
         assert result.exit_code == 2
         assert "https scheme" in result.output
+
+    def test_search_notify_pagerduty_env_and_missing_routing_key(
+        self,
+        isolated_env: Path,
+        httpx_mock: HTTPXMock,
+        monkeypatch: pytest.MonkeyPatch,
+        cli_runner: CliRunner,
+    ) -> None:
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/user%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/user%40example.com", status_code=404)
+        httpx_mock.add_response(
+            method="POST",
+            url="https://events.pagerduty.com/v2/enqueue",
+            status_code=202,
+        )
+        monkeypatch.setenv("PAGERDUTY_ROUTING_KEY", "pd-env-routing-key-123")
+        app = _make_cli()
+        result = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "search",
+                "user@example.com",
+                "--notify-webhook",
+                "https://events.pagerduty.com/v2/enqueue",
+            ],
+        )
+        assert result.exit_code == 0
+        pd_reqs = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+        assert len(pd_reqs) == 1
+        pd_payload = json.loads(pd_reqs[0].content)
+        assert pd_payload["routing_key"] == "pd-env-routing-key-123"
+        assert pd_payload["event_action"] == "trigger"
+        assert pd_payload["payload"]["summary"] == "pwned Search Alert: user@example.com"
+
+        # Without PAGERDUTY_ROUTING_KEY -> UsageError (exit code 2)
+        monkeypatch.delenv("PAGERDUTY_ROUTING_KEY", raising=False)
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/user%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/user%40example.com", status_code=404)
+        res_missing = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "search",
+                "user@example.com",
+                "--notify-webhook",
+                "https://events.pagerduty.com/v2/enqueue",
+            ],
+        )
+        assert res_missing.exit_code == 2
+        assert "routing_key" in res_missing.output
+
+        # Direct call to _maybe_notify with explicit routing_key overrides env
+        httpx_mock.add_response(
+            method="POST",
+            url="https://example.com/pd-direct",
+            status_code=202,
+        )
+        _maybe_notify(
+            "https://example.com/pd-direct",
+            "pagerduty",
+            {"breaches": [{"Name": "Adobe"}]},
+            title="Direct PD Alert",
+            routing_key="explicit-pd-key",
+        )
+        direct_reqs = [r for r in httpx_mock.get_requests() if str(r.url).endswith("/pd-direct")]
+        assert len(direct_reqs) == 1
+        assert json.loads(direct_reqs[0].content)["routing_key"] == "explicit-pd-key"
 
 
 class TestAccountRangeCommand:
@@ -2076,6 +2155,46 @@ class TestAuditCommand:
         assert result.exit_code == 2
         assert "https scheme" in result.output
 
+    def test_audit_notify_pagerduty_uses_env_routing_key(
+        self,
+        isolated_env: Path,
+        httpx_mock: HTTPXMock,
+        monkeypatch: pytest.MonkeyPatch,
+        cli_runner: CliRunner,
+    ) -> None:
+        export_file = isolated_env / "pd_audit.csv"
+        export_file.write_text("name,username,password\nSite,u1,password\n", encoding="utf-8")
+        prefix, suffix = _sha1_parts("password")
+        httpx_mock.add_response(url=f"{PASSWORDS_BASE}/range/{prefix}", text=f"{suffix}:10\n")
+        httpx_mock.add_response(
+            method="POST",
+            url="https://example.com/pd-audit",
+            status_code=202,
+        )
+        monkeypatch.setenv("PAGERDUTY_ROUTING_KEY", "audit-pd-key-456")
+
+        app = _make_cli()
+        result = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "audit",
+                str(export_file),
+                "--source",
+                "csv",
+                "--notify-webhook",
+                "https://example.com/pd-audit",
+                "--webhook-format",
+                "pagerduty",
+            ],
+        )
+        assert result.exit_code == 0
+        post_reqs = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+        assert len(post_reqs) == 1
+        payload = json.loads(post_reqs[0].content)
+        assert payload["routing_key"] == "audit-pd-key-456"
+        assert payload["payload"]["summary"] == "pwned Vault Audit Alert"
+
     def test_audit_mode_ntlm_short_flag_and_parallelism_aliases(
         self,
         isolated_env: Path,
@@ -2808,6 +2927,259 @@ class TestOfflineCommand:
         assert result.exit_code == 2
         assert "SHA1 hashes" in result.output
 
+    def test_offline_compact_text_and_directory_modes_overwrite_and_errors(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        # 1) Auto-detected SHA-1 sorted text dump
+        sha1_src = isolated_env / "sha1.txt"
+        sha1_lines = sorted(
+            [
+                f"{_sha1_hex('password')}:100\n",
+                f"{_sha1_hex('hunter2')}:5\n",
+            ]
+        )
+        sha1_src.write_text("".join(sha1_lines), encoding="utf-8")
+        out_sha1 = isolated_env / "sha1.pwnb"
+
+        app = _make_cli()
+        res_sha1 = cli_runner.invoke(
+            app, ["--json", "offline", "compact", str(sha1_src), str(out_sha1)]
+        )
+        assert res_sha1.exit_code == 0
+        sha1_stats = json.loads(res_sha1.output)
+        assert sha1_stats["ntlm"] is False
+        assert sha1_stats["record_count"] == 2
+        assert sha1_stats["output_path"] == str(out_sha1)
+        assert sha1_stats["bytes_written"] > 0
+        with OfflinePasswordsClient(out_sha1) as client:
+            assert client.format == "compact"
+            assert client.check_password("password") == 100
+            assert client.check_password("hunter2") == 5
+
+        # 2) Existing output without --overwrite -> exit 7 (FileOrStoreError)
+        res_exists = cli_runner.invoke(app, ["offline", "compact", str(sha1_src), str(out_sha1)])
+        assert res_exists.exit_code == 7
+        assert "already exists" in res_exists.output
+
+        # 3) Explicit --mode sha1 + --overwrite succeeds
+        res_overwrite = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "offline",
+                "compact",
+                str(sha1_src),
+                str(out_sha1),
+                "--mode",
+                "sha1",
+                "--overwrite",
+            ],
+        )
+        assert res_overwrite.exit_code == 0
+        assert json.loads(res_overwrite.output)["ntlm"] is False
+
+        # 4) Per-prefix NTLM directory with --mode ntlm and -n / -o override
+        ntlm_dir = isolated_env / "ntlm_dir"
+        ntlm_dir.mkdir()
+        ntlm_hex = _ntlm_hash("secret123")
+        (ntlm_dir / f"{ntlm_hex[:5]}.txt").write_text(f"{ntlm_hex[5:]}:42\r\n", encoding="utf-8")
+        out_ntlm = isolated_env / "ntlm.pwnb"
+
+        res_ntlm = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "offline",
+                "compact",
+                str(ntlm_dir),
+                str(out_ntlm),
+                "--mode",
+                "ntlm",
+            ],
+        )
+        assert res_ntlm.exit_code == 0
+        assert json.loads(res_ntlm.output)["ntlm"] is True
+        with OfflinePasswordsClient(out_ntlm, ntlm=True) as client:
+            assert client.check_password("secret123") == 42
+
+        # -n overrides --mode sha1 and -o overwrites
+        res_short = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "offline",
+                "compact",
+                str(ntlm_dir),
+                str(out_ntlm),
+                "--mode",
+                "sha1",
+                "-n",
+                "-o",
+            ],
+        )
+        assert res_short.exit_code == 0
+        assert json.loads(res_short.output)["ntlm"] is True
+
+        # 5) ValueError (passing existing compact index as source) -> UsageError (exit 2)
+        res_val_err = cli_runner.invoke(
+            app,
+            ["offline", "compact", str(out_sha1), str(isolated_env / "bad.pwnb")],
+        )
+        assert res_val_err.exit_code == 2
+        assert "compact" in res_val_err.output
+
+        # 6) OSError -> FileOrStoreError (exit 7)
+        def fail_compact(*args: Any, **kwargs: Any) -> Any:
+            raise OSError("disk full")
+
+        monkeypatch.setattr("pwned.cli_commands.build_compact_index", fail_compact)
+        res_os_err = cli_runner.invoke(
+            app,
+            ["offline", "compact", str(sha1_src), str(isolated_env / "err.pwnb")],
+        )
+        assert res_os_err.exit_code == 7
+        assert "disk full" in res_os_err.output
+
+    def test_offline_build_bloom_modes_options_overwrite_and_errors(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        # 1) Auto-detected SHA-1 text dump with default --fpr
+        sha1_src = isolated_env / "sha1.txt"
+        sha1_lines = sorted(
+            [
+                f"{_sha1_hex('password')}:100\n",
+                f"{_sha1_hex('letmein')}:3\n",
+            ]
+        )
+        sha1_src.write_text("".join(sha1_lines), encoding="utf-8")
+        bloom_sha1 = isolated_env / "sha1.pwnl"
+
+        app = _make_cli()
+        res_sha1 = cli_runner.invoke(
+            app, ["--json", "offline", "build-bloom", str(sha1_src), str(bloom_sha1)]
+        )
+        assert res_sha1.exit_code == 0
+        stats = json.loads(res_sha1.output)
+        assert stats["ntlm"] is False
+        assert stats["item_count"] == 2
+        assert stats["false_positive_rate"] == 0.01
+        assert stats["bit_count"] >= 64
+        assert stats["num_hashes"] >= 1
+        with OfflinePasswordsClient(bloom_sha1) as client:
+            assert client.format == "bloom"
+            assert client.check_password("password") == 1
+
+        # 2) Existing output without --overwrite -> exit 7
+        res_exists = cli_runner.invoke(
+            app, ["offline", "build-bloom", str(sha1_src), str(bloom_sha1)]
+        )
+        assert res_exists.exit_code == 7
+        assert "already exists" in res_exists.output
+
+        # 3) Build from compact index with --fpr, --expected-items, --mode sha1, --overwrite
+        compact_sha1 = isolated_env / "sha1.pwnb"
+        build_compact_index(sha1_src, compact_sha1)
+        res_from_compact = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "offline",
+                "build-bloom",
+                str(compact_sha1),
+                str(bloom_sha1),
+                "--mode",
+                "sha1",
+                "--fpr",
+                "0.001",
+                "--expected-items",
+                "50",
+                "--overwrite",
+            ],
+        )
+        assert res_from_compact.exit_code == 0
+        compact_bloom_stats = json.loads(res_from_compact.output)
+        assert compact_bloom_stats["item_count"] == 2
+        assert compact_bloom_stats["false_positive_rate"] == 0.001
+
+        # 4) NTLM source with --mode ntlm and -n / -o override
+        ntlm_src = isolated_env / "ntlm.txt"
+        ntlm_src.write_text(f"{_ntlm_hash('secret123')}:7\n", encoding="utf-8")
+        bloom_ntlm = isolated_env / "ntlm.pwnl"
+        res_ntlm = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "offline",
+                "build-bloom",
+                str(ntlm_src),
+                str(bloom_ntlm),
+                "--mode",
+                "ntlm",
+            ],
+        )
+        assert res_ntlm.exit_code == 0
+        assert json.loads(res_ntlm.output)["ntlm"] is True
+        with OfflinePasswordsClient(bloom_ntlm, ntlm=True) as client:
+            assert client.check_password("secret123") == 1
+
+        res_short = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "offline",
+                "build-bloom",
+                str(ntlm_src),
+                str(bloom_ntlm),
+                "--mode",
+                "sha1",
+                "-n",
+                "-o",
+            ],
+        )
+        assert res_short.exit_code == 0
+        assert json.loads(res_short.output)["ntlm"] is True
+
+        # 5) Invalid --fpr -> ValueError -> UsageError (exit 2)
+        res_bad_fpr = cli_runner.invoke(
+            app,
+            [
+                "offline",
+                "build-bloom",
+                str(sha1_src),
+                str(isolated_env / "bad_fpr.pwnl"),
+                "--fpr",
+                "1.5",
+            ],
+        )
+        assert res_bad_fpr.exit_code == 2
+        assert "false_positive_rate" in res_bad_fpr.output
+
+        # 6) Invalid --expected-items 0 -> exit 2
+        res_bad_items = cli_runner.invoke(
+            app,
+            [
+                "offline",
+                "build-bloom",
+                str(sha1_src),
+                str(isolated_env / "bad_items.pwnl"),
+                "--expected-items",
+                "0",
+            ],
+        )
+        assert res_bad_items.exit_code == 2
+
+        # 7) OSError -> FileOrStoreError (exit 7)
+        def fail_bloom(*args: Any, **kwargs: Any) -> Any:
+            raise OSError("permission denied")
+
+        monkeypatch.setattr("pwned.cli_commands.build_bloom_filter", fail_bloom)
+        res_os_err = cli_runner.invoke(
+            app,
+            ["offline", "build-bloom", str(sha1_src), str(isolated_env / "err.pwnl")],
+        )
+        assert res_os_err.exit_code == 7
+        assert "permission denied" in res_os_err.output
+
 
 class TestDomainReportCommand:
     def test_domain_report_basic_and_stealer_logs(
@@ -3022,6 +3394,75 @@ class TestDomainReportCommand:
         )
         assert res_without_db.exit_code == 0
         assert "history_summary" not in json.loads(res_without_db.output)
+
+    def test_domain_report_notify_teams_and_pagerduty(
+        self,
+        isolated_env: Path,
+        httpx_mock: HTTPXMock,
+        monkeypatch: pytest.MonkeyPatch,
+        cli_runner: CliRunner,
+    ) -> None:
+        # Teams auto-detected webhook
+        httpx_mock.add_response(
+            url=f"{BASE}/breacheddomain/example.com",
+            json={"alice": ["Adobe"]},
+        )
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[])
+        httpx_mock.add_response(
+            method="POST",
+            url="https://contoso.webhook.office.com/webhookb2/abc",
+            status_code=200,
+        )
+        app = _make_cli()
+        res_teams = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "domain-report",
+                "example.com",
+                "--notify-webhook",
+                "https://contoso.webhook.office.com/webhookb2/abc",
+            ],
+        )
+        assert res_teams.exit_code == 0
+        teams_reqs = [
+            r for r in httpx_mock.get_requests() if r.url.host == "contoso.webhook.office.com"
+        ]
+        assert len(teams_reqs) == 1
+        teams_payload = json.loads(teams_reqs[0].content)
+        assert teams_payload["type"] == "message"
+        assert teams_payload["attachments"][0]["content"]["type"] == "AdaptiveCard"
+
+        # PagerDuty via PAGERDUTY_ROUTING_KEY env var
+        monkeypatch.setenv("PAGERDUTY_ROUTING_KEY", "domain-pd-key-789")
+        httpx_mock.add_response(
+            url=f"{BASE}/breacheddomain/example.com",
+            json={"alice": ["Adobe"]},
+        )
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[])
+        httpx_mock.add_response(
+            method="POST",
+            url="https://events.pagerduty.com/v2/enqueue",
+            status_code=202,
+        )
+        res_pd = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "domain-report",
+                "example.com",
+                "--notify-webhook",
+                "https://events.pagerduty.com/v2/enqueue",
+                "--webhook-format",
+                "pagerduty",
+            ],
+        )
+        assert res_pd.exit_code == 0
+        pd_reqs = [r for r in httpx_mock.get_requests() if r.url.host == "events.pagerduty.com"]
+        assert len(pd_reqs) == 1
+        assert json.loads(pd_reqs[0].content)["routing_key"] == "domain-pd-key-789"
 
 
 class TestMonitorCommand:
@@ -3252,6 +3693,98 @@ class TestMonitorCommand:
             "remediation_rate": 100.0,
         }
 
+    def test_monitor_pagerduty_routing_key_flag_and_envvar(
+        self,
+        isolated_env: Path,
+        httpx_mock: HTTPXMock,
+        monkeypatch: pytest.MonkeyPatch,
+        cli_runner: CliRunner,
+    ) -> None:
+        cfg = isolated_env / "pwned.toml"
+        cfg.write_text('[[accounts]]\nemail = "user@example.com"\n', encoding="utf-8")
+
+        # 1) Explicit --pagerduty-routing-key CLI option
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/user%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/user%40example.com", status_code=404)
+        httpx_mock.add_response(
+            method="POST",
+            url="https://events.pagerduty.com/v2/enqueue",
+            status_code=202,
+        )
+        app = _make_cli()
+        res_flag = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "--json",
+                "monitor",
+                "--notify-webhook",
+                "https://events.pagerduty.com/v2/enqueue",
+                "--webhook-format",
+                "pagerduty",
+                "--pagerduty-routing-key",
+                "cli-pd-routing-key",
+            ],
+        )
+        assert res_flag.exit_code == 0
+        assert json.loads(res_flag.output)["webhook_sent"] is True
+        pd_reqs = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+        assert len(pd_reqs) == 1
+        assert json.loads(pd_reqs[0].content)["routing_key"] == "cli-pd-routing-key"
+
+        # 2) PAGERDUTY_ROUTING_KEY env var fallback
+        monkeypatch.setenv("PAGERDUTY_ROUTING_KEY", "env-pd-routing-key")
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/user%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/user%40example.com", status_code=404)
+        httpx_mock.add_response(
+            method="POST",
+            url="https://events.pagerduty.com/v2/enqueue",
+            status_code=202,
+        )
+        res_env = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "--json",
+                "monitor",
+                "--notify-webhook",
+                "https://events.pagerduty.com/v2/enqueue",
+            ],
+        )
+        assert res_env.exit_code == 0
+        assert json.loads(res_env.output)["webhook_sent"] is True
+        pd_reqs2 = [r for r in httpx_mock.get_requests() if r.method == "POST"]
+        assert len(pd_reqs2) == 2
+        assert json.loads(pd_reqs2[1].content)["routing_key"] == "env-pd-routing-key"
+
+        # 3) Missing routing key -> UsageError (exit 2)
+        monkeypatch.delenv("PAGERDUTY_ROUTING_KEY", raising=False)
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/user%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/user%40example.com", status_code=404)
+        res_missing = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "monitor",
+                "--notify-webhook",
+                "https://events.pagerduty.com/v2/enqueue",
+            ],
+        )
+        assert res_missing.exit_code == 2
+        assert "routing_key" in res_missing.output
+
 
 class TestDoctorCommand:
     def test_doctor_no_network_and_offline_db(
@@ -3315,6 +3848,44 @@ class TestDoctorCommand:
         assert data["api_key_source"] == "cli"
         assert data["subscription_name"] == "Pwned 1"
         assert data["subscription_rpm"] == 10
+
+    def test_doctor_compact_and_bloom_offline_db(
+        self, isolated_env: Path, cli_runner: CliRunner
+    ) -> None:
+        sha1_src = isolated_env / "sha1.txt"
+        sha1_src.write_text(f"{_sha1_hex('password')}:12\n", encoding="utf-8")
+        compact_path = isolated_env / "sha1.pwnb"
+        bloom_path = isolated_env / "sha1.pwnl"
+        build_compact_index(sha1_src, compact_path)
+        build_bloom_filter(sha1_src, bloom_path)
+
+        app = _make_cli()
+        res_compact = cli_runner.invoke(
+            app,
+            ["--json", "doctor", "--no-network", "--offline-db", str(compact_path)],
+        )
+        assert res_compact.exit_code == 0
+        compact_data = json.loads(res_compact.output)
+        assert compact_data["healthy"] is True
+        assert compact_data["offline_db_kind"] == "compact"
+        assert compact_data["offline_db_mode"] == "sha1"
+
+        res_bloom = cli_runner.invoke(
+            app,
+            ["--json", "doctor", "--no-network", "--offline-db", str(bloom_path)],
+        )
+        assert res_bloom.exit_code == 0
+        bloom_data = json.loads(res_bloom.output)
+        assert bloom_data["healthy"] is True
+        assert bloom_data["offline_db_kind"] == "bloom"
+        assert bloom_data["offline_db_mode"] == "sha1"
+
+        res_bloom_mismatch = cli_runner.invoke(
+            app,
+            ["--json", "doctor", "--no-network", "--offline-db", str(bloom_path), "--ntlm"],
+        )
+        assert res_bloom_mismatch.exit_code == 1
+        assert json.loads(res_bloom_mismatch.output)["healthy"] is False
 
 
 class TestMcpCommand:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import sys
 from pathlib import Path
 from typing import Any, cast
@@ -48,6 +49,7 @@ from pwned.monitor import load_monitor_config, run_monitor
 from pwned.notify import WEBHOOK_FORMATS, WebhookFormat, send_webhook_notification
 from pwned.offline import OfflinePasswordsClient
 from pwned.offline_download import download_offline_db
+from pwned.offline_index import build_bloom_filter, build_compact_index
 from pwned.passwords import AsyncPwnedPasswordsClient, PwnedPasswordsClient
 from pwned.reporting import generate_domain_report
 from pwned.server import DEFAULT_HOST, DEFAULT_PORT, create_range_server
@@ -92,11 +94,21 @@ def _maybe_notify(
     data: Any,
     *,
     title: str,
+    routing_key: str | None = None,
 ) -> None:
     if webhook_url is None:
         return
+    effective_routing_key = (
+        routing_key if routing_key is not None else os.environ.get("PAGERDUTY_ROUTING_KEY")
+    )
     try:
-        send_webhook_notification(webhook_url, data, fmt=webhook_format, title=title)
+        send_webhook_notification(
+            webhook_url,
+            data,
+            fmt=webhook_format,
+            title=title,
+            routing_key=effective_routing_key,
+        )
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
 
@@ -845,6 +857,119 @@ def offline_download(
     render_output(ctx, stats)
 
 
+@offline.command("compact")
+@click.argument("source", type=click.Path(exists=True, dir_okay=True, path_type=Path))
+@click.argument("output", type=click.Path(dir_okay=False, path_type=Path))
+@click.option(
+    "--mode",
+    type=click.Choice(_HASH_MODES),
+    default=None,
+    help="Hash algorithm (sha1 or ntlm); auto-detected if omitted.",
+)
+@click.option(
+    "--ntlm",
+    "-n",
+    is_flag=True,
+    help="Treat source as NTLM hashes (overrides --mode).",
+)
+@click.option(
+    "--overwrite",
+    "-o",
+    is_flag=True,
+    default=False,
+    help="Replace an existing output file.",
+)
+@click.pass_context
+@handle_errors
+def offline_compact(
+    ctx: click.Context,
+    source: Path,
+    output: Path,
+    mode: str | None,
+    ntlm: bool,
+    overwrite: bool,
+) -> None:
+    """Compile a sorted text dump or per-prefix directory into a compact binary index."""
+    resolved_ntlm: bool | None = True if ntlm else (None if mode is None else mode == "ntlm")
+    try:
+        stats = build_compact_index(
+            source,
+            output,
+            ntlm=resolved_ntlm,
+            overwrite=overwrite,
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    except OSError as exc:
+        raise FileOrStoreError(str(exc)) from exc
+    render_output(ctx, stats)
+
+
+@offline.command("build-bloom")
+@click.argument("source", type=click.Path(exists=True, dir_okay=True, path_type=Path))
+@click.argument("output", type=click.Path(dir_okay=False, path_type=Path))
+@click.option(
+    "--mode",
+    type=click.Choice(_HASH_MODES),
+    default=None,
+    help="Hash algorithm (sha1 or ntlm); auto-detected if omitted.",
+)
+@click.option(
+    "--ntlm",
+    "-n",
+    is_flag=True,
+    help="Treat source as NTLM hashes (overrides --mode).",
+)
+@click.option(
+    "--fpr",
+    type=float,
+    default=0.01,
+    show_default=True,
+    help="Target false-positive rate (0 < fpr < 1).",
+)
+@click.option(
+    "--expected-items",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Optional expected unique item count (auto-counted if omitted).",
+)
+@click.option(
+    "--overwrite",
+    "-o",
+    is_flag=True,
+    default=False,
+    help="Replace an existing output file.",
+)
+@click.pass_context
+@handle_errors
+def offline_build_bloom(
+    ctx: click.Context,
+    source: Path,
+    output: Path,
+    mode: str | None,
+    ntlm: bool,
+    fpr: float,
+    expected_items: int | None,
+    overwrite: bool,
+) -> None:
+    """Build a compact probabilistic Bloom filter from an offline hash dump or index."""
+    resolved_ntlm: bool | None = True if ntlm else (None if mode is None else mode == "ntlm")
+    try:
+        stats = build_bloom_filter(
+            source,
+            output,
+            ntlm=resolved_ntlm,
+            false_positive_rate=fpr,
+            expected_items=expected_items,
+            overwrite=overwrite,
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    except OSError as exc:
+        raise FileOrStoreError(str(exc)) from exc
+    render_output(ctx, stats)
+
+
 @click.command("domain-report")
 @click.argument("domain")
 @click.option(
@@ -950,6 +1075,12 @@ def domain_report(
     help="Override webhook format from config.",
 )
 @click.option(
+    "--pagerduty-routing-key",
+    default=None,
+    envvar="PAGERDUTY_ROUTING_KEY",
+    help="Override PagerDuty Events API v2 routing key (or set PAGERDUTY_ROUTING_KEY).",
+)
+@click.option(
     "--fail-if-pwned",
     "--fail-if-found",
     "fail_if_pwned",
@@ -966,6 +1097,7 @@ def monitor(
     db_path: Path | None,
     notify_webhook: str | None,
     webhook_format: str | None,
+    pagerduty_routing_key: str | None,
     fail_if_pwned: bool,
 ) -> None:
     """Run declarative account and domain monitoring from a TOML config."""
@@ -994,6 +1126,7 @@ def monitor(
                 webhook_format_override=(
                     cast(WebhookFormat, webhook_format) if webhook_format is not None else None
                 ),
+                pagerduty_routing_key_override=pagerduty_routing_key,
             )
         except ValueError as exc:
             raise click.UsageError(str(exc)) from exc

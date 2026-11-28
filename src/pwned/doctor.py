@@ -18,6 +18,7 @@ from pwned.config import (
 )
 from pwned.models import NonNegativeInt, _HIBPBase
 from pwned.offline import OfflinePasswordsClient, _find_line_start, _read_directory_mode
+from pwned.offline_index import BloomFilterReader, CompactIndexReader, detect_offline_format
 from pwned.passwords import PwnedPasswordsClient
 
 _PREFIX_FILE_RE = re.compile(r"^[0-9A-Fa-f]{5}\.txt$")
@@ -47,7 +48,7 @@ class DoctorReport(_HIBPBase):
     subscription_name: str | None = None
     subscription_rpm: NonNegativeInt | None = None
     offline_db_path: str | None = None
-    offline_db_kind: Literal["file", "directory"] | None = None
+    offline_db_kind: Literal["directory", "file", "compact", "bloom"] | None = None
     offline_db_mode: Literal["sha1", "ntlm"] | None = None
     offline_db_entries: NonNegativeInt | None = None
     checks: list[DoctorCheck] = Field(default_factory=list)
@@ -92,7 +93,7 @@ def _sample_line_offsets(handle: BinaryIO, size: int) -> list[int]:
 def _inspect_offline_db(
     offline_db: Path, *, ntlm: bool | None
 ) -> tuple[
-    Literal["file", "directory"] | None,
+    Literal["directory", "file", "compact", "bloom"] | None,
     Literal["sha1", "ntlm"] | None,
     int | None,
     DoctorCheck,
@@ -109,49 +110,92 @@ def _inspect_offline_db(
             ),
         )
 
-    if offline_db.is_dir():
-        raw_mode = _read_directory_mode(offline_db)
-        detected_mode = cast(Literal["sha1", "ntlm"] | None, raw_mode)
-        effective_ntlm = ntlm if ntlm is not None else (detected_mode == "ntlm")
-        try:
-            with OfflinePasswordsClient(offline_db, ntlm=effective_ntlm):
-                pass
-        except ValueError as exc:
-            return (
-                "directory",
-                detected_mode,
-                None,
-                DoctorCheck(name="offline_db", status="error", detail=str(exc)),
+    kind: Literal["directory", "file", "compact", "bloom"] = "file"
+    try:
+        fmt = detect_offline_format(offline_db)
+        if fmt == "directory":
+            kind = "directory"
+            raw_mode = _read_directory_mode(offline_db)
+            detected_mode = cast(Literal["sha1", "ntlm"] | None, raw_mode)
+            effective_ntlm = ntlm if ntlm is not None else (detected_mode == "ntlm")
+            try:
+                with OfflinePasswordsClient(offline_db, ntlm=effective_ntlm):
+                    pass
+            except ValueError as exc:
+                return (
+                    "directory",
+                    detected_mode,
+                    None,
+                    DoctorCheck(name="offline_db", status="error", detail=str(exc)),
+                )
+            prefix_files = sum(
+                1
+                for item in offline_db.iterdir()
+                if item.is_file() and _PREFIX_FILE_RE.fullmatch(item.name)
             )
-        prefix_files = sum(
-            1
-            for item in offline_db.iterdir()
-            if item.is_file() and _PREFIX_FILE_RE.fullmatch(item.name)
-        )
-        resolved_mode: Literal["sha1", "ntlm"] = "ntlm" if effective_ntlm else "sha1"
-        if prefix_files == 0:
+            resolved_mode: Literal["sha1", "ntlm"] = "ntlm" if effective_ntlm else "sha1"
+            if prefix_files == 0:
+                return (
+                    "directory",
+                    resolved_mode,
+                    0,
+                    DoctorCheck(
+                        name="offline_db",
+                        status="warn",
+                        detail=f"Directory contains 0 prefix range files: {offline_db}",
+                    ),
+                )
             return (
                 "directory",
                 resolved_mode,
-                0,
+                prefix_files,
                 DoctorCheck(
                     name="offline_db",
-                    status="warn",
-                    detail=f"Directory contains 0 prefix range files: {offline_db}",
+                    status="ok",
+                    detail=f"Directory ({resolved_mode.upper()}): {prefix_files:,} prefix files",
                 ),
             )
-        return (
-            "directory",
-            resolved_mode,
-            prefix_files,
-            DoctorCheck(
-                name="offline_db",
-                status="ok",
-                detail=f"Directory ({resolved_mode.upper()}): {prefix_files:,} prefix files",
-            ),
-        )
 
-    try:
+        if fmt == "compact":
+            kind = "compact"
+            with CompactIndexReader(offline_db, ntlm=ntlm) as reader:
+                compact_mode: Literal["sha1", "ntlm"] = "ntlm" if reader.ntlm else "sha1"
+                record_count = reader.record_count
+            return (
+                "compact",
+                compact_mode,
+                record_count,
+                DoctorCheck(
+                    name="offline_db",
+                    status="ok",
+                    detail=(
+                        f"Compact binary index ({compact_mode.upper()}, "
+                        f"{record_count} records) verified."
+                    ),
+                ),
+            )
+
+        if fmt == "bloom":
+            kind = "bloom"
+            with BloomFilterReader(offline_db, ntlm=ntlm) as reader:
+                bloom_mode: Literal["sha1", "ntlm"] = "ntlm" if reader.ntlm else "sha1"
+                item_count = reader.item_count
+                bit_count = reader.bit_count
+                num_hashes = reader.num_hashes
+            return (
+                "bloom",
+                bloom_mode,
+                item_count,
+                DoctorCheck(
+                    name="offline_db",
+                    status="ok",
+                    detail=(
+                        f"Bloom filter ({bloom_mode.upper()}, {item_count} items, "
+                        f"{bit_count} bits, k={num_hashes}) verified."
+                    ),
+                ),
+            )
+
         size = offline_db.stat().st_size
         if size == 0:
             return (
@@ -249,9 +293,9 @@ def _inspect_offline_db(
                 ),
             ),
         )
-    except OSError as exc:
+    except (ValueError, OSError) as exc:
         return (
-            "file",
+            kind,
             None,
             None,
             DoctorCheck(name="offline_db", status="error", detail=str(exc)),
@@ -303,7 +347,7 @@ def run_doctor(
         ),
     ]
 
-    offline_db_kind: Literal["file", "directory"] | None = None
+    offline_db_kind: Literal["directory", "file", "compact", "bloom"] | None = None
     offline_db_mode: Literal["sha1", "ntlm"] | None = None
     offline_db_entries: int | None = None
     if offline_db is not None:

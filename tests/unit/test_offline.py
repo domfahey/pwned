@@ -10,6 +10,7 @@ import pytest
 from pwned._parsers import _md4
 from pwned.models import PasswordChecker
 from pwned.offline import OfflinePasswordsClient
+from pwned.offline_index import build_bloom_filter, build_compact_index
 
 
 def _sha1_hex(password: str) -> str:
@@ -630,3 +631,140 @@ class TestLargeSortedFixture:
                 assert client.check_password(f"ntlm-{i:04d}") == i + 1
             assert client.check_hash("0" * 32) == 0
             assert client.check_hash("F" * 32) == 0
+
+
+class TestCompactAndBloomFormats:
+    def test_format_property_for_text_and_directory(self, tmp_path: Path) -> None:
+        h = _sha1_hex("password")
+        dump_file = _write_dump(tmp_path / "sha1.txt", [(h, 12)])
+        dump_dir = _write_range_dir(tmp_path / "ranges", [(h, 12)])
+
+        with OfflinePasswordsClient(dump_file) as text_client:
+            assert text_client.format == "text"
+            assert text_client.is_directory is False
+
+        with OfflinePasswordsClient(dump_dir) as dir_client:
+            assert dir_client.format == "directory"
+            assert dir_client.is_directory is True
+
+    def test_compact_sha1_transparent_lookups_and_lifecycle(self, tmp_path: Path) -> None:
+        pw_hit = "password"
+        pw_miss = "correct-horse-battery-staple"
+        h_hit = _sha1_hex(pw_hit)
+        h_miss = _sha1_hex(pw_miss)
+        text_dump = _write_dump(
+            tmp_path / "sha1.txt",
+            [(h_hit, 3_861_493), (_sha1_hex("second"), 42)],
+        )
+        compact_path = tmp_path / "sha1.pwned-bin"
+        build_compact_index(text_dump, compact_path)
+
+        with OfflinePasswordsClient(compact_path) as client:
+            checker: PasswordChecker = client
+            assert client.format == "compact"
+            assert client.is_directory is False
+            assert client.ntlm is False
+            assert client.path == compact_path
+
+            assert checker.check_password(pw_hit) == 3_861_493
+            assert checker.check_hash(h_hit) == 3_861_493
+            assert client.check_hash(f"  {h_hit.lower()}  ") == 3_861_493
+            assert client.check_password("second") == 42
+            assert client.check_password(pw_miss) == 0
+            assert client.check_hash(h_miss) == 0
+
+            assert client.is_pwned(pw_hit) is True
+            assert client.is_pwned(pw_hit, threshold=3_861_493) is True
+            assert client.is_pwned(pw_hit, threshold=3_861_494) is False
+            assert client.is_pwned(pw_miss) is False
+
+            assert client.is_hash_pwned(h_hit) is True
+            assert client.is_hash_pwned(h_hit, threshold=3_861_494) is False
+            assert client.is_hash_pwned(h_miss) is False
+
+            with pytest.raises(ValueError, match="ntlm"):
+                client.check_password(pw_hit, ntlm=True)
+
+        client.close()  # idempotent
+        with pytest.raises(ValueError):
+            client.check_password(pw_hit)
+
+        with pytest.raises(ValueError, match="SHA1 hashes.*NTLM mode"):
+            OfflinePasswordsClient(compact_path, ntlm=True)
+
+    def test_compact_ntlm_transparent_lookups(self, tmp_path: Path) -> None:
+        pw_hit = "Password123!"
+        pw_miss = "absent-ntlm-pw"
+        h_hit = _ntlm_hex(pw_hit)
+        text_dump = _write_dump(tmp_path / "ntlm.txt", [(h_hit, 150)])
+        compact_path = tmp_path / "ntlm.pwned-bin"
+        build_compact_index(text_dump, compact_path)
+
+        with OfflinePasswordsClient(compact_path, ntlm=True) as client:
+            assert client.format == "compact"
+            assert client.is_directory is False
+            assert client.ntlm is True
+            assert client.check_password(pw_hit) == 150
+            assert client.check_password(pw_miss) == 0
+            assert client.check_hash(h_hit.lower()) == 150
+            assert client.is_pwned(pw_hit, threshold=150) is True
+            assert client.is_pwned(pw_hit, threshold=151) is False
+            assert client.is_hash_pwned(h_hit) is True
+
+        with pytest.raises(ValueError, match="NTLM hashes.*SHA1 mode"):
+            OfflinePasswordsClient(compact_path, ntlm=False)
+
+    def test_bloom_sha1_transparent_lookups_and_lifecycle(self, tmp_path: Path) -> None:
+        pw_hit = "password"
+        pw_miss = "definitely-not-in-tiny-bloom"
+        h_hit = _sha1_hex(pw_hit)
+        h_miss = _sha1_hex(pw_miss)
+        text_dump = _write_dump(tmp_path / "sha1.txt", [(h_hit, 999)])
+        bloom_path = tmp_path / "sha1.pwned-bloom"
+        build_bloom_filter(text_dump, bloom_path, false_positive_rate=0.0001)
+
+        with OfflinePasswordsClient(bloom_path) as client:
+            checker: PasswordChecker = client
+            assert client.format == "bloom"
+            assert client.is_directory is False
+            assert client.ntlm is False
+            assert client.path == bloom_path
+
+            assert checker.check_password(pw_hit) == 1
+            assert checker.check_hash(h_hit.lower()) == 1
+            assert client.check_password(pw_miss) == 0
+            assert client.check_hash(h_miss) == 0
+
+            assert client.is_pwned(pw_hit) is True
+            assert client.is_pwned(pw_hit, threshold=2) is False
+            assert client.is_pwned(pw_miss) is False
+            assert client.is_hash_pwned(h_hit) is True
+            assert client.is_hash_pwned(h_miss) is False
+
+        client.close()  # idempotent
+        with pytest.raises(ValueError):
+            client.check_password(pw_hit)
+
+        with pytest.raises(ValueError, match="SHA1 hashes.*NTLM mode"):
+            OfflinePasswordsClient(bloom_path, ntlm=True)
+
+    def test_bloom_ntlm_transparent_lookups(self, tmp_path: Path) -> None:
+        pw_hit = "Password123!"
+        pw_miss = "definitely-absent-ntlm"
+        h_hit = _ntlm_hex(pw_hit)
+        text_dump = _write_dump(tmp_path / "ntlm.txt", [(h_hit, 77)])
+        bloom_path = tmp_path / "ntlm.pwned-bloom"
+        build_bloom_filter(text_dump, bloom_path, false_positive_rate=0.0001)
+
+        with OfflinePasswordsClient(bloom_path, ntlm=True) as client:
+            assert client.format == "bloom"
+            assert client.is_directory is False
+            assert client.ntlm is True
+            assert client.check_password(pw_hit) == 1
+            assert client.check_password(pw_miss) == 0
+            assert client.check_hash(h_hit.lower()) == 1
+            assert client.is_pwned(pw_hit) is True
+            assert client.is_hash_pwned(h_hit) is True
+
+        with pytest.raises(ValueError, match="NTLM hashes.*SHA1 mode"):
+            OfflinePasswordsClient(bloom_path, ntlm=False)

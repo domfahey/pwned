@@ -6,12 +6,14 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 
 from pwned._parsers import _parse_range_response
 from pwned.cache import ResponseCache
+from pwned.offline_index import build_bloom_filter, build_compact_index
 from pwned.passwords import PwnedPasswordsClient, _hash_password
 from pwned.server import (
     DEFAULT_CACHE_CONTROL,
@@ -351,6 +353,178 @@ class TestOfflineDirectoryMode:
 
             bad = client.get(f"/range/{prefix}")
             assert bad.status_code == 400
+
+
+class TestOfflineCompactAndBloomMode:
+    def test_compact_sha1_direct_lookup_and_lifecycle(self, tmp_path: Path) -> None:
+        pw_hash = _sha1_hex("password")
+        prefix = pw_hash[:5]
+        suffix = pw_hash[5:]
+        other_suffix = "A" * 35
+        src = _write_dump(
+            tmp_path / "sha1.txt",
+            [
+                (pw_hash, 3861493),
+                (f"{prefix}{other_suffix}", 7),
+                ("FFFFE" + "B" * 35, 3),
+            ],
+        )
+        compact_path = tmp_path / "sha1.pwnb"
+        build_compact_index(src, compact_path)
+
+        with create_range_server(host="127.0.0.1", port=0, offline_db=compact_path) as server:
+            assert server.backend == "offline"
+            assert server.mode == "sha1"
+            assert server.lookup_range(prefix) == {
+                other_suffix: 7,
+                suffix: 3861493,
+            }
+            assert server.lookup_range("00000") == {}
+            assert server.lookup_range("FFFFE") == {"B" * 35: 3}
+            with pytest.raises(ValueError, match="sha1"):
+                server.lookup_range(prefix, ntlm=True)
+
+        # Idempotent close after context exit
+        server.close()
+
+    def test_compact_ntlm_direct_lookup_and_startup_mode_mismatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ntlm_hash = _ntlm_hex("hunter2")
+        prefix = ntlm_hash[:5]
+        suffix = ntlm_hash[5:]
+        src = _write_dump(tmp_path / "ntlm.txt", [(ntlm_hash, 88)])
+        compact_ntlm = tmp_path / "ntlm.pwnb"
+        build_compact_index(src, compact_ntlm, ntlm=True)
+
+        # Opening NTLM compact index in SHA-1 mode fails before binding a socket
+        with monkeypatch.context() as mp:
+
+            def fail_http_server(*args: Any, **kwargs: Any) -> Any:
+                raise AssertionError("HTTP server socket should not be bound on invalid mode")
+
+            mp.setattr("pwned.server._RangeThreadingHTTPServer", fail_http_server)
+            with pytest.raises(ValueError, match="NTLM"):
+                create_range_server(host="127.0.0.1", port=0, offline_db=compact_ntlm, ntlm=False)
+
+        with create_range_server(
+            host="127.0.0.1", port=0, offline_db=compact_ntlm, ntlm=True
+        ) as server:
+            assert server.backend == "offline"
+            assert server.mode == "ntlm"
+            assert server.lookup_range(prefix, ntlm=True) == {suffix: 88}
+            assert server.lookup_range("00000", ntlm=True) == {}
+            with pytest.raises(ValueError, match="ntlm"):
+                server.lookup_range(prefix, ntlm=False)
+
+    def test_bloom_filter_rejected_before_binding_socket(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sha1_src = _write_dump(tmp_path / "sha1.txt", [(_sha1_hex("password"), 10)])
+        bloom_sha1 = tmp_path / "sha1.pwnl"
+        build_bloom_filter(sha1_src, bloom_sha1)
+
+        ntlm_src = _write_dump(tmp_path / "ntlm.txt", [(_ntlm_hex("password"), 10)])
+        bloom_ntlm = tmp_path / "ntlm.pwnl"
+        build_bloom_filter(ntlm_src, bloom_ntlm, ntlm=True)
+
+        def fail_http_server(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("HTTP server socket must not be bound for Bloom filters")
+
+        monkeypatch.setattr("pwned.server._RangeThreadingHTTPServer", fail_http_server)
+
+        with pytest.raises(ValueError, match="Bloom filters cannot serve"):
+            create_range_server(host="127.0.0.1", port=0, offline_db=bloom_sha1)
+
+        with pytest.raises(ValueError, match="Bloom filters cannot serve"):
+            create_range_server(host="127.0.0.1", port=0, offline_db=bloom_ntlm, ntlm=True)
+
+    def test_compact_sha1_http_hit_miss_mismatch_and_padding(self, tmp_path: Path) -> None:
+        pw_hash = _sha1_hex("password")
+        prefix = pw_hash[:5]
+        suffix = pw_hash[5:]
+        other_suffix = "0" * 35
+        expected_padded_lines = 800 + (int(prefix, 16) % 201)
+        src = _write_dump(
+            tmp_path / "sha1.txt",
+            [
+                (f"{prefix}{other_suffix}", 4),
+                (pw_hash, 12345),
+            ],
+        )
+        compact_path = tmp_path / "sha1.pwnb"
+        build_compact_index(src, compact_path)
+
+        server = create_range_server(host="127.0.0.1", port=0, offline_db=compact_path)
+        with _running_server(server), httpx.Client(base_url=server.url) as client:
+            health = client.get("/healthz")
+            assert health.status_code == 200
+            assert health.json()["backend"] == "offline"
+            assert health.json()["mode"] == "sha1"
+
+            hit = client.get(f"/range/{prefix.lower()}")
+            assert hit.status_code == 200
+            expected_lines = sorted([f"{other_suffix}:4", f"{suffix}:12345"])
+            assert hit.text == "".join(f"{line}\r\n" for line in expected_lines)
+
+            miss = client.get("/range/00000")
+            assert miss.status_code == 200
+            assert miss.text == ""
+
+            mismatch = client.get(f"/range/{prefix}", params={"mode": "ntlm"})
+            assert mismatch.status_code == 400
+            assert "sha1" in mismatch.text.lower()
+
+            padded = client.get(f"/range/{prefix}", headers={"Add-Padding": "true"})
+            assert padded.status_code == 200
+            assert padded.headers["add-padding"] == "true"
+            entries = padded.text.split("\r\n")[:-1]
+            assert len(entries) == expected_padded_lines
+            parsed = {line.split(":")[0]: int(line.split(":")[1]) for line in entries}
+            assert parsed[suffix] == 12345
+            assert parsed[other_suffix] == 4
+            assert all(len(s) == 35 for s in parsed)
+
+    def test_compact_ntlm_http_hit_miss_mismatch_and_padding(self, tmp_path: Path) -> None:
+        ntlm_hash = _ntlm_hex("password")
+        prefix = ntlm_hash[:5]
+        suffix = ntlm_hash[5:]
+        expected_padded_lines = 800 + (int(prefix, 16) % 201)
+        src = _write_dump(tmp_path / "ntlm.txt", [(ntlm_hash, 555)])
+        compact_ntlm = tmp_path / "ntlm.pwnb"
+        build_compact_index(src, compact_ntlm, ntlm=True)
+
+        server = create_range_server(host="127.0.0.1", port=0, offline_db=compact_ntlm, ntlm=True)
+        with _running_server(server), httpx.Client(base_url=server.url) as client:
+            health = client.get("/healthz")
+            assert health.status_code == 200
+            assert health.json()["backend"] == "offline"
+            assert health.json()["mode"] == "ntlm"
+
+            hit = client.get(f"/range/{prefix}", params={"mode": "ntlm"})
+            assert hit.status_code == 200
+            assert hit.text == f"{suffix}:555\r\n"
+
+            miss = client.get("/range/00000", params={"mode": "ntlm"})
+            assert miss.status_code == 200
+            assert miss.text == ""
+
+            bad_default = client.get(f"/range/{prefix}")
+            assert bad_default.status_code == 400
+            assert "ntlm" in bad_default.text.lower()
+
+            padded = client.get(
+                f"/range/{prefix}",
+                params={"mode": "ntlm"},
+                headers={"Add-Padding": "true"},
+            )
+            assert padded.status_code == 200
+            assert padded.headers["add-padding"] == "true"
+            entries = padded.text.split("\r\n")[:-1]
+            assert len(entries) == expected_padded_lines
+            parsed = {line.split(":")[0]: int(line.split(":")[1]) for line in entries}
+            assert parsed[suffix] == 555
+            assert all(len(s) == 27 for s in parsed)
 
 
 class TestUpstreamProxyMode:

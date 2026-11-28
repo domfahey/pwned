@@ -13,6 +13,7 @@ from pwned._parsers import _md4
 from pwned.client import HIBPClient, HIBPError, UnauthorizedError
 from pwned.doctor import DoctorCheck, DoctorReport, run_doctor
 from pwned.models import Breach, Subscription
+from pwned.offline_index import build_bloom_filter, build_compact_index
 from pwned.passwords import BASE_URL as PASSWORDS_BASE
 from pwned.passwords import PwnedPasswordsClient
 
@@ -45,6 +46,11 @@ class TestDoctorModels:
         assert report.healthy is True
         assert report.subscription_name is None
         assert report.offline_db_path is None
+
+        compact_report = report.model_copy(update={"offline_db_kind": "compact"})
+        bloom_report = report.model_copy(update={"offline_db_kind": "bloom"})
+        assert compact_report.offline_db_kind == "compact"
+        assert bloom_report.offline_db_kind == "bloom"
 
 
 class TestRunDoctor:
@@ -364,3 +370,191 @@ class TestRunDoctor:
         )
         assert res_oserr.healthy is False
         assert "permission denied" in {c.name: c for c in res_oserr.checks}["offline_db"].detail
+
+    def test_offline_db_compact_index_checks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sha1_src = tmp_path / "sha1_src.txt"
+        sha1_lines = sorted(
+            [
+                f"{_sha1_hex('password')}:99\n",
+                f"{_sha1_hex('hunter2')}:5\n",
+            ]
+        )
+        sha1_src.write_text("".join(sha1_lines), encoding="utf-8")
+        compact_sha1 = tmp_path / "sha1.pwnb"
+        build_compact_index(sha1_src, compact_sha1)
+
+        # Auto-detected SHA-1 compact index
+        res_sha1 = run_doctor(
+            offline_db=compact_sha1,
+            cache_dir=tmp_path / "cache",
+            check_network=False,
+        )
+        assert res_sha1.healthy is True
+        assert res_sha1.offline_db_kind == "compact"
+        assert res_sha1.offline_db_mode == "sha1"
+        assert res_sha1.offline_db_entries == 2
+        sha1_check = {c.name: c for c in res_sha1.checks}["offline_db"]
+        assert sha1_check.status == "ok"
+        assert "Compact binary index" in sha1_check.detail
+        assert "SHA1" in sha1_check.detail
+        assert "2 records" in sha1_check.detail
+
+        # Explicit matching ntlm=False
+        res_sha1_explicit = run_doctor(
+            offline_db=compact_sha1,
+            ntlm=False,
+            cache_dir=tmp_path / "cache",
+            check_network=False,
+        )
+        assert res_sha1_explicit.healthy is True
+        assert res_sha1_explicit.offline_db_mode == "sha1"
+
+        # Explicit conflicting ntlm=True -> error
+        res_mismatch = run_doctor(
+            offline_db=compact_sha1,
+            ntlm=True,
+            cache_dir=tmp_path / "cache",
+            check_network=False,
+        )
+        assert res_mismatch.healthy is False
+        assert res_mismatch.offline_db_kind == "compact"
+        assert res_mismatch.offline_db_mode is None
+        mismatch_check = {c.name: c for c in res_mismatch.checks}["offline_db"]
+        assert mismatch_check.status == "error"
+        assert "SHA1 hashes" in mismatch_check.detail
+
+        # Valid NTLM compact index (auto-detected)
+        ntlm_src = tmp_path / "ntlm_src.txt"
+        ntlm_src.write_text(f"{_ntlm_hex('password')}:12\n", encoding="utf-8")
+        compact_ntlm = tmp_path / "ntlm.pwnb"
+        build_compact_index(ntlm_src, compact_ntlm, ntlm=True)
+
+        res_ntlm = run_doctor(
+            offline_db=compact_ntlm,
+            cache_dir=tmp_path / "cache",
+            check_network=False,
+        )
+        assert res_ntlm.healthy is True
+        assert res_ntlm.offline_db_kind == "compact"
+        assert res_ntlm.offline_db_mode == "ntlm"
+        assert res_ntlm.offline_db_entries == 1
+        ntlm_check = {c.name: c for c in res_ntlm.checks}["offline_db"]
+        assert ntlm_check.status == "ok"
+        assert "NTLM" in ntlm_check.detail
+        assert "1 records" in ntlm_check.detail
+
+        # Corrupt compact index (valid magic, truncated header) -> error
+        corrupt_compact = tmp_path / "corrupt.pwnb"
+        corrupt_compact.write_bytes(b"PWNB\x01\x00")
+        res_corrupt = run_doctor(
+            offline_db=corrupt_compact,
+            cache_dir=tmp_path / "cache",
+            check_network=False,
+        )
+        assert res_corrupt.healthy is False
+        assert res_corrupt.offline_db_kind == "compact"
+        corrupt_check = {c.name: c for c in res_corrupt.checks}["offline_db"]
+        assert corrupt_check.status == "error"
+        assert "Truncated compact index header" in corrupt_check.detail
+
+        # OSError when opening compact reader -> error
+        def fail_compact_reader(*args: Any, **kwargs: Any) -> Any:
+            raise OSError("mmap compact failed")
+
+        monkeypatch.setattr("pwned.doctor.CompactIndexReader", fail_compact_reader)
+        res_oserr = run_doctor(
+            offline_db=compact_sha1,
+            cache_dir=tmp_path / "cache",
+            check_network=False,
+        )
+        assert res_oserr.healthy is False
+        assert res_oserr.offline_db_kind == "compact"
+        assert "mmap compact failed" in {c.name: c for c in res_oserr.checks}["offline_db"].detail
+
+    def test_offline_db_bloom_filter_checks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sha1_src = tmp_path / "sha1_src.txt"
+        sha1_src.write_text(
+            f"{_sha1_hex('password')}:99\n{_sha1_hex('letmein')}:3\n",
+            encoding="utf-8",
+        )
+        bloom_sha1 = tmp_path / "sha1.pwnl"
+        sha1_stats = build_bloom_filter(sha1_src, bloom_sha1, false_positive_rate=0.01)
+
+        # Auto-detected SHA-1 Bloom filter
+        res_sha1 = run_doctor(
+            offline_db=bloom_sha1,
+            cache_dir=tmp_path / "cache",
+            check_network=False,
+        )
+        assert res_sha1.healthy is True
+        assert res_sha1.offline_db_kind == "bloom"
+        assert res_sha1.offline_db_mode == "sha1"
+        assert res_sha1.offline_db_entries == sha1_stats.item_count
+        sha1_check = {c.name: c for c in res_sha1.checks}["offline_db"]
+        assert sha1_check.status == "ok"
+        assert "Bloom filter" in sha1_check.detail
+        assert "SHA1" in sha1_check.detail
+        assert f"{sha1_stats.item_count} items" in sha1_check.detail
+        assert f"{sha1_stats.bit_count} bits" in sha1_check.detail
+        assert f"k={sha1_stats.num_hashes}" in sha1_check.detail
+
+        # Explicit conflicting ntlm=True -> error
+        res_mismatch = run_doctor(
+            offline_db=bloom_sha1,
+            ntlm=True,
+            cache_dir=tmp_path / "cache",
+            check_network=False,
+        )
+        assert res_mismatch.healthy is False
+        assert res_mismatch.offline_db_kind == "bloom"
+        assert res_mismatch.offline_db_mode is None
+        assert {c.name: c for c in res_mismatch.checks}["offline_db"].status == "error"
+
+        # Valid NTLM Bloom filter (auto-detected)
+        ntlm_src = tmp_path / "ntlm_src.txt"
+        ntlm_src.write_text(f"{_ntlm_hex('password')}:7\n", encoding="utf-8")
+        bloom_ntlm = tmp_path / "ntlm.pwnl"
+        ntlm_stats = build_bloom_filter(ntlm_src, bloom_ntlm, ntlm=True)
+
+        res_ntlm = run_doctor(
+            offline_db=bloom_ntlm,
+            cache_dir=tmp_path / "cache",
+            check_network=False,
+        )
+        assert res_ntlm.healthy is True
+        assert res_ntlm.offline_db_kind == "bloom"
+        assert res_ntlm.offline_db_mode == "ntlm"
+        assert res_ntlm.offline_db_entries == ntlm_stats.item_count
+        assert "NTLM" in {c.name: c for c in res_ntlm.checks}["offline_db"].detail
+
+        # Corrupt Bloom filter (valid magic, truncated header) -> error
+        corrupt_bloom = tmp_path / "corrupt.pwnl"
+        corrupt_bloom.write_bytes(b"PWNL\x01\x00")
+        res_corrupt = run_doctor(
+            offline_db=corrupt_bloom,
+            cache_dir=tmp_path / "cache",
+            check_network=False,
+        )
+        assert res_corrupt.healthy is False
+        assert res_corrupt.offline_db_kind == "bloom"
+        corrupt_check = {c.name: c for c in res_corrupt.checks}["offline_db"]
+        assert corrupt_check.status == "error"
+        assert "Truncated Bloom filter header" in corrupt_check.detail
+
+        # OSError when opening Bloom reader -> error
+        def fail_bloom_reader(*args: Any, **kwargs: Any) -> Any:
+            raise OSError("mmap bloom failed")
+
+        monkeypatch.setattr("pwned.doctor.BloomFilterReader", fail_bloom_reader)
+        res_oserr = run_doctor(
+            offline_db=bloom_sha1,
+            cache_dir=tmp_path / "cache",
+            check_network=False,
+        )
+        assert res_oserr.healthy is False
+        assert res_oserr.offline_db_kind == "bloom"
+        assert "mmap bloom failed" in {c.name: c for c in res_oserr.checks}["offline_db"].detail

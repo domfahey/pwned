@@ -123,11 +123,11 @@ Prioritized from cross-ecosystem research (official `HaveIBeenPwned.Cli` / `have
 
 ### Offline Scale & Self-Hosted Infrastructure
 - [x] **Self-hosted k-anonymity HTTP server / caching proxy (`pwned serve`)** — expose a drop-in `/range/{prefix}` endpoint, `/healthz`, and optional Prometheus `/metrics` backed by `--offline-db` or an upstream TTL cache for air-gapped services and high-QPS auth backends.
-- [ ] **Compact offline hash indexes (`pwned offline build-bloom` / `compact`)** — build sub-1 GB mmap-able Bloom filters for RAM-resident checks in containers/CI runners, plus a fixed-width binary prefix-indexed format (~50% smaller than ASCII dumps with `O(1)` prefix jump).
+- [x] **Compact offline hash indexes (`pwned offline build-bloom` / `compact`)** — build sub-1 GB mmap-able Bloom filters for RAM-resident checks in containers/CI runners, plus a fixed-width binary prefix-indexed format (~50% smaller than ASCII dumps with `O(1)` prefix jump).
 
 ### Continuous Monitoring, History & Alerting
 - [x] **SQLite exposure history & remediation tracking (`monitor --db`)** — persist first-seen and resolved exposure timestamps in a stdlib `sqlite3` store to track breach trends and rotated credentials across runs, feeding trend summaries into `domain-report`, `--format markdown`, and `--format html`.
-- [ ] **Expanded alert destinations** — add Microsoft Teams (Adaptive Cards), PagerDuty (Events API v2), SMTP email, and GitHub Issue auto-creation/commenting for CI monitoring pipelines.
+- [x] **Expanded alert destinations** — add Microsoft Teams (Adaptive Cards), PagerDuty (Events API v2), SMTP email, and GitHub Issue auto-creation/commenting for CI monitoring pipelines.
 
 ## Backlog / External
 
