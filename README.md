@@ -39,7 +39,7 @@ Use `pwned` when you need what the official CLI doesn't do:
 Try a public breach lookup without installing anything (free, no API key or secrets required):
 
 ```bash
-uvx --from git+https://github.com/domfahey/pwned.git@v0.6.0 pwned breach Adobe
+uvx --from git+https://github.com/domfahey/pwned.git@v0.6.1 pwned breach Adobe
 ```
 
 Common workflows once installed from a pinned or verified release:
@@ -80,10 +80,10 @@ Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/) (or Docker/Podman for
 ### Global CLI (`uv tool`)
 
 ```bash
-uv tool install git+https://github.com/domfahey/pwned.git@v0.6.0
+uv tool install git+https://github.com/domfahey/pwned.git@v0.6.1
 
 # With all optional extras (KeePass, OS Keychain, Bitwarden encryption, zxcvbn)
-uv tool install "pwned[all] @ git+https://github.com/domfahey/pwned.git@v0.6.0"
+uv tool install "pwned[all] @ git+https://github.com/domfahey/pwned.git@v0.6.1"
 ```
 
 For sensitive password or vault audits, prefer a pinned release tag, verified [GitHub Release](https://github.com/domfahey/pwned/releases) wheel (`SHA256SUMS.txt`, CycloneDX SBOM, and Sigstore `gh attestation verify`), or audited local clone (`uv sync --frozen`).
@@ -241,12 +241,12 @@ pwned monitor --config pwned.toml --save-baselines
 
 ### GitHub Action
 
-Run scheduled exposure monitoring or local vault/hash audits in GitHub Actions with `domfahey/pwned@v0.6.0`:
+Run scheduled exposure monitoring or local vault/hash audits in GitHub Actions with `domfahey/pwned@v0.6.1`:
 
 ```yaml
 steps:
   - uses: actions/checkout@v4
-  - uses: domfahey/pwned@v0.6.0
+  - uses: domfahey/pwned@v0.6.1
     env:
       PWNED_WEBHOOK_URL: ${{ secrets.PWNED_WEBHOOK_URL }}
     with:
@@ -271,7 +271,7 @@ Add `pwned-audit` to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/domfahey/pwned
-    rev: v0.6.0
+    rev: v0.6.1
     hooks:
       - id: pwned-audit
 ```

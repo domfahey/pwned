@@ -154,6 +154,6 @@ Focused on workflows outside the official [`hibp` CLI](https://haveibeenpwned.co
 
 - [ ] **PyPI publishing (optional)** — pick a non-colliding distribution name (since `pwned` is already taken on PyPI) while keeping the `pwned` CLI entrypoint, and configure OIDC Trusted Publishing in `.github/workflows/release.yml`.
 - [ ] **Homebrew tap (`domfahey/homebrew-tap`)** — publish `packaging/homebrew/pwned.rb` and automate formula URL/SHA256 updates on release tags.
-- [ ] **GitHub Marketplace Action listing** — check **Publish this Action to the GitHub Marketplace** on the `v0.6.0` release UI after accepting the GitHub Marketplace Developer Agreement.
+- [ ] **GitHub Marketplace Action listing** — check **Publish this Action to the GitHub Marketplace** on the latest release UI after accepting the GitHub Marketplace Developer Agreement.
 - [ ] **OpenSSF Best Practices badge** — manual web registration on `bestpractices.dev`.
 - [ ] **OpenSSF Scorecard `CodeReviewID` alert** — PRs (e.g. #28) merge without an approving review; add a second reviewer or a required-review rule, or dismiss the alert with a documented rationale.
