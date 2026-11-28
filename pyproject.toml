@@ -1,6 +1,6 @@
 [project]
 name = "pwned"
-version = "0.4.1"
+version = "0.5.0"
 description = "CLI tool and Python client for the Have I Been Pwned API v3"
 readme = "README.md"
 license = "MIT"

@@ -94,7 +94,22 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 - [x] **Hosted MkDocs Material docs site (`domfahey.github.io/pwned`)** — comprehensive `docs/` guides deployed via SHA-pinned GitHub Pages workflow (`.github/workflows/docs.yml`) with locked `docs` dependency group.
 - [x] **Repository & developer workflow polish** — organized `.github/` community health files, `packaging/homebrew/pwned.rb`, `.env.example`, self-documenting `Makefile` + enhanced `make doctor`, `Settings` `extra="ignore"` fix, and `action.yml` GitHub Marketplace branding + ref pinning.
 
-## Planned (v0.5.0)
+## Completed (v0.5.0)
+
+- [x] **Mirrored HIBP CLI semantic exit codes (`0`–`9`, `130`)** — align exit codes with official `HaveIBeenPwned.Cli` (`ExitCode` `IntEnum`, `BadRequestError`, `FileOrStoreError`, exit `8` on `--fail-if-pwned`, `3` auth, `4` forbidden, `5` rate limit, `6` network/5xx, `7` file/store, `9` missing resource/verification failure, `130` cancelled).
+- [x] **Enable `--pad` by default on `pwned password`** — send `Add-Padding: true` by default (`--pad/--no-pad`, matching `pwned audit` and `pwned mcp`) so interactive password checks hide response lengths out of the box.
+- [x] **Auto-prefer OS keyring on `pwned auth set|clear`** — default `--backend auto` stores credentials in the OS Keychain when `pwned[keyring]` is installed and usable (falling back to `0600` `~/.config/pwned/.env`), and clears both backends by default.
+- [x] **Clean exit-0 on no-match search results (`account`, `domain`, `pastes`, `stealer`)** — treat HIBP HTTP `404` on search commands as clean exit `0` (`[]`/`{}` in JSON, green `Clean (...)` in text), matching `password`, `search`, `account-range`, and official `hibp`.
+- [x] **CLI password range lookup (`pwned password-range <5-hex>`)** — expose `get_password_range()` on the CLI (`--ntlm`, padding stripped) alongside `pwned password`.
+- [x] **Raw 6-char SHA-1 prefix support on `account-range`** — allow passing a pre-hashed 6-char hex prefix directly to `pwned account-range` (matching `hibp account range <prefix>`).
+- [x] **Non-interactive `pwned auth set --stdin`** — read `HIBP_API_KEY` from standard input for scripted setup without exposing secrets in shell history or `ps` output.
+- [x] **Global `--outfile <path>` (+ `--force`) and CLI shorthands** — write formatted UTF-8 output directly to disk from any data command with safe overwrite protection, plus global `--markdown`, `--mode sha1|ntlm`, `-n`, and `--parallelism`/`-p`.
+- [x] **Per-prefix offline dump directory interop (`00000.txt`–`FFFFF.txt`)** — directory-per-prefix downloads with compact `.pwned-index.json` hash-mode & ETag checkpoints (`--force-refresh` / `--overwrite`), atomic shard writes, and `O(1)` directory lookups in `OfflinePasswordsClient` for direct interoperability with official `HaveIBeenPwned.Cli` (`hibp password download`).
+- [x] **End-user `pwned doctor` CLI subcommand** — verify HIBP API connectivity, subscription tier/RPM, active credential source, keyring availability, cache size, and offline DB integrity directly from installed `pwned` binaries.
+- [x] **Smart `latestBreach` pre-check in `pwned monitor`** — poll unauthenticated `GET /latestBreach` (Cloudflare-cached) first and skip `GET /breachedDomain/{domain}` queries when no new breach has been added since each domain's last baseline snapshot.
+- [x] **CC BY 4.0 attribution footer in Markdown reports** — append a compact HIBP attribution footer to `--format markdown` breach, paste, domain, audit, and monitor reports (matching `README.md` and `--format html`).
+
+## Planned (v0.6.0)
 
 Prioritized from cross-ecosystem research (official `HaveIBeenPwned.Cli` / `haveibeenpwned.com/cli`, `DSInternals`, `easybill/easypwned`, `ScottHelme/when-pwned-passwords-bloom`, `alexbrazier/pwned-bloom`, `HaveIBeenPwned/PwnedPasswordsCloudflareWorker`, `Keyguard`, `1Password`/`Bitwarden` CLIs, `brycx/checkpwn`, and `wneessen/go-hibp`).
 
@@ -107,30 +122,16 @@ Prioritized from cross-ecosystem research (official `HaveIBeenPwned.Cli` / `have
 - [ ] **Vault breach & stealer-log correlation (`pwned audit --check-breaches`)** — cross-reference vault entry emails and login domains against HIBP breaches and stealer logs to flag accounts on compromised sites even when the password itself has not yet appeared in Pwned Passwords.
 
 ### Offline Scale & Self-Hosted Infrastructure
-- [x] **Per-prefix offline dump directory interop (`00000.txt`–`FFFFF.txt`)** — support directory-per-prefix downloads with ETag index refreshes (`--force-refresh` / `--overwrite`) alongside single-file exports in `pwned offline download`, and `O(1)` directory lookups in `OfflinePasswordsClient` for direct interoperability with official `HaveIBeenPwned.Cli` (`hibp password download`).
 - [ ] **Self-hosted k-anonymity HTTP server / caching proxy (`pwned serve`)** — expose a drop-in `/range/{prefix}` endpoint, `/healthz`, and optional Prometheus `/metrics` backed by `--offline-db` or an upstream TTL cache for air-gapped services and high-QPS auth backends.
 - [ ] **Compact offline hash indexes (`pwned offline build-bloom` / `compact`)** — build sub-1 GB mmap-able Bloom filters for RAM-resident checks in containers/CI runners, plus a fixed-width binary prefix-indexed format (~50% smaller than ASCII dumps with `O(1)` prefix jump).
 
 ### Continuous Monitoring, History & Alerting
-- [x] **Smart `latestBreach` pre-check in `pwned monitor`** — poll unauthenticated `GET /latestBreach` (Cloudflare-cached) first and skip `GET /breachedDomain/{domain}` queries when no new breach has been added since the last baseline snapshot.
 - [ ] **SQLite exposure history & remediation tracking (`monitor --db`)** — persist first-seen and resolved exposure timestamps in a stdlib `sqlite3` store to track breach trends and rotated credentials across runs, feeding trend summaries into `domain-report`, `--format markdown`, and `--format html`.
 - [ ] **Expanded alert destinations** — add Microsoft Teams (Adaptive Cards), PagerDuty (Events API v2), SMTP email, and GitHub Issue auto-creation/commenting for CI monitoring pipelines.
-- [x] **CC BY 4.0 attribution footer in Markdown reports** — append a compact HIBP attribution footer to `--format markdown` breach and paste reports (matching `README.md` and `--format html`).
-
-### CLI UX & End-User Diagnostics
-- [x] **Enable `--pad` by default on `pwned password`** — send `Add-Padding: true` by default (`--pad/--no-pad`, matching `pwned audit` and `pwned mcp`) so interactive password checks hide response lengths out of the box.
-- [x] **Auto-prefer OS keyring on `pwned auth set|clear`** — default `--backend auto` stores credentials in the OS Keychain when `pwned[keyring]` is installed and usable (falling back to `0600` `~/.config/pwned/.env`), and clears both backends by default.
-- [x] **Clean exit-0 on no-match search results (`account`, `domain`, `pastes`, `stealer`)** — treat HIBP HTTP `404` on search commands as clean exit `0` (`[]`/`{}` in JSON, green `Clean (...)` in text), matching `password`, `search`, `account-range`, and official `hibp`.
-- [x] **CLI password range lookup (`pwned password-range <5-hex>`)** — expose `get_password_range()` on the CLI (`--ntlm`, padding stripped) alongside `pwned password`.
-- [x] **Raw 6-char SHA-1 prefix support on `account-range`** — allow passing a pre-hashed 6-char hex prefix directly to `pwned account-range` (matching `hibp account range <prefix>`).
-- [x] **Non-interactive `pwned auth set --stdin`** — read `HIBP_API_KEY` from standard input for scripted setup without exposing secrets in shell history or `ps` output.
-- [x] **Global `--outfile <path>` (+ `--force`)** — write formatted UTF-8 output directly to disk from any data command with safe overwrite protection (avoiding Windows PowerShell UTF-16 redirection issues).
-- [x] **End-user `pwned doctor` CLI subcommand** — verify HIBP API connectivity, subscription tier/RPM, active credential source, keyring availability, cache size, and offline DB integrity directly from installed `pwned` binaries.
-- [x] **Mirrored HIBP CLI semantic exit codes (`0`–`9`, `130`)** — align exit codes with official `HaveIBeenPwned.Cli` (`ExitCode` `IntEnum`, `BadRequestError`, `FileOrStoreError`, exit `8` on `--fail-if-pwned`, `3` auth, `4` forbidden, `5` rate limit, `6` network/5xx, `7` file/store, `9` missing resource/verification failure, `130` cancelled).
 
 ## Backlog / External
 
 - [ ] **PyPI publishing (optional)** — pick a non-colliding distribution name (since `pwned` is already taken on PyPI) while keeping the `pwned` CLI entrypoint, and configure OIDC Trusted Publishing in `.github/workflows/release.yml`.
 - [ ] **Homebrew tap (`domfahey/homebrew-tap`)** — publish `packaging/homebrew/pwned.rb` and automate formula URL/SHA256 updates on release tags.
-- [ ] **GitHub Marketplace Action listing** — check **Publish this Action to the GitHub Marketplace** on the `v0.4.1` release UI after accepting the GitHub Marketplace Developer Agreement.
+- [ ] **GitHub Marketplace Action listing** — check **Publish this Action to the GitHub Marketplace** on the `v0.5.0` release UI after accepting the GitHub Marketplace Developer Agreement.
 - [ ] **OpenSSF Best Practices badge** — manual web registration on `bestpractices.dev`.

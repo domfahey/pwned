@@ -11,7 +11,7 @@
 An unofficial command-line tool and typed Python SDK for querying [Troy Hunt](https://www.troyhunt.com)'s [Have I Been Pwned](https://haveibeenpwned.com/) service (API v3) — with offline password auditing, declarative breach monitoring, and a local stdio MCP server.
 
 - **100% HIBP API v3 parity** — all 21 / 21 endpoints across sync/async clients and the CLI ([coverage matrix](docs/hibp-api-coverage.md)).
-- **Privacy-first password checks** — *k*-anonymity (SHA-1 & NTLM, 5-char prefix only) or air-gapped `O(log N)` offline hash dumps; plaintext passwords never leave your machine.
+- **Privacy-first password checks** — *k*-anonymity (SHA-1 & NTLM, 5-char prefix only, padded by default) or air-gapped `O(1)` per-prefix range directories and `O(log N)` offline hash dumps; plaintext passwords never leave your machine.
 - **16 vault & Active Directory audit sources** — Bitwarden (JSON, PBKDF2/Argon2id encrypted JSON, CSV), 1Password (CSV, 1PUX), LastPass, Dashlane, Proton Pass, Chrome/Edge, Firefox, Apple Passwords, generic CSV, KeePass `.kdbx`, AD `pwdump`/`secretsdump`, and live Unix `pass`/`gopass`.
 - **CI/CD & reporting ready** — `text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, and standalone `html` outputs, declarative `pwned.toml` monitoring, baseline diffing, Slack/Discord/generic webhooks, GitHub Action, and multi-arch container images.
 
@@ -20,7 +20,7 @@ An unofficial command-line tool and typed Python SDK for querying [Troy Hunt](ht
 Try a public breach lookup without installing anything (free, no API key or secrets required):
 
 ```bash
-uvx --from git+https://github.com/domfahey/pwned.git@v0.4.1 pwned breach Adobe
+uvx --from git+https://github.com/domfahey/pwned.git@v0.5.0 pwned breach Adobe
 ```
 
 Common workflows once installed from a pinned or verified release:
@@ -52,7 +52,7 @@ Read the hosted docs at **[domfahey.github.io/pwned](https://domfahey.github.io/
 | [Vault & Active Directory Auditing](docs/vault-auditing.md) | 16 vault/browser/`pwdump`/`pass`/`gopass` sources, Argon2id, reuse & strength scoring |
 | [Monitoring, Webhooks & CI/CD](docs/monitoring-and-ci.md) | `pwned.toml`, baselines, webhooks, SARIF/Markdown/HTML, GitHub Action, pre-commit, Docker |
 | [Offline Lookups & Local MCP Server](docs/offline-and-mcp.md) | Resumable offline dump downloads, `OfflinePasswordsClient`, and `pwned mcp` |
-| [Roadmap](docs/roadmap.md) | Completed milestones and planned `v0.5.0` improvements |
+| [Roadmap](docs/roadmap.md) | Completed milestones and planned `v0.6.0` improvements |
 
 ## Installation
 
@@ -61,10 +61,10 @@ Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/) (or Docker/Podman for
 ### Global CLI (`uv tool`)
 
 ```bash
-uv tool install git+https://github.com/domfahey/pwned.git@v0.4.1
+uv tool install git+https://github.com/domfahey/pwned.git@v0.5.0
 
 # With all optional extras (KeePass, OS Keychain, Bitwarden encryption, zxcvbn)
-uv tool install "pwned[all] @ git+https://github.com/domfahey/pwned.git@v0.4.1"
+uv tool install "pwned[all] @ git+https://github.com/domfahey/pwned.git@v0.5.0"
 ```
 
 For sensitive password or vault audits, prefer a pinned release tag, verified [GitHub Release](https://github.com/domfahey/pwned/releases) wheel (`SHA256SUMS.txt` + `gh attestation verify`), or audited local clone (`uv sync --frozen`).
@@ -119,7 +119,7 @@ Commands are grouped by HIBP subscription tier. Protected commands (`Core` and a
 
 | Plan Tier | Commands |
 |---|---|
-| **Free / No API key** | `password` (`pw`), `audit`, `offline download`, `mcp`, `breach`, `breaches`, `latest-breach` (`lb`), `dataclasses` (`dc`), `cache clear`, `auth set\|show\|clear`, `completion` |
+| **Free / No API key** | `password` (`pw`), `password-range` (`pr`), `audit`, `offline download`, `mcp`, `breach`, `breaches`, `latest-breach` (`lb`), `dataclasses` (`dc`), `cache clear`, `auth set\|show\|clear`, `doctor`, `completion` |
 | **Core / Pro / High RPM** | `account` (`ba`), `search`, `pastes` (`pa`), `subscription`, `domain` (`bd`), `domain-report`, `monitor`, `subscribed-domains` (`sd`) |
 | **Pro / High RPM** | `account-range` (`bar`) |
 | **Pro** | `stealer email\|website\|domain`, `domain-verify dns-token\|dns-check\|meta-tag\|meta-check\|email`, `subscribed-domains remove` |
@@ -134,6 +134,9 @@ Global flags are accepted before or after subcommands (`pwned --json --cache bre
 | `--user-agent TEXT` | Custom `User-Agent` header override (default `pwned-cli`) |
 | `--format TEXT` | Output format: `text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, `html` |
 | `--json` | Shorthand for `--format json` |
+| `--markdown` | Shorthand for `--format markdown` |
+| `--outfile PATH` | Write formatted UTF-8 output atomically to a file |
+| `--force` | Overwrite an existing `--outfile` |
 | `--cache / --no-cache` | Cache public endpoints and password range lookups locally |
 | `--version` | Show CLI version and exit |
 
@@ -219,12 +222,12 @@ pwned monitor --config pwned.toml --save-baselines
 
 ### GitHub Action
 
-Run scheduled exposure monitoring or local vault/hash audits in GitHub Actions with `domfahey/pwned@v0.4.1`:
+Run scheduled exposure monitoring or local vault/hash audits in GitHub Actions with `domfahey/pwned@v0.5.0`:
 
 ```yaml
 steps:
   - uses: actions/checkout@v4
-  - uses: domfahey/pwned@v0.4.1
+  - uses: domfahey/pwned@v0.5.0
     env:
       PWNED_WEBHOOK_URL: ${{ secrets.PWNED_WEBHOOK_URL }}
     with:
@@ -249,7 +252,7 @@ Add `pwned-audit` to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/domfahey/pwned
-    rev: v0.4.1
+    rev: v0.5.0
     hooks:
       - id: pwned-audit
 ```
