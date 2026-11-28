@@ -15,7 +15,6 @@ from unittest.mock import MagicMock
 import pytest
 from pytest_httpx import HTTPXMock
 
-from pwned._parsers import _md4
 from pwned.audit import (
     EMPTY_LM_HASH,
     EMPTY_NTLM_HASH,
@@ -49,7 +48,7 @@ from pwned.audit import (
     parse_protonpass_csv,
     parse_pwdump,
 )
-from pwned.passwords import AsyncPwnedPasswordsClient, PwnedPasswordsClient
+from pwned.passwords import AsyncPwnedPasswordsClient, PwnedPasswordsClient, _hash_password
 
 
 class TestAuditModels:
@@ -2054,12 +2053,12 @@ class TestPreHashedAndStrengthAudit:
         assert "risk_score" in both_summary.model_dump(exclude_unset=True)
 
 
-def _ntlm_upper(password: str) -> str:
-    return _md4(password.encode("utf-16-le")).upper()
+def _ntlm_upper(value: str) -> str:
+    return _hash_password(value, ntlm=True)
 
 
-def _sha1_upper(password: str) -> str:
-    return hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+def _sha1_upper(value: str) -> str:
+    return _hash_password(value, ntlm=False)
 
 
 class TestADHygieneAndCustomWordlist:
@@ -2385,11 +2384,11 @@ class TestADHygieneAndCustomWordlist:
         assert sync_summary == async_summary
         assert sync_summary.wordlist_matches == 6
         assert sync_summary.wordlist_findings == [
-            WordlistFinding(name="NtlmCI", username="u5", match_type="case_insensitive"),
+            WordlistFinding(name="NtlmCI", username="u5", match_type="case_variant"),
             WordlistFinding(name="NtlmExact", username="u4", match_type="exact"),
             WordlistFinding(name="PlainCI", username="u2", match_type="case_insensitive"),
             WordlistFinding(name="PlainExact", username="u1", match_type="exact"),
-            WordlistFinding(name="Sha1CI", username="u8", match_type="case_insensitive"),
+            WordlistFinding(name="Sha1CI", username="u8", match_type="case_variant"),
             WordlistFinding(name="Sha1Exact", username="u7", match_type="exact"),
         ]
 

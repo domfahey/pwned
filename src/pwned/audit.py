@@ -13,6 +13,7 @@ import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Literal, TypedDict
 
@@ -25,12 +26,11 @@ from pwned._parsers import (
     EMPTY_NTLM_HASH as EMPTY_NTLM_HASH,
 )
 from pwned._parsers import (
-    _md4,
     parse_input_lines,
     parse_pwdump_records,
 )
 from pwned.models import NonNegativeInt, PasswordChecker, _HIBPBase
-from pwned.passwords import AsyncPwnedPasswordsClient
+from pwned.passwords import AsyncPwnedPasswordsClient, _hash_password
 from pwned.strength import compute_vault_risk_score, evaluate_password_strength
 
 ExportSource = Literal[
@@ -54,7 +54,7 @@ ExportSource = Literal[
 
 
 ADHygieneIssue = Literal["empty_ntlm", "lm_hash_present", "username_as_password"]
-WordlistMatchType = Literal["exact", "case_insensitive"]
+WordlistMatchType = Literal["exact", "case_insensitive", "case_variant"]
 
 
 @dataclass(frozen=True)
@@ -769,14 +769,6 @@ def _username_candidates(username: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(variant for base in bases for variant in _case_variants(base)))
 
 
-def _ntlm_digest(secret: str) -> str:
-    return _md4(secret.encode("utf-16-le")).upper()
-
-
-def _sha1_digest(secret: str) -> str:
-    return hashlib.sha1(secret.encode("utf-8")).hexdigest().upper()  # noqa: S324
-
-
 def _entry_is_ntlm(entry: AuditEntry, ntlm: bool) -> bool:
     return entry.hash_type == "ntlm" or (entry.hash_type is None and ntlm)
 
@@ -787,8 +779,8 @@ def _matches_username_password(entry: AuditEntry, *, ntlm: bool = False) -> bool
         return False
     if entry.is_hash:
         target = entry.password.upper()
-        hasher = _ntlm_digest if _entry_is_ntlm(entry, ntlm) else _sha1_digest
-        return any(hasher(candidate) == target for candidate in candidates)
+        use_ntlm = _entry_is_ntlm(entry, ntlm)
+        return any(_hash_password(candidate, ntlm=use_ntlm) == target for candidate in candidates)
     target_folded = entry.password.casefold()
     return any(candidate.casefold() == target_folded for candidate in candidates)
 
@@ -855,6 +847,14 @@ def _collect_wordlist_findings(
     *,
     ntlm: bool = False,
 ) -> list[WordlistFinding]:
+    """Match entries against a custom banned wordlist without exposing secrets.
+
+    Plaintext entries support exact (``"exact"``) and full case-folded
+    (``"case_insensitive"``) matching. Irreversible pre-hashed NTLM/SHA-1 entries
+    cannot be case-folded directly, so they are matched against exact digests
+    (``"exact"``) and common capitalization variants (``lower``, ``upper``,
+    ``capitalize``, ``title``) reported explicitly as ``"case_variant"``.
+    """
     terms = list(dict.fromkeys(term for term in custom_wordlist if term))
     if not terms or not entries:
         return []
@@ -871,16 +871,18 @@ def _collect_wordlist_findings(
             digest = entry.password.upper()
             if _entry_is_ntlm(entry, ntlm):
                 if ntlm_sets is None:
-                    ntlm_sets = _build_hash_wordlist_sets(terms, _ntlm_digest)
-                exact_hashes, ci_hashes = ntlm_sets
+                    ntlm_sets = _build_hash_wordlist_sets(terms, partial(_hash_password, ntlm=True))
+                exact_hashes, variant_hashes = ntlm_sets
             else:
                 if sha1_sets is None:
-                    sha1_sets = _build_hash_wordlist_sets(terms, _sha1_digest)
-                exact_hashes, ci_hashes = sha1_sets
+                    sha1_sets = _build_hash_wordlist_sets(
+                        terms, partial(_hash_password, ntlm=False)
+                    )
+                exact_hashes, variant_hashes = sha1_sets
             if digest in exact_hashes:
                 match_type = "exact"
-            elif digest in ci_hashes:
-                match_type = "case_insensitive"
+            elif digest in variant_hashes:
+                match_type = "case_variant"
         elif entry.password in exact_plain:
             match_type = "exact"
         elif entry.password.casefold() in ci_plain:

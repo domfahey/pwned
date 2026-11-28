@@ -75,7 +75,9 @@ pwned audit vault.json \
 ```
 
 - Reads UTF-8 (including UTF-8 BOM) newline-delimited files, skipping blank lines and `#` comment lines.
-- Reports `exact` and `case_insensitive` matches in `AuditSummary.wordlist_findings` (`wordlist_matches` count) without emitting plaintext passwords or matched wordlist terms.
+- Reports matches in `AuditSummary.wordlist_findings` (`wordlist_matches` count) without emitting plaintext passwords or matched wordlist terms:
+  - Plaintext vaults report `exact` and full `casefold()` `case_insensitive` matches.
+  - Pre-hashed `pwdump` / SHA-1 dumps cannot be case-folded directly, so they report exact digest matches (`exact`) and common capitalization variants (`lower`, `upper`, `capitalize`, `title`) explicitly as `case_variant` — list any custom mixed-case organizational variants directly in your wordlist file for guaranteed hash coverage.
 - For `--format sarif`, emits `HIBP005` (`ADCredentialHygiene`) and `HIBP006` (`BannedWordlistPassword`) alongside `HIBP002` (`CompromisedPassword`).
 - With `--fail-if-pwned`, exits with code `8` if compromised entries, AD hygiene findings, or custom wordlist matches are found.
 
