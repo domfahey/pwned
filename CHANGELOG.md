@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Updated the Homebrew formula template (`packaging/homebrew/pwned.rb`) to the v0.6.1 tarball.
+
 ## [0.6.1] - 2026-11-28
 
 ### Changed
