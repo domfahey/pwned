@@ -29,7 +29,7 @@ MCP_PROTOCOL_VERSION = "2024-11-05"
 JSONRPC_VERSION = "2.0"
 
 _REJECTED_MCP_SOURCES = frozenset({"keepass", "bitwarden-encrypted-json"})
-_STORE_SOURCES = frozenset({"pass", "gopass"})
+_STORE_SOURCES = frozenset({"pass", "gopass", "bitwarden-cli", "1password-cli"})
 
 _breaches_adapter: TypeAdapter[list[Breach]] = TypeAdapter(list[Breach])
 _domain_breaches_adapter: TypeAdapter[dict[str, list[str]]] = TypeAdapter(dict[str, list[str]])
@@ -82,12 +82,18 @@ _TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to export file (optional only for pass/gopass).",
+                    "description": (
+                        "Path to export file (optional for pass, gopass, bitwarden-cli, "
+                        "and 1password-cli)."
+                    ),
                 },
                 "source": {
                     "type": "string",
                     "default": "bitwarden-json",
-                    "description": "Vault export format (e.g. bitwarden-json, csv, pwdump, pass).",
+                    "description": (
+                        "Vault export format (e.g. bitwarden-json, csv, pwdump, pass, "
+                        "bitwarden-cli, 1password-cli)."
+                    ),
                 },
                 "threshold": {
                     "type": "integer",
@@ -126,6 +132,14 @@ _TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
                 "custom_wordlist_path": {
                     "type": "string",
                     "description": "Optional path to a custom newline-delimited banned wordlist.",
+                },
+                "check_breaches": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Correlate vault entry domains (and account emails when API key "
+                        "is configured) against HIBP breaches."
+                    ),
                 },
             },
             "additionalProperties": False,
@@ -339,6 +353,7 @@ class MCPServer:
         check_strength = _get_bool(arguments, "check_strength", True)
         check_ad_hygiene = _get_bool(arguments, "check_ad_hygiene", False)
         exclude_machines = _get_bool(arguments, "exclude_machines", False)
+        check_breaches = _get_bool(arguments, "check_breaches", False)
         raw_wordlist = _optional_str(arguments, "custom_wordlist_path")
         wordlist_terms = (
             load_custom_wordlist(Path(raw_wordlist))
@@ -352,16 +367,35 @@ class MCPServer:
             exclude_machines=exclude_machines,
         )
         with self._open_password_client(ntlm=use_ntlm) as client:
-            summary = audit_entries(
-                entries,
-                client,
-                threshold=threshold,
-                ntlm=use_ntlm,
-                check_reuse=check_reuse,
-                check_strength=check_strength,
-                check_ad_hygiene=check_ad_hygiene,
-                custom_wordlist=wordlist_terms,
-            )
+            if check_breaches:
+                with HIBPClient(
+                    api_key=self._api_key,
+                    user_agent=self._user_agent,
+                    cache=self._cache,
+                ) as hibp_client:
+                    summary = audit_entries(
+                        entries,
+                        client,
+                        threshold=threshold,
+                        ntlm=use_ntlm,
+                        check_reuse=check_reuse,
+                        check_strength=check_strength,
+                        check_ad_hygiene=check_ad_hygiene,
+                        custom_wordlist=wordlist_terms,
+                        check_breaches=True,
+                        hibp_client=hibp_client,
+                    )
+            else:
+                summary = audit_entries(
+                    entries,
+                    client,
+                    threshold=threshold,
+                    ntlm=use_ntlm,
+                    check_reuse=check_reuse,
+                    check_strength=check_strength,
+                    check_ad_hygiene=check_ad_hygiene,
+                    custom_wordlist=wordlist_terms,
+                )
         return serialize(summary)
 
     def _tool_diff_baseline(self, arguments: dict[str, Any]) -> Any:

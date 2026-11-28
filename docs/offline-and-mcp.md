@@ -45,7 +45,7 @@ How it works:
 
 ## Offline Lookups (`--offline-db` & `OfflinePasswordsClient`)
 
-`--offline-db PATH` (on `pwned password`, `pwned audit`, and `pwned mcp`) and `OfflinePasswordsClient` accept either a **per-prefix range directory** (`O(1)` direct prefix lookup) or a **single sorted dump file** (`O(log N)` binary search):
+`--offline-db PATH` (on `pwned password`, `pwned audit`, `pwned serve`, and `pwned mcp`) and `OfflinePasswordsClient` accept either a **per-prefix range directory** (`O(1)` direct prefix lookup) or a **single sorted dump file** (`O(log N)` binary search):
 
 ### CLI Usage
 
@@ -74,6 +74,63 @@ with OfflinePasswordsClient(Path("/data/pwned-sha1")) as dir_client:
 with OfflinePasswordsClient(Path("/data/pwned-passwords-ntlm.txt"), ntlm=True) as file_client:
     assert file_client.is_directory is False
     compromised = file_client.is_hash_pwned("8846F7EAEE8FB117AD06BDD830B7586C")
+```
+
+## Self-Hosted *k*-Anonymity HTTP Server & Caching Proxy (`pwned serve`)
+
+`pwned serve` runs a zero-dependency, drop-in HTTP server compatible with `https://api.pwnedpasswords.com/range/{prefix}` for air-gapped networks, internal authentication services, and high-QPS validation backends.
+
+### CLI Usage
+
+```bash
+# Air-gapped / self-hosted mode backed by an offline range directory or single sorted dump
+pwned serve --offline-db /data/pwned-sha1 --host 127.0.0.1 --port 8080
+
+# Serve an NTLM offline dump
+pwned serve --offline-db /data/pwned-ntlm --ntlm --host 0.0.0.0 --port 8080
+
+# Upstream caching proxy mode (caches range buckets locally via global --cache)
+pwned --cache serve --port 8080
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--host TEXT` | `127.0.0.1` | Bind address for the HTTP server |
+| `--port INT` | `8080` | Listening TCP port (`0` selects an ephemeral port) |
+| `--offline-db PATH` | `None` | Local HIBP sorted dump file or per-prefix range directory (`00000.txt`–`FFFFF.txt`); disables upstream network calls when set |
+| `--mode [sha1\|ntlm]` | `sha1` | Offline database hash mode (`sha1` or `ntlm`; proxy mode serves both dynamically) |
+| `-n`, `--ntlm` | `False` | Serve an NTLM `--offline-db` (overrides `--mode`) |
+| `--pad / --no-pad` | `True` | Request `Add-Padding: true` on upstream HIBP proxy fetches |
+| `--metrics / --no-metrics` | `True` | Expose Prometheus metrics on `GET /metrics` (returns `404` when disabled) |
+| `--access-log` | `False` | Emit HTTP request access logs to `stderr` |
+
+### HTTP Endpoints
+
+- **`GET /range/<5-hex>`** — Returns sorted `SUFFIX:COUNT\r\n` lines with `Cache-Control: public, max-age=3600`:
+  - Supports optional `?mode=sha1|ntlm` (defaults to `sha1`; offline mode enforces the configured DB mode and returns `400` on mismatch).
+  - Supports the `Add-Padding: true` request header by deterministically padding responses to 800–1,000 lines with `0`-count suffixes and echoing `Add-Padding: true`.
+  - Returns `400 Bad Request` on invalid prefixes/modes, `502 Bad Gateway` on upstream proxy errors, and `405 Method Not Allowed` (`Allow: GET`) on non-`GET` methods.
+- **`GET /healthz`** — Returns `200 OK` JSON (`ServerHealth`): `{"status": "ok", "backend": "offline" | "proxy", "mode": "sha1" | "ntlm" | "auto", "uptime_seconds": ...}`.
+- **`GET /metrics`** — Returns `200 OK` (`text/plain; version=0.0.4; charset=utf-8`) in Prometheus text exposition format (`pwned_range_requests_total`, `pwned_range_padded_responses_total`, `pwned_range_errors_total`, `pwned_range_upstream_errors_total`, and `pwned_server_uptime_seconds`), or `404 Not Found` when `--no-metrics` is set.
+
+### Python Usage (`PwnedRangeServer` & `create_range_server`)
+
+```python
+from pathlib import Path
+from pwned import PwnedRangeServer, ResponseCache, create_range_server
+
+# Offline directory or single-file range server
+with PwnedRangeServer(
+    offline_db=Path("/data/pwned-sha1"),
+    host="127.0.0.1",
+    port=8080,
+) as server:
+    print(server.url, server.health())
+    server.serve_forever()
+
+# Upstream caching proxy via factory helper
+with create_range_server(port=8080, cache=ResponseCache()) as proxy_server:
+    proxy_server.serve_forever()
 ```
 
 ## Local Privacy-First Stdio MCP Server (`pwned mcp`)
@@ -113,7 +170,7 @@ Or run zero-install via `uvx`:
 | Tool | Purpose | Privacy Guardrails |
 |---|---|---|
 | `check_password_hash` | Check a pre-computed 40-char SHA-1 or 32-char NTLM hash against `--offline-db` or online *k*-anonymity (`--cache` supported) | Accepts **hashes only** — never accepts plaintext passwords |
-| `audit_vault` | Audit local plaintext vault exports, `pwdump` files, or `pass`/`gopass` stores (`check_reuse`, `check_strength`, `check_ad_hygiene`, `exclude_machines`, `custom_wordlist_path`, `threshold`) | Returns sanitized findings/risk scores only (zero plaintext passwords); **rejects** `keepass` and `bitwarden-encrypted-json` so master passwords are never passed through an AI prompt |
+| `audit_vault` | Audit local plaintext vault exports, `pwdump` files, live `pass`/`gopass` stores, or unlocked `bitwarden-cli`/`1password-cli` vaults (`check_reuse`, `check_strength`, `check_ad_hygiene`, `exclude_machines`, `custom_wordlist_path`, `check_breaches`, `threshold`) | Returns sanitized findings/risk scores only (zero plaintext passwords); **rejects** `keepass` and `bitwarden-encrypted-json` so master passwords are never passed through an AI prompt |
 | `diff_baseline` | Diff two local JSON snapshot files (`breaches`, `domain`, `search`, `account_batch`) | 100% local file comparison |
 | `lookup_breach` | Look up public HIBP breach metadata by name or filtered list (with optional local `--cache`) | Public read-only catalog |
 | `check_account_range` | Check an email address via HIBP's 6-char SHA-1 *k*-anonymity range API | Uses locally configured HIBP API key; never sends plaintext email to HIBP |

@@ -93,6 +93,43 @@ asyncio.run(check_async())
 # Air-gapped O(log N) binary search over a local sorted hash dump
 with OfflinePasswordsClient(Path("/data/pwned-passwords-sha1.txt")) as offline:
     count = offline.check_password("hunter2")
+
+# Self-hosted /range/{prefix} HTTP server (offline DB or upstream caching proxy)
+from pwned import PwnedRangeServer, create_range_server
+
+with PwnedRangeServer(offline_db=Path("/data/pwned-sha1"), host="127.0.0.1", port=8080) as srv:
+    srv.serve_forever()
+# Or: create_range_server(port=8080, cache=ResponseCache())
+```
+
+## Vault Auditing, Live CLI Connectors & Breach Correlation
+
+```python
+from pwned import (
+    HIBPClient,
+    PwnedPasswordsClient,
+    ResponseCache,
+    audit_entries,
+    parse_1password_cli,
+    parse_bitwarden_cli,
+)
+
+# Read unlocked cloud vaults directly in memory (no plaintext export files)
+bw_entries = parse_bitwarden_cli()
+op_entries = parse_1password_cli("Work")
+
+with (
+    PwnedPasswordsClient(cache=ResponseCache()) as pw_client,
+    HIBPClient(api_key="your-key", cache=ResponseCache()) as hibp_client,
+):
+    summary = audit_entries(
+        op_entries,
+        pw_client,
+        check_reuse=True,
+        check_breaches=True,
+        hibp_client=hibp_client,
+    )
+    print(summary.compromised_entries, summary.breach_correlated_entries)
 ```
 
 ## Framework Password Validators (Pydantic / FastAPI / Django)
@@ -125,6 +162,7 @@ For Django forms or `AUTH_PASSWORD_VALIDATORS`, wrap `validate_password_not_pwne
 ```python
 from pathlib import Path
 from pwned import (
+    ExposureHistoryStore,
     HIBPClient,
     ResponseCache,
     format_output,
@@ -148,9 +186,19 @@ with HIBPClient(api_key="your-key", cache=ResponseCache()) as client:
         title="Domain Exposure Report",
     )
 
-    # Declarative TOML monitor
+    # Declarative TOML monitor with SQLite exposure history tracking
     cfg = load_monitor_config(Path("pwned.toml"))
-    mon_report = run_monitor(cfg, client, save_baselines=True)
+    mon_report = run_monitor(
+        cfg,
+        client,
+        save_baselines=True,
+        db_path_override=Path("history.sqlite3"),
+    )
+
+# Inspect persisted SQLite exposure trends directly
+with ExposureHistoryStore(Path("history.sqlite3")) as store:
+    trend = store.get_trend_summary(target_type="domain", target="example.com")
+    print(trend.active_exposures, trend.remediation_rate)
 ```
 
 ## Custom `httpx` Client & Proxy Injection

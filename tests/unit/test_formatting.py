@@ -12,6 +12,7 @@ from pwned.audit import (
     ADHygieneFinding,
     AuditFinding,
     AuditSummary,
+    BreachCorrelationFinding,
     ReuseGroup,
     WordlistFinding,
 )
@@ -23,7 +24,9 @@ from pwned.formatting import (
     should_use_color,
     strip_html,
 )
+from pwned.history import HistoryTrendSummary
 from pwned.models import Breach, Paste, SearchResult
+from pwned.monitor import MonitorAccountResult, MonitorDomainResult, MonitorReport
 from pwned.reporting import BreachExposureSummary, DataClassExposure, DomainReport
 
 
@@ -453,6 +456,78 @@ class TestFormatSarif:
         assert "bob" in results[2]["message"]["text"]
         assert "exact" in results[2]["message"]["text"]
 
+    def test_sarif_audit_summary_with_breach_correlation(self) -> None:
+        summary = AuditSummary(
+            total_entries=3,
+            unique_passwords=3,
+            compromised_entries=0,
+            findings=[],
+            breach_correlated_entries=2,
+            breach_findings=[
+                BreachCorrelationFinding(
+                    name="Adobe",
+                    username="alice@example.com",
+                    source="site_domain",
+                    domain="adobe.com",
+                    breaches=["Adobe"],
+                ),
+                BreachCorrelationFinding(
+                    name="Email",
+                    username="alice@example.com",
+                    source="account_breach",
+                    domain="",
+                    breaches=["Adobe", "Dropbox"],
+                ),
+                BreachCorrelationFinding(
+                    name="Portal",
+                    username="bob@example.com",
+                    source="stealer_log",
+                    domain="",
+                    breaches=["evil.example"],
+                ),
+            ],
+        )
+        doc = self._assert_valid_sarif_envelope(format_output(summary, fmt="sarif"))
+        rules_by_id = {r["id"]: r for r in doc["runs"][0]["tool"]["driver"]["rules"]}
+        assert "HIBP007" in rules_by_id
+        assert rules_by_id["HIBP007"]["name"] == "VaultBreachCorrelation"
+        assert rules_by_id["HIBP007"]["defaultConfiguration"] == {"level": "warning"}
+        assert (
+            rules_by_id["HIBP007"]["shortDescription"]["text"]
+            == "Vault credential correlated with a known site breach, account breach, "
+            "or stealer log."
+        )
+
+        results = doc["runs"][0]["results"]
+        assert len(results) == 3
+        assert all(r["ruleId"] == "HIBP007" for r in results)
+        assert all(r["level"] == "warning" for r in results)
+        assert (
+            results[0]["message"]["text"]
+            == "Vault breach correlation (site_domain) for Adobe (alice@example.com) "
+            "[domain: adobe.com]: Adobe."
+        )
+        assert (
+            results[1]["message"]["text"]
+            == "Vault breach correlation (account_breach) for Email (alice@example.com): "
+            "Adobe, Dropbox."
+        )
+        assert (
+            results[2]["message"]["text"]
+            == "Vault breach correlation (stealer_log) for Portal (bob@example.com): evil.example."
+        )
+
+        empty_summary = AuditSummary(
+            total_entries=1,
+            unique_passwords=1,
+            compromised_entries=0,
+            findings=[],
+            breach_correlated_entries=0,
+            breach_findings=[],
+        )
+        empty_doc = self._assert_valid_sarif_envelope(format_output(empty_summary, fmt="sarif"))
+        assert empty_doc["runs"][0]["results"] == []
+
     def test_sarif_search_result_full(self) -> None:
         sr = SearchResult(
             breaches=[Breach(Name="Adobe", Domain="adobe.com", PwnCount=152445165)],
@@ -634,6 +709,151 @@ class TestFormatMarkdown:
         assert "## Vault Audit Summary" in minimal_out
         assert "| Total Entries | 1 |" in minimal_out
         assert "Unique Passwords" not in minimal_out
+
+    def test_markdown_audit_summary_with_breach_correlation(self) -> None:
+        summary = AuditSummary(
+            total_entries=4,
+            unique_passwords=4,
+            compromised_entries=0,
+            findings=[],
+            breach_correlated_entries=2,
+            breach_findings=[
+                BreachCorrelationFinding(
+                    name="Adobe|Prod",
+                    username="alice@example.com",
+                    source="site_domain",
+                    domain="adobe.com",
+                    breaches=["Adobe"],
+                ),
+                BreachCorrelationFinding(
+                    name="Mail",
+                    username="bob@example.com",
+                    source="account_breach",
+                    domain="",
+                    breaches=["Adobe", "Dropbox"],
+                ),
+            ],
+        )
+        out = format_output(summary, fmt="markdown")
+        assert "| Breach Correlated Entries | 2 |" in out
+        assert "### Breach & Stealer-Log Correlation" in out
+        assert "| Name | Username | Source | Domain | Breaches |" in out
+        assert "| Adobe\\|Prod | alice@example.com | site_domain | adobe.com | Adobe |" in out
+        assert "| Mail | bob@example.com | account_breach |  | Adobe, Dropbox |" in out
+
+        # Fallback count when breach_correlated_entries is omitted in raw dict
+        raw_out = format_output(
+            {
+                "total_entries": 2,
+                "findings": [],
+                "breach_findings": [
+                    {
+                        "name": "Portal",
+                        "username": "carol@example.com",
+                        "source": "stealer_log",
+                        "domain": "",
+                        "breaches": ["evil.example"],
+                    }
+                ],
+            },
+            fmt="markdown",
+        )
+        assert "| Breach Correlated Entries | 1 |" in raw_out
+        assert "### Breach & Stealer-Log Correlation" in raw_out
+
+        # Empty breach_findings list displays 0 in summary and omits detail section
+        clean_out = format_output(
+            AuditSummary(
+                total_entries=2,
+                unique_passwords=2,
+                compromised_entries=0,
+                findings=[],
+                breach_correlated_entries=0,
+                breach_findings=[],
+            ),
+            fmt="markdown",
+        )
+        assert "| Breach Correlated Entries | 0 |" in clean_out
+        assert "### Breach & Stealer-Log Correlation" not in clean_out
+
+    def test_markdown_domain_report_with_history_summary(self) -> None:
+        report = DomainReport(
+            domain="example.com",
+            total_exposed_aliases=2,
+            total_exposures=2,
+            unique_breaches=1,
+            top_breaches=[],
+            data_classes=[],
+        )
+        history = HistoryTrendSummary(
+            total_runs=5,
+            active_exposures=3,
+            new_in_latest_run=1,
+            resolved_in_latest_run=2,
+            total_resolved=7,
+            remediation_rate=70.0,
+        )
+        payload = serialize(report)
+        payload["history_summary"] = serialize(history)
+        out = format_output(payload, fmt="markdown")
+        assert "### Exposure History & Remediation" in out
+        assert "| Total Runs | 5 |" in out
+        assert "| Active Exposures | 3 |" in out
+        assert "| New In Latest Run | 1 |" in out
+        assert "| Resolved In Latest Run | 2 |" in out
+        assert "| Total Resolved | 7 |" in out
+        assert "| Remediation Rate (%) | 70.0 |" in out
+
+        # Partial history summary omits missing keys
+        partial_payload = serialize(report)
+        partial_payload["history_summary"] = {"total_runs": 2}
+        partial_out = format_output(partial_payload, fmt="markdown")
+        assert "### Exposure History & Remediation" in partial_out
+        assert "| Total Runs | 2 |" in partial_out
+        assert "Remediation Rate (%)" not in partial_out
+
+        # Empty history summary dict omits section entirely
+        empty_payload = serialize(report)
+        empty_payload["history_summary"] = {}
+        empty_out = format_output(empty_payload, fmt="markdown")
+        assert "### Exposure History & Remediation" not in empty_out
+
+    def test_markdown_monitor_report_with_history_summary(self) -> None:
+        history = HistoryTrendSummary(
+            total_runs=4,
+            active_exposures=2,
+            new_in_latest_run=1,
+            resolved_in_latest_run=1,
+            total_resolved=3,
+            remediation_rate=60.0,
+        )
+        report = MonitorReport(
+            accounts_checked=1,
+            domains_checked=1,
+            new_exposures=1,
+            resolved_exposures=1,
+            accounts=[MonitorAccountResult(email="alice@example.com", status="pwned")],
+            domains=[MonitorDomainResult(domain="example.com", status="clean")],
+            history_summary=history,
+        )
+        out = format_output(report, fmt="markdown")
+        assert "## Monitor Report" in out
+        assert "### Exposure History & Remediation" in out
+        assert "| Total Runs | 4 |" in out
+        assert "| Active Exposures | 2 |" in out
+        assert "| New In Latest Run | 1 |" in out
+        assert "| Resolved In Latest Run | 1 |" in out
+        assert "| Total Resolved | 3 |" in out
+        assert "| Remediation Rate (%) | 60.0 |" in out
+        assert "history_summary" not in out
+
+        no_history_report = MonitorReport(
+            accounts_checked=1,
+            domains_checked=0,
+            new_exposures=0,
+        )
+        no_history_out = format_output(no_history_report, fmt="markdown")
+        assert "### Exposure History & Remediation" not in no_history_out
 
     def test_markdown_domain_report_full(self) -> None:
         report = DomainReport(
@@ -973,6 +1193,73 @@ class TestFormatHtml:
         assert "<h1>Monitor Report</h1>" in mon_out
         assert "<h2>Accounts</h2>" in mon_out
         assert "<h2>Domains</h2>" in mon_out
+
+    def test_html_breach_correlation_and_history_summary(self) -> None:
+        xss = '<script>alert("xss")</script>'
+        summary = AuditSummary(
+            total_entries=2,
+            unique_passwords=2,
+            compromised_entries=0,
+            findings=[],
+            breach_correlated_entries=1,
+            breach_findings=[
+                BreachCorrelationFinding(
+                    name=f"Site {xss}",
+                    username="alice@example.com",
+                    source="site_domain",
+                    domain="adobe.com",
+                    breaches=["Adobe", xss],
+                )
+            ],
+        )
+        audit_out = format_output(summary, fmt="html")
+        self._assert_html_envelope(audit_out)
+        assert "<td>Breach Correlated Entries</td><td>1</td>" in audit_out
+        assert "<h2>Breach &amp; Stealer-Log Correlation</h2>" in audit_out
+        assert (
+            "<th>Name</th><th>Username</th><th>Source</th><th>Domain</th><th>Breaches</th>"
+            in audit_out
+        )
+        assert "<script>" not in audit_out
+        assert "&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;" in audit_out
+
+        history = HistoryTrendSummary(
+            total_runs=5,
+            active_exposures=3,
+            new_in_latest_run=1,
+            resolved_in_latest_run=2,
+            total_resolved=7,
+            remediation_rate=70.0,
+        )
+        domain_payload = serialize(
+            DomainReport(
+                domain="example.com",
+                total_exposed_aliases=3,
+                total_exposures=4,
+                unique_breaches=1,
+                top_breaches=[],
+                data_classes=[],
+            )
+        )
+        domain_payload["history_summary"] = serialize(history)
+        domain_out = format_output(domain_payload, fmt="html")
+        self._assert_html_envelope(domain_out)
+        assert "<h2>Exposure History &amp; Remediation</h2>" in domain_out
+        assert "<td>Total Runs</td><td>5</td>" in domain_out
+        assert "<td>Remediation Rate (%)</td><td>70.0</td>" in domain_out
+
+        monitor_report = MonitorReport(
+            accounts_checked=1,
+            domains_checked=1,
+            new_exposures=1,
+            resolved_exposures=2,
+            history_summary=history,
+        )
+        mon_out = format_output(monitor_report, fmt="html")
+        self._assert_html_envelope(mon_out)
+        assert "<h2>Exposure History &amp; Remediation</h2>" in mon_out
+        assert "<td>Active Exposures</td><td>3</td>" in mon_out
+        assert "<td>Total Resolved</td><td>7</td>" in mon_out
 
     def test_html_generic_shapes(self) -> None:
         list_out = format_output(["Email addresses", "Passwords"], fmt="html")

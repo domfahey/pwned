@@ -50,6 +50,54 @@ Key behaviors:
 - **Smart `latestBreach` pre-check:** Enable `smart_precheck = true` in `[monitor]` (or pass `--smart-precheck`) with `baseline_dir` configured to poll unauthenticated `GET /latestBreach` first and skip `GET /breachedDomain/{domain}` queries for already-baselined domains when no new breach has been published (stealer log checks and newly added domains still run).
 - **Zero alert fatigue:** Webhooks fire **only** when `new_exposures > 0`.
 
+## SQLite Exposure History & Remediation Tracking (`--db`)
+
+Persist exposure lifecycles across monitoring runs in a zero-dependency stdlib SQLite database (WAL mode) to track newly discovered breaches, active exposures, and remediation rates over time.
+
+Configure `db` in `[monitor]` of `pwned.toml` (relative paths resolve against the config file directory) or override it on the command line with `--db`:
+
+```toml
+[monitor]
+baseline_dir = ".pwned-baselines"
+db = "history.sqlite3"
+smart_precheck = true
+```
+
+```bash
+pwned monitor --config pwned.toml --db history.sqlite3 --save-baselines
+```
+
+How remediation tracking works:
+- **Lifecycle timestamps:** Each observed exposure (`breach`, `paste`, `stealer_log`, `alias_breach`, `alias_stealer_log`) records UTC `first_seen_at`, `last_seen_at`, `times_seen`, and `resolved_at`.
+- **Remediation rate:** When a previously active exposure is absent on a subsequent check of the same target, `resolved_at` is stamped and counted toward `resolved_exposures` and `remediation_rate` (`total_resolved / (active_exposures + total_resolved) * 100`). If the exposure reappears in a later run, `resolved_at` is cleared and it is tracked as active again.
+- **No false resolutions:** Targets that fail with an API/network error (`status == "error"`) and domains skipped by `--smart-precheck` are excluded from `checked_targets`, so transient failures or pre-check skips never falsely resolve active exposures.
+
+Feed per-domain history trends directly into `pwned domain-report` (`--history-db`) for Markdown, HTML, and JSON compliance reporting:
+
+```bash
+pwned domain-report example.com --history-db history.sqlite3 --format markdown
+pwned domain-report example.com --history-db history.sqlite3 --format html > domain-report.html
+```
+
+Programmatic usage with `ExposureHistoryStore`:
+
+```python
+from pathlib import Path
+from pwned import ExposureHistoryStore
+
+with ExposureHistoryStore(Path("history.sqlite3")) as store:
+    sync = store.record_snapshot(
+        checked_targets=[("domain", "example.com")],
+        observed_exposures=[
+            ("domain", "example.com", "alias_breach", "alice:Adobe"),
+        ],
+        domains_checked=1,
+    )
+    trend = store.get_trend_summary(target_type="domain", target="example.com")
+    active = store.list_exposures(target_type="domain", target="example.com")
+    print(sync.run_id, trend.remediation_rate, len(active))
+```
+
 ## Ad-Hoc Baseline Diffing
 
 `account`, `domain`, and `search` also support standalone baseline files:
@@ -81,7 +129,7 @@ Supported on `account`, `domain`, `domain-report`, `search`, `audit`, and `monit
 |---|---|
 | `markdown` | GitHub Actions `$GITHUB_STEP_SUMMARY`, pull request comments, security tickets (includes CC BY 4.0 HIBP attribution footer on breach, paste, domain, audit, and monitor reports) |
 | `html` | Standalone zero-dependency HTML5 compliance reports (responsive light/dark CSS, strict `html.escape()` XSS defense, CC BY 4.0 attribution) |
-| `sarif` | GitHub Code Scanning / Security tab (`HIBP001`–`HIBP004`, SARIF 2.1.0) |
+| `sarif` | GitHub Code Scanning / Security tab (`HIBP001`–`HIBP007`, SARIF 2.1.0) |
 | `json` / `jsonl` | Downstream automation, SIEM ingestion, `jq` pipelines |
 | `csv` / `table` | Spreadsheets and interactive terminal inspection |
 

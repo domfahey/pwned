@@ -11,7 +11,8 @@ import pytest
 from pydantic import ValidationError
 
 from pwned.client import HIBPClient, HIBPError, NotFoundError
-from pwned.formatting import format_output
+from pwned.formatting import format_output, serialize
+from pwned.history import ExposureHistoryStore
 from pwned.models import Breach, Paste, SearchResult
 from pwned.monitor import (
     MonitorAccountResult,
@@ -818,3 +819,362 @@ def test_run_monitor_with_real_hibp_client_type(httpx_mock: Any) -> None:
     assert report.accounts_checked == 1
     assert report.new_exposures == 0
     assert report.accounts[0].status == "clean"
+
+
+def test_load_monitor_config_db_path_options_and_validation(tmp_path: Path) -> None:
+    assert MonitorConfig().db_path is None
+
+    # Canonical TOML key `monitor.db` (relative path resolved against TOML parent)
+    rel_toml = tmp_path / "rel.toml"
+    rel_toml.write_text(
+        """
+[monitor]
+db = "state/history.db"
+
+[[accounts]]
+email = "alice@example.com"
+""".strip(),
+        encoding="utf-8",
+    )
+    rel_cfg = load_monitor_config(rel_toml)
+    assert rel_cfg.db_path == tmp_path / "state/history.db"
+
+    # Absolute `monitor.db`
+    abs_db = tmp_path / "abs" / "history.db"
+    abs_toml = tmp_path / "abs.toml"
+    abs_toml.write_text(
+        f"""
+[monitor]
+db = "{abs_db.as_posix()}"
+
+[[domains]]
+domain = "example.com"
+""".strip(),
+        encoding="utf-8",
+    )
+    abs_cfg = load_monitor_config(abs_toml)
+    assert abs_cfg.db_path == abs_db
+
+    # Alternate TOML key `monitor.db_path`
+    alt_toml = tmp_path / "alt.toml"
+    alt_toml.write_text(
+        """
+[monitor]
+db_path = "alt_history.db"
+
+[[accounts]]
+email = "alice@example.com"
+""".strip(),
+        encoding="utf-8",
+    )
+    alt_cfg = load_monitor_config(alt_toml)
+    assert alt_cfg.db_path == tmp_path / "alt_history.db"
+
+    # Non-string `monitor.db` or `monitor.db_path` raises ValueError
+    bad_db_toml = tmp_path / "bad_db.toml"
+    bad_db_toml.write_text(
+        "[monitor]\ndb = 123\n\n[[accounts]]\nemail = 'alice@example.com'\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"monitor\.db must be a string path\."):
+        load_monitor_config(bad_db_toml)
+
+    bad_db_path_toml = tmp_path / "bad_db_path.toml"
+    bad_db_path_toml.write_text(
+        "[monitor]\ndb_path = 456\n\n[[accounts]]\nemail = 'alice@example.com'\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"monitor\.db must be a string path\."):
+        load_monitor_config(bad_db_path_toml)
+
+
+def test_run_monitor_without_db_preserves_exclude_unset_contract() -> None:
+    cfg = MonitorConfig(accounts=[MonitorAccountTarget(email="alice@example.com")])
+    stub = _StubHIBPClient(accounts={"alice@example.com": SearchResult()})
+
+    report = run_monitor(cfg, stub)  # type: ignore[arg-type]
+    assert report.resolved_exposures == 0
+    assert report.history_summary is None
+
+    dumped = report.model_dump(exclude_unset=True)
+    assert "resolved_exposures" not in dumped
+    assert "history_summary" not in dumped
+
+    serialized = serialize(report)
+    assert "resolved_exposures" not in serialized
+    assert "history_summary" not in serialized
+
+
+def test_run_monitor_history_tracking_with_baselines_errors_and_precheck(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    baseline_dir = tmp_path / "baselines"
+    db_path = tmp_path / "history.db"
+    override_db = tmp_path / "override.db"
+
+    cfg = MonitorConfig(
+        baseline_dir=baseline_dir,
+        db_path=db_path,
+        smart_precheck=True,
+        accounts=[MonitorAccountTarget(email="Alice@Example.com", include_stealer_logs=True)],
+        domains=[
+            MonitorDomainTarget(domain="Example.COM", include_stealer_logs=False),
+            MonitorDomainTarget(domain="stealer.example", include_stealer_logs=True),
+        ],
+    )
+
+    latest_v1 = Breach(Name="BreachV1", AddedDate=datetime(2026, 1, 1, tzinfo=UTC))
+
+    # Run 1: initial exposures across all 5 categories
+    stub1 = _StubHIBPClient(
+        accounts={
+            "Alice@Example.com": SearchResult(
+                breaches=[Breach(Name="Adobe")],
+                pastes=[Paste(Source="Pastebin", Id="p1")],
+                stealer_logs=["log.site"],
+            )
+        },
+        domain_breaches={
+            "Example.COM": {"bob": ["LinkedIn"]},
+            "stealer.example": {"carol": ["Canva"]},
+        },
+        domain_stealer_logs={
+            "stealer.example": {"carol": ["stealer1.test"]},
+        },
+        latest_breach=latest_v1,
+    )
+    report1 = run_monitor(cfg, stub1, save_baselines=True)  # type: ignore[arg-type]
+    assert report1.new_exposures == 6
+    assert report1.resolved_exposures == 0
+    assert report1.history_summary is not None
+    assert report1.history_summary.total_runs == 1
+    assert report1.history_summary.active_exposures == 6
+    assert report1.history_summary.new_in_latest_run == 6
+    assert report1.history_summary.resolved_in_latest_run == 0
+    assert report1.history_summary.remediation_rate == 0.0
+
+    dumped1 = report1.model_dump(exclude_unset=True)
+    assert dumped1["resolved_exposures"] == 0
+    assert "history_summary" in dumped1
+
+    # Verify formatting works cleanly with history_summary set
+    assert "resolved_exposures" in format_output(report1, fmt="json")
+    assert "## Monitor Report" in format_output(report1, fmt="markdown")
+    assert "<h1>Monitor Report</h1>" in format_output(report1, fmt="html")
+    assert "history_summary:" in format_output(report1, fmt="text")
+
+    # Run 2: SAME exposures with baseline_dir + smart_precheck!
+    # Baseline diff says 0 new account exposures, and smart_precheck skips domain breach calls,
+    # while stealer.example observes a NEW stealer log (`stealer2.test`).
+    # NONE of the previously-known exposures may be falsely marked resolved!
+    stub2 = _StubHIBPClient(
+        accounts={
+            "Alice@Example.com": SearchResult(
+                breaches=[Breach(Name="Adobe")],
+                pastes=[Paste(Source="Pastebin", Id="p1")],
+                stealer_logs=["log.site"],
+            )
+        },
+        domain_breaches={},
+        domain_stealer_logs={
+            "stealer.example": {"carol": ["stealer1.test", "stealer2.test"]},
+        },
+        latest_breach=latest_v1,
+    )
+    report2 = run_monitor(cfg, stub2, save_baselines=True)  # type: ignore[arg-type]
+    assert report2.domains_skipped == 2
+    assert report2.new_exposures == 1  # only stealer2.test
+    assert report2.resolved_exposures == 0
+    assert report2.history_summary is not None
+    assert report2.history_summary.total_runs == 2
+    assert report2.history_summary.active_exposures == 7
+    assert report2.history_summary.new_in_latest_run == 1
+    assert report2.history_summary.resolved_in_latest_run == 0
+
+    with ExposureHistoryStore(db_path) as store:
+        alice_records = store.list_exposures(target_type="account", target="alice@example.com")
+        assert len(alice_records) == 3
+        assert all(rec.times_seen == 2 and rec.resolved_at is None for rec in alice_records)
+
+    # Run 3: transient API errors on account and non-skipped domains MUST NOT resolve active rows
+    latest_v2 = Breach(Name="BreachV2", AddedDate=datetime(2026, 2, 1, tzinfo=UTC))
+    stub3 = _StubHIBPClient(
+        accounts={"Alice@Example.com": HIBPError("API 503")},
+        domain_breaches={
+            "Example.COM": HIBPError("Domain 503"),
+            "stealer.example": {"carol": ["Canva"]},
+        },
+        domain_stealer_logs={
+            "stealer.example": HIBPError("Stealer 503"),
+        },
+        latest_breach=latest_v2,
+    )
+    report3 = run_monitor(cfg, stub3, save_baselines=False)  # type: ignore[arg-type]
+    assert report3.accounts[0].status == "error"
+    assert report3.domains[0].status == "error"
+    assert report3.domains[1].status == "error"
+    assert report3.resolved_exposures == 0
+    assert report3.history_summary is not None
+    assert report3.history_summary.active_exposures == 7
+    assert report3.history_summary.total_resolved == 0
+
+    # Run 4: genuine remediation (account paste & stealer_log gone; Example.COM clean)
+    stub4 = _StubHIBPClient(
+        accounts={
+            "Alice@Example.com": SearchResult(
+                breaches=[Breach(Name="Adobe")],
+                pastes=[],
+                stealer_logs=[],
+            )
+        },
+        domain_breaches={
+            "Example.COM": {},
+            "stealer.example": {"carol": ["Canva"]},
+        },
+        domain_stealer_logs={
+            "stealer.example": {"carol": ["stealer1.test", "stealer2.test"]},
+        },
+        latest_breach=latest_v2,
+    )
+    report4 = run_monitor(cfg, stub4, save_baselines=True)  # type: ignore[arg-type]
+    assert report4.resolved_exposures == 3  # paste p1, log.site, bob:LinkedIn
+    assert report4.history_summary is not None
+    assert report4.history_summary.active_exposures == 4
+    assert report4.history_summary.total_resolved == 3
+    assert report4.history_summary.resolved_in_latest_run == 3
+    assert report4.history_summary.remediation_rate == 42.9
+
+    # Verify db_path_override takes precedence over config.db_path
+    stub_override = _StubHIBPClient(
+        accounts={"Alice@Example.com": SearchResult(breaches=[Breach(Name="Adobe")])},
+        domain_breaches={"Example.COM": {}, "stealer.example": {}},
+        domain_stealer_logs={"stealer.example": {}},
+        latest_breach=latest_v2,
+    )
+    report_override = run_monitor(
+        cfg,
+        stub_override,  # type: ignore[arg-type]
+        db_path_override=override_db,
+    )
+    assert override_db.is_file()
+    assert report_override.history_summary is not None
+    assert report_override.history_summary.total_runs == 1
+    assert report_override.history_summary.active_exposures == 1
+
+    # Run 5 on original db: previously resolved paste reappears!
+    stub5 = _StubHIBPClient(
+        accounts={
+            "Alice@Example.com": SearchResult(
+                breaches=[Breach(Name="Adobe")],
+                pastes=[Paste(Source="Pastebin", Id="p1")],
+                stealer_logs=[],
+            )
+        },
+        domain_breaches={
+            "Example.COM": {},
+            "stealer.example": {"carol": ["Canva"]},
+        },
+        domain_stealer_logs={
+            "stealer.example": {"carol": ["stealer1.test", "stealer2.test"]},
+        },
+        latest_breach=latest_v2,
+    )
+    report5 = run_monitor(cfg, stub5, save_baselines=True)  # type: ignore[arg-type]
+    assert report5.resolved_exposures == 0
+    assert report5.history_summary is not None
+    assert report5.history_summary.active_exposures == 5
+    assert report5.history_summary.total_resolved == 2
+    assert report5.history_summary.new_in_latest_run == 1
+    with ExposureHistoryStore(db_path) as store:
+        paste_rec = next(
+            rec
+            for rec in store.list_exposures(target_type="account", target="alice@example.com")
+            if rec.category == "paste"
+        )
+        assert paste_rec.resolved_at is None
+        assert paste_rec.times_seen == 3
+
+
+def test_run_monitor_history_reconciliation_respects_queried_scope(tmp_path: Path) -> None:
+    from datetime import UTC, date, datetime
+
+    baseline_dir = tmp_path / "baselines"
+    db_path = tmp_path / "scoped_history.db"
+    latest_v1 = Breach(Name="BreachV1", AddedDate=datetime(2026, 1, 1, tzinfo=UTC))
+
+    # Run 1: full unfiltered monitoring with stealer logs enabled for both account & domain
+    cfg_full = MonitorConfig(
+        baseline_dir=baseline_dir,
+        db_path=db_path,
+        smart_precheck=True,
+        accounts=[MonitorAccountTarget(email="alice@example.com", include_stealer_logs=True)],
+        domains=[MonitorDomainTarget(domain="example.com", include_stealer_logs=True)],
+    )
+    stub1 = _StubHIBPClient(
+        accounts={
+            "alice@example.com": SearchResult(
+                breaches=[Breach(Name="Adobe")],
+                pastes=[Paste(Source="Pastebin", Id="p1")],
+                stealer_logs=["evil.test"],
+            )
+        },
+        domain_breaches={"example.com": {"bob": ["LinkedIn"]}},
+        domain_stealer_logs={"example.com": {"bob": ["stealer1.test"]}},
+        latest_breach=latest_v1,
+    )
+    report1 = run_monitor(cfg_full, stub1, save_baselines=True)  # type: ignore[arg-type]
+    assert report1.history_summary is not None
+    assert report1.history_summary.active_exposures == 5
+
+    # Run 2: disable stealer logs AND add a breach filter (since=...) on the account.
+    # Neither unqueried stealer logs nor filtered-out breaches may be falsely marked resolved!
+    cfg_narrow = MonitorConfig(
+        baseline_dir=baseline_dir,
+        db_path=db_path,
+        smart_precheck=False,
+        accounts=[
+            MonitorAccountTarget(
+                email="alice@example.com",
+                include_stealer_logs=False,
+                since="2025-01-01",
+            )
+        ],
+        domains=[MonitorDomainTarget(domain="example.com", include_stealer_logs=False)],
+    )
+    stub2 = _StubHIBPClient(
+        accounts={
+            "alice@example.com": SearchResult(
+                breaches=[Breach(Name="Adobe", BreachDate=date(2013, 10, 4))],
+                pastes=[Paste(Source="Pastebin", Id="p1")],
+            )
+        },
+        domain_breaches={"example.com": {"bob": ["LinkedIn"]}},
+        latest_breach=latest_v1,
+    )
+    report2 = run_monitor(cfg_narrow, stub2, save_baselines=False)  # type: ignore[arg-type]
+    assert report2.resolved_exposures == 0
+    assert report2.history_summary is not None
+    assert report2.history_summary.active_exposures == 5
+
+    # Run 3: smart_precheck skips domain breaches while stealer logs ARE queried and cleared.
+    # alias_stealer_log resolves cleanly while alias_breach stays active!
+    stub3 = _StubHIBPClient(
+        accounts={
+            "alice@example.com": SearchResult(
+                breaches=[Breach(Name="Adobe")],
+                pastes=[Paste(Source="Pastebin", Id="p1")],
+                stealer_logs=["evil.test"],
+            )
+        },
+        domain_breaches={},
+        domain_stealer_logs={"example.com": {}},
+        latest_breach=latest_v1,
+    )
+    report3 = run_monitor(cfg_full, stub3, save_baselines=False)  # type: ignore[arg-type]
+    assert report3.domains_skipped == 1
+    assert report3.resolved_exposures == 1
+    with ExposureHistoryStore(db_path) as store:
+        dom_active = store.list_exposures(target_type="domain", target="example.com")
+        assert [(r.category, r.identifier) for r in dom_active] == [
+            ("alias_breach", "bob:LinkedIn")
+        ]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from pwned.cache import ResponseCache
 from pwned.cli_commands import register_extra_commands
 from pwned.client import HIBPError
 from pwned.config import get_config_file, load_settings, save_api_key
+from pwned.history import ExposureHistoryStore
 from pwned.offline_download import DownloadStats
 from pwned.passwords import _ntlm_hash
 
@@ -2211,6 +2213,278 @@ class TestAuditCommand:
         assert res_mismatch.exit_code == 2
         assert "NTLM hashes" in res_mismatch.output
 
+    def test_audit_nonexistent_path_for_file_and_store_sources_raises_usage_error(
+        self, isolated_env: Path, cli_runner: CliRunner
+    ) -> None:
+        missing = isolated_env / "does_not_exist"
+        app = _make_cli()
+
+        res_file = cli_runner.invoke(app, ["audit", str(missing), "--source", "csv"])
+        assert res_file.exit_code == 2
+        assert f"Path '{missing}' does not exist." in res_file.output
+
+        for source in ("pass", "gopass"):
+            res_store = cli_runner.invoke(app, ["audit", str(missing), "--source", source])
+            assert res_store.exit_code == 2
+            assert f"Path '{missing}' does not exist." in res_store.output
+
+    @pytest.mark.parametrize("source", ["bitwarden-cli", "1password-cli"])
+    def test_audit_cli_vault_sources_optional_and_nonexistent_filter_path(
+        self,
+        isolated_env: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        httpx_mock: HTTPXMock,
+        cli_runner: CliRunner,
+        source: str,
+    ) -> None:
+        calls: list[tuple[Path | None, str]] = []
+
+        def fake_load_export(
+            path: Path | None,
+            *,
+            source: str,
+            master_password: str | None = None,
+            exclude_machines: bool = False,
+        ) -> list[AuditEntry]:
+            calls.append((path, source))
+            return [AuditEntry(name="VaultLogin", username="u@example.com", password="pw1")]
+
+        monkeypatch.setattr("pwned.cli_commands.load_export", fake_load_export)
+        prefix, suffix = _sha1_parts("pw1")
+        httpx_mock.add_response(url=f"{PASSWORDS_BASE}/range/{prefix}", text=f"{suffix}:3\n")
+        httpx_mock.add_response(url=f"{PASSWORDS_BASE}/range/{prefix}", text=f"{suffix}:3\n")
+
+        app = _make_cli()
+        res_no_path = cli_runner.invoke(app, ["--json", "audit", "--source", source])
+        assert res_no_path.exit_code == 0
+        assert json.loads(res_no_path.output)["compromised_entries"] == 1
+
+        # Filter name does NOT exist on disk and must still be forwarded to load_export
+        res_filter = cli_runner.invoke(app, ["--json", "audit", "Work Vault", "--source", source])
+        assert res_filter.exit_code == 0
+        assert json.loads(res_filter.output)["compromised_entries"] == 1
+        assert calls == [(None, source), (Path("Work Vault"), source)]
+
+    def test_audit_include_stealer_logs_validation_and_missing_api_key(
+        self, isolated_env: Path, cli_runner: CliRunner
+    ) -> None:
+        export_file = isolated_env / "vault.csv"
+        export_file.write_text("name,username,password\nSite,u@x.com,safe!pw99\n", encoding="utf-8")
+        app = _make_cli()
+
+        res_flag = cli_runner.invoke(
+            app, ["audit", str(export_file), "--source", "csv", "--include-stealer-logs"]
+        )
+        assert res_flag.exit_code == 2
+        assert "--include-stealer-logs requires --check-breaches." in res_flag.output
+
+        res_no_key = cli_runner.invoke(
+            app,
+            [
+                "audit",
+                str(export_file),
+                "--source",
+                "csv",
+                "--check-breaches",
+                "--include-stealer-logs",
+            ],
+        )
+        assert res_no_key.exit_code == 3
+        assert "Invalid or missing API key" in res_no_key.output
+
+    def test_audit_check_breaches_online_without_api_key_site_domain_only(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        export_file = isolated_env / "sites.csv"
+        export_file.write_text(
+            "name,url,username,password\nAdobeAcct,https://www.adobe.com/login,alice@example.com,UniqueSafe99!\n",
+            encoding="utf-8",
+        )
+        prefix, _ = _sha1_parts("UniqueSafe99!")
+        httpx_mock.add_response(url=f"{PASSWORDS_BASE}/range/{prefix}", text="")
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            json=[{"Name": "Adobe", "Title": "Adobe", "Domain": "adobe.com"}],
+        )
+
+        app = _make_cli()
+        result = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "audit",
+                str(export_file),
+                "--source",
+                "csv",
+                "--check-breaches",
+                "--fail-if-pwned",
+            ],
+        )
+        assert result.exit_code == 8
+        data = json.loads(result.output)
+        assert data["compromised_entries"] == 0
+        assert data["breach_correlated_entries"] == 1
+        assert data["breach_findings"] == [
+            {
+                "name": "AdobeAcct",
+                "username": "alice@example.com",
+                "source": "site_domain",
+                "domain": "adobe.com",
+                "breaches": ["Adobe"],
+            }
+        ]
+        assert "UniqueSafe99!" not in result.output
+        hibp_reqs = [r for r in httpx_mock.get_requests() if str(r.url).startswith(BASE)]
+        assert len(hibp_reqs) == 1
+        assert "hibp-api-key" not in hibp_reqs[0].headers
+
+    def test_audit_check_breaches_online_with_api_key_and_stealer_logs(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        export_file = isolated_env / "sites.csv"
+        export_file.write_text(
+            "name,url,username,password\nAdobeAcct,https://adobe.com,alice@example.com,UniqueSafe99!\n",
+            encoding="utf-8",
+        )
+        prefix, _ = _sha1_parts("UniqueSafe99!")
+        httpx_mock.add_response(url=f"{PASSWORDS_BASE}/range/{prefix}", text="")
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            json=[{"Name": "Adobe", "Title": "Adobe", "Domain": "adobe.com"}],
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/alice%40example.com",
+            json=[{"Name": "LinkedIn"}],
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/stealerlogsbyemail/alice%40example.com",
+            json=["evil.example"],
+        )
+
+        app = _make_cli()
+        result = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "--cache",
+                "--json",
+                "audit",
+                str(export_file),
+                "--source",
+                "csv",
+                "--check-breaches",
+                "--include-stealer-logs",
+                "--fail-if-pwned",
+            ],
+        )
+        assert result.exit_code == 8
+        data = json.loads(result.output)
+        assert data["compromised_entries"] == 0
+        assert data["breach_correlated_entries"] == 1
+        assert {f["source"] for f in data["breach_findings"]} == {
+            "site_domain",
+            "account_breach",
+            "stealer_log",
+        }
+        assert "UniqueSafe99!" not in result.output
+
+    def test_audit_check_breaches_offline_with_and_without_stealer_logs(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        export_file = isolated_env / "sites.csv"
+        export_file.write_text(
+            "name,url,username,password\nAdobeAcct,https://adobe.com,alice@example.com,UniqueSafe99!\n",
+            encoding="utf-8",
+        )
+        sha1_db = isolated_env / "sha1.txt"
+        sha1_db.write_text(f"{'0' * 40}:1\n", encoding="utf-8")
+
+        # 1) Offline + --check-breaches without API key -> domain correlation only
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            json=[{"Name": "Adobe", "Title": "Adobe", "Domain": "adobe.com"}],
+        )
+        app = _make_cli()
+        res_domain = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "audit",
+                str(export_file),
+                "--source",
+                "csv",
+                "--offline-db",
+                str(sha1_db),
+                "--check-breaches",
+                "--fail-if-pwned",
+            ],
+        )
+        assert res_domain.exit_code == 8
+        data_domain = json.loads(res_domain.output)
+        assert data_domain["compromised_entries"] == 0
+        assert data_domain["breach_correlated_entries"] == 1
+        assert len(data_domain["breach_findings"]) == 1
+        assert data_domain["breach_findings"][0]["source"] == "site_domain"
+
+        # 2) Offline + --check-breaches + --include-stealer-logs with API key
+        httpx_mock.add_response(
+            url=f"{BASE}/breaches",
+            json=[{"Name": "Adobe", "Title": "Adobe", "Domain": "adobe.com"}],
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/alice%40example.com",
+            json=[{"Name": "LinkedIn"}],
+        )
+        httpx_mock.add_response(
+            url=f"{BASE}/stealerlogsbyemail/alice%40example.com",
+            json=["evil.example"],
+        )
+        res_full = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "--json",
+                "audit",
+                str(export_file),
+                "--source",
+                "csv",
+                "--offline-db",
+                str(sha1_db),
+                "--check-breaches",
+                "--include-stealer-logs",
+                "--fail-if-pwned",
+            ],
+        )
+        assert res_full.exit_code == 8
+        data_full = json.loads(res_full.output)
+        assert data_full["breach_correlated_entries"] == 1
+        assert {f["source"] for f in data_full["breach_findings"]} == {
+            "site_domain",
+            "account_breach",
+            "stealer_log",
+        }
+
+        # 3) Clean run with --check-breaches and --fail-if-pwned exits 0
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[])
+        res_clean = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "audit",
+                str(export_file),
+                "--source",
+                "csv",
+                "--offline-db",
+                str(sha1_db),
+                "--check-breaches",
+                "--fail-if-pwned",
+            ],
+        )
+        assert res_clean.exit_code == 0
+        assert json.loads(res_clean.output)["breach_correlated_entries"] == 0
+
 
 class TestCompletionCommand:
     @pytest.mark.parametrize("shell", ["bash", "zsh", "fish"])
@@ -2685,6 +2959,70 @@ class TestDomainReportCommand:
         )
         assert res_bad_hook.exit_code == 2
 
+    def test_domain_report_with_history_db(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        db_path = isolated_env / "history.db"
+        with ExposureHistoryStore(db_path) as store:
+            store.record_snapshot(
+                checked_targets=[("domain", "example.com")],
+                observed_exposures=[
+                    ("domain", "example.com", "alias_breach", "alice:Adobe"),
+                    ("domain", "example.com", "alias_breach", "bob:LinkedIn"),
+                ],
+                domains_checked=1,
+                timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+            store.record_snapshot(
+                checked_targets=[("domain", "example.com")],
+                observed_exposures=[
+                    ("domain", "example.com", "alias_breach", "alice:Adobe"),
+                ],
+                domains_checked=1,
+                timestamp=datetime(2026, 1, 2, tzinfo=UTC),
+            )
+
+        httpx_mock.add_response(
+            url=f"{BASE}/breacheddomain/example.com",
+            json={"alice": ["Adobe"]},
+        )
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[])
+        app = _make_cli()
+        res_with_db = cli_runner.invoke(
+            app,
+            [
+                "--api-key",
+                TEST_KEY,
+                "--json",
+                "domain-report",
+                "example.com",
+                "--history-db",
+                str(db_path),
+            ],
+        )
+        assert res_with_db.exit_code == 0
+        data_with_db = json.loads(res_with_db.output)
+        assert data_with_db["history_summary"] == {
+            "total_runs": 2,
+            "active_exposures": 1,
+            "new_in_latest_run": 0,
+            "resolved_in_latest_run": 1,
+            "total_resolved": 1,
+            "remediation_rate": 50.0,
+        }
+
+        httpx_mock.add_response(
+            url=f"{BASE}/breacheddomain/example.com",
+            json={"alice": ["Adobe"]},
+        )
+        httpx_mock.add_response(url=f"{BASE}/breaches", json=[])
+        res_without_db = cli_runner.invoke(
+            app,
+            ["--api-key", TEST_KEY, "--json", "domain-report", "example.com"],
+        )
+        assert res_without_db.exit_code == 0
+        assert "history_summary" not in json.loads(res_without_db.output)
+
 
 class TestMonitorCommand:
     def test_monitor_runs_config_and_renders_report(
@@ -2865,6 +3203,55 @@ class TestMonitorCommand:
         assert data2["domains_skipped"] == 1
         assert data2["new_exposures"] == 0
 
+    def test_monitor_db_cli_flag_tracks_history_and_remediation(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        cfg = isolated_env / "pwned.toml"
+        cfg.write_text('[[accounts]]\nemail = "user@example.com"\n', encoding="utf-8")
+        db_path = isolated_env / "history" / "monitor.db"
+
+        httpx_mock.add_response(
+            url=f"{BASE}/breachedaccount/user%40example.com",
+            json=[{"Name": "Adobe"}],
+        )
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/user%40example.com", status_code=404)
+
+        app = _make_cli()
+        res1 = cli_runner.invoke(
+            app,
+            ["--api-key", TEST_KEY, "--json", "monitor", "--db", str(db_path)],
+        )
+        assert res1.exit_code == 0
+        assert db_path.is_file()
+        data1 = json.loads(res1.output)
+        assert data1["resolved_exposures"] == 0
+        assert data1["history_summary"] == {
+            "total_runs": 1,
+            "active_exposures": 1,
+            "new_in_latest_run": 1,
+            "resolved_in_latest_run": 0,
+            "total_resolved": 0,
+            "remediation_rate": 0.0,
+        }
+
+        httpx_mock.add_response(url=f"{BASE}/breachedaccount/user%40example.com", status_code=404)
+        httpx_mock.add_response(url=f"{BASE}/pasteaccount/user%40example.com", status_code=404)
+        res2 = cli_runner.invoke(
+            app,
+            ["--api-key", TEST_KEY, "--json", "monitor", "--db", str(db_path)],
+        )
+        assert res2.exit_code == 0
+        data2 = json.loads(res2.output)
+        assert data2["resolved_exposures"] == 1
+        assert data2["history_summary"] == {
+            "total_runs": 2,
+            "active_exposures": 0,
+            "new_in_latest_run": 0,
+            "resolved_in_latest_run": 1,
+            "total_resolved": 1,
+            "remediation_rate": 100.0,
+        }
+
 
 class TestDoctorCommand:
     def test_doctor_no_network_and_offline_db(
@@ -2999,3 +3386,175 @@ class TestMcpCommand:
 
         res_bad = cli_runner.invoke(app, ["mcp", "--mode", "md5"])
         assert res_bad.exit_code == 2
+
+
+class _FakeRangeServer:
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        backend: str,
+        mode: str,
+        raise_keyboard_interrupt: bool = False,
+    ) -> None:
+        self.url = f"http://{host}:{port}"
+        self.backend = backend
+        self.mode = mode
+        self._raise_keyboard_interrupt = raise_keyboard_interrupt
+        self.entered = False
+        self.exited = False
+        self.served = False
+
+    def __enter__(self) -> _FakeRangeServer:
+        self.entered = True
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.exited = True
+
+    def serve_forever(self) -> None:
+        self.served = True
+        if self._raise_keyboard_interrupt:
+            raise KeyboardInterrupt
+
+
+class TestServeCommand:
+    def test_serve_defaults_and_keyboard_interrupt(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        captured: list[dict[str, Any]] = []
+        created: list[_FakeRangeServer] = []
+
+        def fake_create_range_server(**kwargs: Any) -> _FakeRangeServer:
+            captured.append(kwargs)
+            srv = _FakeRangeServer(
+                host=kwargs["host"],
+                port=kwargs["port"],
+                backend="proxy",
+                mode="auto",
+                raise_keyboard_interrupt=True,
+            )
+            created.append(srv)
+            return srv
+
+        monkeypatch.setattr("pwned.cli_commands.create_range_server", fake_create_range_server)
+        app = _make_cli()
+        result = cli_runner.invoke(app, ["serve"])
+        assert result.exit_code == 0
+        assert (
+            "Serving pwned range API (proxy, mode=auto) on http://127.0.0.1:8080" in result.stderr
+        )
+        assert captured == [
+            {
+                "host": "127.0.0.1",
+                "port": 8080,
+                "offline_db": None,
+                "ntlm": False,
+                "user_agent": "pwned-cli",
+                "cache": None,
+                "upstream_pad": True,
+                "enable_metrics": True,
+                "access_log": False,
+            }
+        ]
+        assert created[0].entered is True
+        assert created[0].served is True
+        assert created[0].exited is True
+
+    def test_serve_all_options_offline_db_ntlm_and_normal_exit(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        db_file = isolated_env / "ntlm.txt"
+        db_file.write_text(f"{_ntlm_hash('password')}:5\n", encoding="utf-8")
+
+        captured: list[dict[str, Any]] = []
+        created: list[_FakeRangeServer] = []
+
+        def fake_create_range_server(**kwargs: Any) -> _FakeRangeServer:
+            captured.append(kwargs)
+            srv = _FakeRangeServer(
+                host=kwargs["host"],
+                port=kwargs["port"],
+                backend="offline",
+                mode="ntlm" if kwargs["ntlm"] else "sha1",
+                raise_keyboard_interrupt=False,
+            )
+            created.append(srv)
+            return srv
+
+        monkeypatch.setattr("pwned.cli_commands.create_range_server", fake_create_range_server)
+        app = _make_cli()
+
+        res_mode = cli_runner.invoke(
+            app,
+            [
+                "--user-agent",
+                "srv-ua",
+                "--cache",
+                "serve",
+                "--host",
+                "localhost",
+                "--port",
+                "9090",
+                "--offline-db",
+                str(db_file),
+                "--mode",
+                "ntlm",
+                "--no-pad",
+                "--no-metrics",
+                "--access-log",
+            ],
+        )
+        assert res_mode.exit_code == 0
+        assert (
+            "Serving pwned range API (offline, mode=ntlm) on http://localhost:9090"
+            in res_mode.stderr
+        )
+        assert len(captured) == 1
+        assert captured[0]["host"] == "localhost"
+        assert captured[0]["port"] == 9090
+        assert captured[0]["offline_db"] == db_file
+        assert captured[0]["ntlm"] is True
+        assert captured[0]["user_agent"] == "srv-ua"
+        assert isinstance(captured[0]["cache"], ResponseCache)
+        assert captured[0]["upstream_pad"] is False
+        assert captured[0]["enable_metrics"] is False
+        assert captured[0]["access_log"] is True
+        assert created[0].entered is True
+        assert created[0].served is True
+        assert created[0].exited is True
+
+        res_short = cli_runner.invoke(
+            app,
+            ["serve", "--offline-db", str(db_file), "--mode", "sha1", "-n", "--port", "0"],
+        )
+        assert res_short.exit_code == 0
+        assert captured[1]["ntlm"] is True
+        assert captured[1]["port"] == 0
+
+    def test_serve_errors_value_error_os_error_and_invalid_options(
+        self, isolated_env: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: CliRunner
+    ) -> None:
+        def raise_value_error(**kwargs: Any) -> Any:
+            raise ValueError("Offline directory contains SHA1 hashes; requested NTLM mode")
+
+        monkeypatch.setattr("pwned.cli_commands.create_range_server", raise_value_error)
+        app = _make_cli()
+        res_val = cli_runner.invoke(app, ["serve"])
+        assert res_val.exit_code == 2
+        assert "SHA1 hashes" in res_val.output
+
+        def raise_os_error(**kwargs: Any) -> Any:
+            raise OSError("Address already in use")
+
+        monkeypatch.setattr("pwned.cli_commands.create_range_server", raise_os_error)
+        res_os = cli_runner.invoke(app, ["serve"])
+        assert res_os.exit_code == 7
+        assert "Address already in use" in res_os.output
+
+        res_port = cli_runner.invoke(app, ["serve", "--port", "70000"])
+        assert res_port.exit_code == 2
+
+        res_mode = cli_runner.invoke(app, ["serve", "--mode", "md5"])
+        assert res_mode.exit_code == 2

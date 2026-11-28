@@ -71,6 +71,17 @@ _SARIF_RULES: list[dict[str, Any]] = [
         },
         "defaultConfiguration": {"level": "error"},
     },
+    {
+        "id": "HIBP007",
+        "name": "VaultBreachCorrelation",
+        "shortDescription": {
+            "text": (
+                "Vault credential correlated with a known site breach, "
+                "account breach, or stealer log."
+            )
+        },
+        "defaultConfiguration": {"level": "warning"},
+    },
 ]
 
 
@@ -289,6 +300,19 @@ def _sarif_dict_results(serialized: dict[str, Any]) -> list[dict[str, Any]]:
             )
             for f in serialized.get("wordlist_findings") or []
         )
+        for f in serialized.get("breach_findings") or []:
+            breaches_text = ", ".join(str(b) for b in (f.get("breaches") or []))
+            domain = f.get("domain")
+            domain_part = f" [domain: {domain}]" if domain else ""
+            results.append(
+                _sarif_result(
+                    "HIBP007",
+                    "warning",
+                    f"Vault breach correlation ({f.get('source', '')}) for "
+                    f"{f.get('name', '')} ({f.get('username', '')}){domain_part}: "
+                    f"{breaches_text}.",
+                )
+            )
         return results
     if "breaches" in serialized or "pastes" in serialized or "stealer_logs" in serialized:
         results = [
@@ -431,6 +455,15 @@ _DOMAIN_METRICS: tuple[tuple[str, str], ...] = (
     ("stealer_log_aliases", "Stealer Log Aliases"),
 )
 
+_HISTORY_METRICS: tuple[tuple[str, str], ...] = (
+    ("total_runs", "Total Runs"),
+    ("active_exposures", "Active Exposures"),
+    ("new_in_latest_run", "New In Latest Run"),
+    ("resolved_in_latest_run", "Resolved In Latest Run"),
+    ("total_resolved", "Total Resolved"),
+    ("remediation_rate", "Remediation Rate (%)"),
+)
+
 _HTML_CSS = """\
   :root { color-scheme: light dark; }
   body {
@@ -494,6 +527,14 @@ def _audit_blocks(serialized: dict[str, Any]) -> list[_Block]:
     wordlist_findings = serialized.get("wordlist_findings")
     if isinstance(wordlist_findings, list):
         summary_rows.append(["Custom Wordlist Matches", str(len(wordlist_findings))])
+    breach_findings = serialized.get("breach_findings")
+    if isinstance(breach_findings, list):
+        summary_rows.append(
+            [
+                "Breach Correlated Entries",
+                str(serialized.get("breach_correlated_entries", len(breach_findings))),
+            ]
+        )
 
     blocks: list[_Block] = [
         _Heading(2, "Vault Audit Summary"),
@@ -564,7 +605,38 @@ def _audit_blocks(serialized: dict[str, Any]) -> list[_Block]:
                 ],
             )
         )
+    if isinstance(breach_findings, list) and breach_findings:
+        blocks.append(_Heading(3, "Breach & Stealer-Log Correlation"))
+        blocks.append(
+            _Table(
+                ["Name", "Username", "Source", "Domain", "Breaches"],
+                [
+                    [
+                        str(f.get("name", "")),
+                        str(f.get("username", "")),
+                        str(f.get("source", "")),
+                        str(f.get("domain", "")),
+                        _format_cell("breaches", f.get("breaches", [])),
+                    ]
+                    for f in breach_findings
+                ],
+            )
+        )
     return blocks
+
+
+def _history_summary_blocks(history_summary: dict[str, Any]) -> list[_Block]:
+    rows = [
+        [label, _format_cell(key, history_summary[key], none_str="N/A")]
+        for key, label in _HISTORY_METRICS
+        if key in history_summary
+    ]
+    if not rows:
+        return []
+    return [
+        _Heading(3, "Exposure History & Remediation"),
+        _Table(["Metric", "Value"], rows),
+    ]
 
 
 def _domain_report_blocks(serialized: dict[str, Any]) -> list[_Block]:
@@ -585,6 +657,9 @@ def _domain_report_blocks(serialized: dict[str, Any]) -> list[_Block]:
     if isinstance(data_classes, list) and data_classes:
         blocks.append(_Heading(3, "Compromised Data Classes"))
         blocks.append(_dict_list_table(data_classes))
+    history_summary = serialized.get("history_summary")
+    if isinstance(history_summary, dict):
+        blocks.extend(_history_summary_blocks(history_summary))
     return blocks
 
 
@@ -643,6 +718,9 @@ def _monitor_report_blocks(serialized: dict[str, Any]) -> list[_Block]:
             blocks.append(_dict_list_table(value))
         else:
             blocks.append(_BulletList([_format_cell("value", item) for item in value]))
+    history_summary = serialized.get("history_summary")
+    if isinstance(history_summary, dict):
+        blocks.extend(_history_summary_blocks(history_summary))
     return blocks
 
 

@@ -1,6 +1,6 @@
 # CLI Reference
 
-`pwned` exposes all 21 official HIBP API v3 endpoints plus local auditing, offline dumps, declarative monitoring, and a local stdio MCP server.
+`pwned` exposes all 21 official HIBP API v3 endpoints plus local auditing, offline dumps, a self-hosted *k*-anonymity range server, declarative monitoring, and a local stdio MCP server.
 
 ## Global Options
 
@@ -97,10 +97,24 @@ Query the raw Pwned Passwords *k*-anonymity range for a 5-character hexadecimal 
 | `--cache / --no-cache` | `False` | Global option: cache `/range/{prefix}` responses locally |
 
 #### `pwned audit [PATH]`
-Audit a password-manager export, browser CSV, Active Directory `pwdump` file, or local `pass`/`gopass` store. Supports `--mode [sha1|ntlm]`, `-n`/`--ntlm`, `--check-reuse`, `--check-strength`, `--check-ad-hygiene`, `--exclude-machines`, `--custom-wordlist FILE`, `--concurrency`/`--parallelism`/`-p`, `--offline-db` (accepting either a single sorted dump file or a per-prefix range directory `00000.txt`–`FFFFF.txt`), `--notify-webhook`, and `--fail-if-pwned` (exit `8` on compromised, AD hygiene, or banned-wordlist findings). See [Vault & Active Directory Auditing](vault-auditing.md).
+Audit a password-manager export, browser CSV, Active Directory `pwdump` file, local `pass`/`gopass` store, or unlocked `bitwarden-cli` (`bw`/`rbw`) / `1password-cli` (`op`) vault. Supports `--mode [sha1|ntlm]`, `-n`/`--ntlm`, `--check-reuse`, `--check-strength`, `--check-ad-hygiene`, `--exclude-machines`, `--custom-wordlist FILE`, `--check-breaches`, `--include-stealer-logs`, `--concurrency`/`--parallelism`/`-p`, `--offline-db` (accepting either a single sorted dump file or a per-prefix range directory `00000.txt`–`FFFFF.txt`), `--notify-webhook`, and `--fail-if-pwned` (exit `8` on compromised, AD hygiene, banned-wordlist, or breach-correlation findings). See [Vault & Active Directory Auditing](vault-auditing.md).
 
 #### `pwned offline download OUTPUT`
 Download an offline Pwned Passwords corpus (`00000`–`FFFFF`) as a per-prefix range directory (`00000.txt`–`FFFFF.txt`, default) or a single merged sorted dump (`--single` / `-s`). See [Offline Lookups & Local MCP Server](offline-and-mcp.md).
+
+#### `pwned serve`
+Run a self-hosted HIBP-compatible *k*-anonymity HTTP range server (`GET /range/<5-hex>`, `GET /healthz`, `GET /metrics`) backed by `--offline-db` or an upstream caching proxy (combine with global `--cache`). See [Offline Lookups & Local MCP Server](offline-and-mcp.md).
+
+| Option | Default | Description |
+|---|---|---|
+| `--host TEXT` | `127.0.0.1` | Bind address for the HTTP server |
+| `--port INT` | `8080` | Listening TCP port |
+| `--offline-db PATH` | `None` | Local HIBP dump file or per-prefix range directory (`00000.txt`–`FFFFF.txt`) |
+| `--mode [sha1\|ntlm]` | `sha1` | Offline database hash mode: `sha1` or `ntlm` |
+| `-n`, `--ntlm` | `False` | Serve an NTLM `--offline-db` (overrides `--mode`) |
+| `--pad / --no-pad` | `True` | Request padded upstream responses in proxy mode |
+| `--metrics / --no-metrics` | `True` | Expose Prometheus metrics on `GET /metrics` |
+| `--access-log` | `False` | Emit HTTP request access logs to stderr |
 
 #### `pwned mcp`
 Start the local zero-dependency stdio MCP server (`--offline-db` accepting either a single sorted dump file or a per-prefix range directory `00000.txt`–`FFFFF.txt`, `--mode [sha1|ntlm]`, `-n`/`--ntlm`, global `--cache`). See [Offline Lookups & Local MCP Server](offline-and-mcp.md).
@@ -172,10 +186,10 @@ List pastes containing an email address (`--fail-if-pwned` / `--fail-if-found` e
 List breached aliases for a verified domain (`--baseline`, `--save-baseline`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned` / `--fail-if-found`).
 
 #### `pwned domain-report DOMAIN`
-Cross-reference a verified domain's breached aliases (and optional `--include-stealer-logs`) with breach catalog metadata to summarize top breaches, recency, and counts by compromised `DataClasses`. Supports `--cache`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned` / `--fail-if-found`, and all `--format` options (`markdown`, `html`, `json`, `table`, etc.).
+Cross-reference a verified domain's breached aliases (and optional `--include-stealer-logs`) with breach catalog metadata to summarize top breaches, recency, and counts by compromised `DataClasses`. Supports `--history-db PATH` (to attach SQLite remediation trends), `--cache`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned` / `--fail-if-found`, and all `--format` options (`markdown`, `html`, `json`, `table`, etc.).
 
 #### `pwned monitor`
-Run declarative TOML monitoring across accounts and domains (`--config pwned.toml`, `--save-baselines`, `--smart-precheck`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned` / `--fail-if-found`). See [Monitoring, Webhooks & CI/CD](monitoring-and-ci.md).
+Run declarative TOML monitoring across accounts and domains (`--config pwned.toml`, `--save-baselines`, `--smart-precheck`, `--db PATH`, `--notify-webhook`, `--webhook-format`, `--fail-if-pwned` / `--fail-if-found`). See [Monitoring, Webhooks & CI/CD](monitoring-and-ci.md).
 
 #### `pwned subscribed-domains [list]` (`sd`)
 List all verified domains associated with your API key (`pwned subscribed-domains` and `pwned subscribed-domains list` are equivalent).
