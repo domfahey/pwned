@@ -1389,7 +1389,11 @@ class TestAuditCommand:
         db_file.write_bytes(b"placeholder")
 
         def fake_load_export(
-            path: Path, *, source: str, master_password: str | None = None
+            path: Path,
+            *,
+            source: str,
+            master_password: str | None = None,
+            exclude_machines: bool = False,
         ) -> list[AuditEntry]:
             raise RuntimeError("KeePass support requires the optional 'keepass' dependency")
 
@@ -1416,7 +1420,11 @@ class TestAuditCommand:
         captured: dict[str, object] = {}
 
         def fake_load_export(
-            path: Path, *, source: str, master_password: str | None = None
+            path: Path,
+            *,
+            source: str,
+            master_password: str | None = None,
+            exclude_machines: bool = False,
         ) -> list[AuditEntry]:
             captured["source"] = source
             captured["master_password"] = master_password
@@ -1460,7 +1468,11 @@ class TestAuditCommand:
         captured: dict[str, object] = {}
 
         def fake_load_export(
-            path: Path, *, source: str, master_password: str | None = None
+            path: Path,
+            *,
+            source: str,
+            master_password: str | None = None,
+            exclude_machines: bool = False,
         ) -> list[AuditEntry]:
             captured["source"] = source
             captured["master_password"] = master_password
@@ -1762,6 +1774,153 @@ class TestAuditCommand:
         assert data["compromised_entries"] == 1
         assert data["findings"] == [{"name": "CORP", "username": "alice", "pwn_count": 77}]
 
+    def test_audit_pwdump_ad_hygiene_exclude_machines_and_custom_wordlist(
+        self, isolated_env: Path, httpx_mock: HTTPXMock, cli_runner: CliRunner
+    ) -> None:
+        empty_ntlm = "31D6CFE0D16AE931B73C59D7E0C089C0"
+        banned_ntlm = _ntlm_hash("AcmeSummer2026!")
+        machine_ntlm = _ntlm_hash("MachineOnlySecret99!")
+        present_lm = "e52cac67419a9a224a3b108f3fa6cb6d"
+        empty_lm = "aad3b435b51404eeaad3b435b51404ee"
+
+        pwdump_file = isolated_env / "ad.pwdump"
+        pwdump_file.write_text(
+            f"CORP\\blank:1001:{empty_lm}:{empty_ntlm}:::\n"
+            f"CORP\\legacy:1002:{present_lm}:{banned_ntlm}:::\n"
+            f"CORP\\DC01$:1003:{empty_lm}:{machine_ntlm}:::\n",
+            encoding="utf-8",
+        )
+        wordlist_file = isolated_env / "banned.txt"
+        wordlist_file.write_text("# Org banned\nAcmeSummer2026!\n", encoding="utf-8")
+
+        # Online mode: HIBP returns 0, yet --fail-if-pwned exits 8 due to AD/wordlist findings
+        httpx_mock.add_response(
+            url=f"{PASSWORDS_BASE}/range/{empty_ntlm[:5]}?mode=ntlm",
+            text="",
+        )
+        httpx_mock.add_response(
+            url=f"{PASSWORDS_BASE}/range/{banned_ntlm[:5]}?mode=ntlm",
+            text="",
+        )
+
+        app = _make_cli()
+        res_online = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "audit",
+                str(pwdump_file),
+                "--source",
+                "pwdump",
+                "--exclude-machines",
+                "--check-ad-hygiene",
+                "--custom-wordlist",
+                str(wordlist_file),
+                "--fail-if-pwned",
+            ],
+        )
+        assert res_online.exit_code == 8
+        data_online = json.loads(res_online.output)
+        assert data_online["total_entries"] == 2
+        assert data_online["compromised_entries"] == 0
+        assert {f["issue"] for f in data_online["ad_findings"]} == {
+            "empty_ntlm",
+            "lm_hash_present",
+        }
+        assert data_online["wordlist_matches"] == 1
+        assert data_online["wordlist_findings"] == [
+            {"name": "CORP", "username": "legacy", "match_type": "exact"}
+        ]
+        assert "AcmeSummer2026!" not in res_online.output
+
+        # Offline DB parity
+        ntlm_db = isolated_env / "ntlm.txt"
+        ntlm_db.write_text(f"{'0' * 32}:1\n", encoding="utf-8")
+        res_offline = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "audit",
+                str(pwdump_file),
+                "--source",
+                "pwdump",
+                "--offline-db",
+                str(ntlm_db),
+                "--exclude-machines",
+                "--check-ad-hygiene",
+                "--custom-wordlist",
+                str(wordlist_file),
+                "--fail-if-pwned",
+            ],
+        )
+        assert res_offline.exit_code == 8
+        assert json.loads(res_offline.output) == data_online
+
+        # Wordlist-only match triggers --fail-if-pwned without --check-ad-hygiene
+        res_wl_only = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "audit",
+                str(pwdump_file),
+                "--source",
+                "pwdump",
+                "--offline-db",
+                str(ntlm_db),
+                "--exclude-machines",
+                "--custom-wordlist",
+                str(wordlist_file),
+                "--fail-if-pwned",
+            ],
+        )
+        assert res_wl_only.exit_code == 8
+        wl_only_data = json.loads(res_wl_only.output)
+        assert "ad_findings" not in wl_only_data
+        assert wl_only_data["wordlist_matches"] == 1
+
+        # Clean run with empty wordlist exits 0
+        empty_wl = isolated_env / "empty.txt"
+        empty_wl.write_text("# empty\n", encoding="utf-8")
+        clean_csv = isolated_env / "clean.csv"
+        clean_csv.write_text("name,username,password\nSite,alice,UniqueGood99!\n", encoding="utf-8")
+        sha1_db = isolated_env / "sha1.txt"
+        sha1_db.write_text(f"{'0' * 40}:1\n", encoding="utf-8")
+        res_clean = cli_runner.invoke(
+            app,
+            [
+                "--json",
+                "audit",
+                str(clean_csv),
+                "--source",
+                "csv",
+                "--offline-db",
+                str(sha1_db),
+                "--check-ad-hygiene",
+                "--custom-wordlist",
+                str(empty_wl),
+                "--fail-if-pwned",
+            ],
+        )
+        assert res_clean.exit_code == 0
+
+        # Invalid UTF-8 wordlist exits 7 (FileOrStoreError)
+        bad_wl = isolated_env / "bad.txt"
+        bad_wl.write_bytes(b"\xff\xfe\x00\x80")
+        res_bad_wl = cli_runner.invoke(
+            app,
+            [
+                "audit",
+                str(clean_csv),
+                "--source",
+                "csv",
+                "--offline-db",
+                str(sha1_db),
+                "--custom-wordlist",
+                str(bad_wl),
+            ],
+        )
+        assert res_bad_wl.exit_code == 7
+
     @pytest.mark.parametrize("source", ["pass", "gopass"])
     def test_audit_pass_and_gopass_optional_path_and_directory(
         self,
@@ -1774,7 +1933,11 @@ class TestAuditCommand:
         calls: list[tuple[Path | None, str]] = []
 
         def fake_load_export(
-            path: Path | None, *, source: str, master_password: str | None = None
+            path: Path | None,
+            *,
+            source: str,
+            master_password: str | None = None,
+            exclude_machines: bool = False,
         ) -> list[AuditEntry]:
             calls.append((path, source))
             return [AuditEntry(name="email", username="u1", password="pw1")]

@@ -386,7 +386,9 @@ def test_audit_vault_pwdump_pass_and_rejections(
     # pass / gopass allows omitted path
     monkeypatch.setattr(
         "pwned.mcp_server.load_export",
-        lambda path, *, source: [AuditEntry(name="email", username="u", password="secret")],
+        lambda path, *, source, exclude_machines=False: [
+            AuditEntry(name="email", username="u", password="secret")
+        ],
     )
     sh = _sha1_hex("secret")
     httpx_mock.add_response(
@@ -416,6 +418,64 @@ def test_audit_vault_pwdump_pass_and_rejections(
     ):
         err, _ = _parse_tool_result(_call_tool(server, "audit_vault", bad_args))
         assert err
+
+
+def test_audit_vault_ad_hygiene_exclude_machines_and_custom_wordlist(tmp_path: Path) -> None:
+    empty_ntlm = "31D6CFE0D16AE931B73C59D7E0C089C0"
+    empty_lm = "aad3b435b51404eeaad3b435b51404ee"
+    present_lm = "e52cac67419a9a224a3b108f3fa6cb6d"
+    pwdump_file = tmp_path / "ad.pwdump"
+    pwdump_file.write_text(
+        f"CORP\\blank:1001:{present_lm}:{empty_ntlm}:::\n"
+        f"CORP\\DC01$:1002:{empty_lm}:{empty_ntlm}:::\n",
+        encoding="utf-8",
+    )
+    wl_file = tmp_path / "banned.txt"
+    wl_file.write_text("Acme2026!\n", encoding="utf-8")
+    ntlm_db = tmp_path / "ntlm.txt"
+    ntlm_db.write_text(f"{'0' * 32}:1\n", encoding="utf-8")
+
+    server = MCPServer(offline_db=ntlm_db, ntlm=True)
+    is_err, payload = _parse_tool_result(
+        _call_tool(
+            server,
+            "audit_vault",
+            {
+                "path": str(pwdump_file),
+                "source": "pwdump",
+                "check_ad_hygiene": True,
+                "exclude_machines": True,
+                "custom_wordlist_path": str(wl_file),
+            },
+        )
+    )
+    assert not is_err
+    assert payload["total_entries"] == 1
+    assert {f["issue"] for f in payload["ad_findings"]} == {"empty_ntlm", "lm_hash_present"}
+    assert payload["wordlist_matches"] == 0
+    assert payload["wordlist_findings"] == []
+
+    # Invalid custom_wordlist_path type or missing file -> isError=True
+    err_type, _ = _parse_tool_result(
+        _call_tool(
+            server,
+            "audit_vault",
+            {"path": str(pwdump_file), "source": "pwdump", "custom_wordlist_path": 123},
+        )
+    )
+    assert err_type
+    err_missing, _ = _parse_tool_result(
+        _call_tool(
+            server,
+            "audit_vault",
+            {
+                "path": str(pwdump_file),
+                "source": "pwdump",
+                "custom_wordlist_path": str(tmp_path / "missing.txt"),
+            },
+        )
+    )
+    assert err_missing
 
 
 def test_diff_baseline_all_kinds_and_errors(tmp_path: Path) -> None:

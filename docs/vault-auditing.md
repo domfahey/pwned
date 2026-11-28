@@ -36,14 +36,18 @@ pwned audit vault-encrypted.json \
 ```
 
 ### Active Directory `secretsdump.py` / `pwdump` Audit (Air-Gapped)
-Check corporate NTLM hashes against a local NTLM Pwned Passwords dump and identify accounts sharing the same password hash (`--check-reuse`):
+Check corporate NTLM hashes against a local NTLM Pwned Passwords dump, detect shared hashes (`--check-reuse`), flag Active Directory credential hygiene issues (`--check-ad-hygiene`), exclude `$` computer accounts (`--exclude-machines`), and screen against a company-specific banned dictionary (`--custom-wordlist`):
 
 ```bash
 pwned audit ntds.pwdump \
   --source pwdump \
   --offline-db /data/pwned-passwords-ntlm.txt \
+  --exclude-machines \
   --check-reuse \
-  --format markdown
+  --check-ad-hygiene \
+  --custom-wordlist banned-org-passwords.txt \
+  --format markdown \
+  --fail-if-pwned
 ```
 
 Notes for `pwdump` mode:
@@ -51,6 +55,29 @@ Notes for `pwdump` mode:
 - Entries are checked via `check_hash()` directly; no plaintext passwords are required or emitted.
 - `--check-reuse` groups domain accounts sharing identical NTLM hashes without revealing the hashes.
 - `--check-strength` skips irreversible hashes (character entropy cannot be measured on hashes).
+- `--exclude-machines` filters Active Directory computer/trust accounts whose username ends with `$` (e.g., `DC01$`, `WS-001$`).
+
+### Active Directory Hygiene Checks (`--check-ad-hygiene`)
+When `--check-ad-hygiene` (or `check_ad_hygiene=True` in Python/MCP) is enabled, `AuditSummary.ad_findings` reports:
+- **`empty_ntlm`** — Accounts storing the empty-password NTLM hash (`31D6CFE0D16AE931B73C59D7E0C089C0`).
+- **`lm_hash_present`** — `pwdump` records storing a non-empty legacy LM hash (LM field present and not `AAD3B435B51404EEAAD3B435B51404EE`).
+- **`username_as_password`** — Accounts whose password matches their `SamAccountName` (or computer name without `$`, or UPN local-part before `@`) across exact, lowercase, uppercase, capitalized, and title-case variants (checked locally via MD4/SHA-1 for pre-hashed entries and case-insensitively for plaintext vaults).
+
+### Custom Organizational Wordlist (`--custom-wordlist FILE`)
+Screen both plaintext password-manager vaults and pre-hashed `pwdump` / SHA-1 audits against an internal banned dictionary (company brand names, seasonal patterns, default onboarding passwords):
+
+```bash
+pwned audit vault.json \
+  --source bitwarden-json \
+  --custom-wordlist banned-org-passwords.txt \
+  --format sarif \
+  --fail-if-pwned
+```
+
+- Reads UTF-8 (including UTF-8 BOM) newline-delimited files, skipping blank lines and `#` comment lines.
+- Reports `exact` and `case_insensitive` matches in `AuditSummary.wordlist_findings` (`wordlist_matches` count) without emitting plaintext passwords or matched wordlist terms.
+- For `--format sarif`, emits `HIBP005` (`ADCredentialHygiene`) and `HIBP006` (`BannedWordlistPassword`) alongside `HIBP002` (`CompromisedPassword`).
+- With `--fail-if-pwned`, exits with code `8` if compromised entries, AD hygiene findings, or custom wordlist matches are found.
 
 ### Live Unix `pass` / `gopass` Store Audit (Zero Plaintext Exports)
 ```bash

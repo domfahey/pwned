@@ -21,6 +21,7 @@ def test_one_input(data: bytes) -> None:
         deduplicate=False,
     )
     _parsers.parse_pwdump_lines(text.splitlines())
+    _parsers.parse_pwdump_records(text.splitlines())
     _parsers._parse_range_response(text)
 
     raw = fdp.ConsumeBytes(fdp.ConsumeIntInRange(0, 512))

@@ -693,6 +693,52 @@ class TestAuditCommand:
         assert data["compromised_entries"] == 2
         assert len(data["reused_groups"]) == 1
 
+    def test_audit_pwdump_ad_hygiene_exclude_machines_and_custom_wordlist(
+        self, tmp_path: Path
+    ) -> None:
+        empty_lm = "aad3b435b51404eeaad3b435b51404ee"
+        present_lm = "e52cac67419a9a224a3b108f3fa6cb6d"
+        empty_ntlm = "31d6cfe0d16ae931b73c59d7e0c089c0"
+        user_pw_ntlm = _md4("jdoe".encode("utf-16-le")).lower()
+        banned_ntlm = _md4("AcmeOrgUnlikelyToken2026!".encode("utf-16-le")).lower()
+        machine_ntlm = _md4("MachineAccountToken99!".encode("utf-16-le")).lower()
+
+        dump = tmp_path / "ad_hygiene.pwdump"
+        dump.write_text(
+            f"CORP\\blank:1001:{empty_lm}:{empty_ntlm}:::\n"
+            f"CORP\\jdoe:1002:{present_lm}:{user_pw_ntlm}:::\n"
+            f"CORP\\banned:1003:{empty_lm}:{banned_ntlm}:::\n"
+            f"CORP\\DC01$:1004:{empty_lm}:{machine_ntlm}:::\n",
+            encoding="utf-8",
+        )
+        wordlist = tmp_path / "banned.txt"
+        wordlist.write_text("# Org policy\nAcmeOrgUnlikelyToken2026!\n", encoding="utf-8")
+
+        code, out = _run(
+            "--json",
+            "audit",
+            str(dump),
+            "--source",
+            "pwdump",
+            "--exclude-machines",
+            "--check-ad-hygiene",
+            "--custom-wordlist",
+            str(wordlist),
+            "--fail-if-pwned",
+        )
+        assert code == 8
+        data = json.loads(out)
+        assert data["total_entries"] == 3
+        issues = {(f["username"], f["issue"]) for f in data["ad_findings"]}
+        assert ("blank", "empty_ntlm") in issues
+        assert ("jdoe", "lm_hash_present") in issues
+        assert ("jdoe", "username_as_password") in issues
+        assert data["wordlist_matches"] == 1
+        assert data["wordlist_findings"] == [
+            {"name": "CORP", "username": "banned", "match_type": "exact"}
+        ]
+        assert "AcmeOrgUnlikelyToken2026!" not in out
+
 
 class TestMcpCommand:
     def test_mcp_live_stdio_roundtrip(self) -> None:

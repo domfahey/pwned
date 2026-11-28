@@ -8,7 +8,7 @@ from typing import Any, TextIO, cast
 
 from pydantic import TypeAdapter, ValidationError
 
-from pwned.audit import ExportSource, audit_entries, load_export
+from pwned.audit import ExportSource, audit_entries, load_custom_wordlist, load_export
 from pwned.baseline import (
     diff_account_batch,
     diff_breaches,
@@ -109,6 +109,23 @@ _TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
                     "type": "boolean",
                     "default": True,
                     "description": "Evaluate local password strength and risk score.",
+                },
+                "check_ad_hygiene": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Check AD hygiene (empty NTLM hashes, legacy LM hashes, "
+                        "and username-as-password)."
+                    ),
+                },
+                "exclude_machines": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Exclude Active Directory computer accounts ending with '$'.",
+                },
+                "custom_wordlist_path": {
+                    "type": "string",
+                    "description": "Optional path to a custom newline-delimited banned wordlist.",
                 },
             },
             "additionalProperties": False,
@@ -320,8 +337,20 @@ class MCPServer:
         use_ntlm = _get_bool(arguments, "ntlm", self._ntlm) or (source == "pwdump")
         check_reuse = _get_bool(arguments, "check_reuse", True)
         check_strength = _get_bool(arguments, "check_strength", True)
+        check_ad_hygiene = _get_bool(arguments, "check_ad_hygiene", False)
+        exclude_machines = _get_bool(arguments, "exclude_machines", False)
+        raw_wordlist = _optional_str(arguments, "custom_wordlist_path")
+        wordlist_terms = (
+            load_custom_wordlist(Path(raw_wordlist))
+            if raw_wordlist is not None and raw_wordlist.strip()
+            else None
+        )
 
-        entries = load_export(resolved_path, source=cast(ExportSource, source))
+        entries = load_export(
+            resolved_path,
+            source=cast(ExportSource, source),
+            exclude_machines=exclude_machines,
+        )
         with self._open_password_client(ntlm=use_ntlm) as client:
             summary = audit_entries(
                 entries,
@@ -330,6 +359,8 @@ class MCPServer:
                 ntlm=use_ntlm,
                 check_reuse=check_reuse,
                 check_strength=check_strength,
+                check_ad_hygiene=check_ad_hygiene,
+                custom_wordlist=wordlist_terms,
             )
         return serialize(summary)
 

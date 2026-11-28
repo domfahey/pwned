@@ -15,16 +15,22 @@ from unittest.mock import MagicMock
 import pytest
 from pytest_httpx import HTTPXMock
 
+from pwned._parsers import _md4
 from pwned.audit import (
+    EMPTY_LM_HASH,
+    EMPTY_NTLM_HASH,
+    ADHygieneFinding,
     AuditEntry,
     AuditFinding,
     AuditSummary,
     ExportSource,
     ReuseGroup,
     StrengthFinding,
+    WordlistFinding,
     _parse_pass_entry_output,
     async_audit_entries,
     audit_entries,
+    load_custom_wordlist,
     load_export,
     parse_1password_1pux,
     parse_1password_csv,
@@ -2046,3 +2052,381 @@ class TestPreHashedAndStrengthAudit:
         assert both_summary.risk_score == 100
         assert "reused_groups" in both_summary.model_dump(exclude_unset=True)
         assert "risk_score" in both_summary.model_dump(exclude_unset=True)
+
+
+def _ntlm_upper(password: str) -> str:
+    return _md4(password.encode("utf-16-le")).upper()
+
+
+def _sha1_upper(password: str) -> str:
+    return hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+
+
+class TestADHygieneAndCustomWordlist:
+    def test_parse_pwdump_lm_hash_and_exclude_machines(self, tmp_path: Path) -> None:
+        dump_file = tmp_path / "ad.pwdump"
+        present_lm = "e52cac67419a9a224a3b108f3fa6cb6d"
+        nt_hash = _ntlm_upper("Summer2026!")
+        dump_file.write_text(
+            f"CORP\\alice:1001:{present_lm}:{nt_hash}:::\n"
+            f"CORP\\DC01$:1002:{EMPTY_LM_HASH.lower()}:{nt_hash}:::\n"
+            f"WS02$:1003:NO PASSWORD*********************:{EMPTY_NTLM_HASH.lower()}:::\n",
+            encoding="utf-8",
+        )
+
+        all_entries = parse_pwdump(dump_file)
+        assert all_entries == [
+            AuditEntry(
+                name="CORP",
+                username="alice",
+                password=nt_hash,
+                is_hash=True,
+                hash_type="ntlm",
+                has_lm_hash=True,
+            ),
+            AuditEntry(
+                name="CORP",
+                username="DC01$",
+                password=nt_hash,
+                is_hash=True,
+                hash_type="ntlm",
+                has_lm_hash=False,
+            ),
+            AuditEntry(
+                name="",
+                username="WS02$",
+                password=EMPTY_NTLM_HASH,
+                is_hash=True,
+                hash_type="ntlm",
+                has_lm_hash=False,
+            ),
+        ]
+
+        filtered_entries = parse_pwdump(dump_file, exclude_machines=True)
+        assert filtered_entries == [all_entries[0]]
+
+        loaded_filtered = load_export(dump_file, source="pwdump", exclude_machines=True)
+        assert loaded_filtered == [all_entries[0]]
+
+        csv_file = tmp_path / "ad.csv"
+        csv_file.write_text(
+            "name,username,password\nCORP,alice,pw1\nCORP,DC01$,pw2\n",
+            encoding="utf-8",
+        )
+        assert load_export(csv_file, source="csv", exclude_machines=True) == [
+            AuditEntry(name="CORP", username="alice", password="pw1"),
+        ]
+
+    def test_load_custom_wordlist_bom_comments_dedup(self, tmp_path: Path) -> None:
+        wl_file = tmp_path / "banned.txt"
+        wl_file.write_bytes(
+            b"\xef\xbb\xbf# Corporate banned list\r\n"
+            b"\r\n"
+            b"  AcmeCorp2026!  \r\n"
+            b"Welcome123\n"
+            b"AcmeCorp2026!\n"
+            b"   # indented comment\n"
+            b"Summer2026\n"
+        )
+        assert load_custom_wordlist(wl_file) == [
+            "AcmeCorp2026!",
+            "Welcome123",
+            "Summer2026",
+        ]
+        assert load_custom_wordlist(wl_file, ignore_comments=False) == [
+            "# Corporate banned list",
+            "AcmeCorp2026!",
+            "Welcome123",
+            "# indented comment",
+            "Summer2026",
+        ]
+
+    def test_ad_hygiene_checks_sync_and_async(self) -> None:
+        entries = [
+            AuditEntry(
+                name="CORP",
+                username="blank_user",
+                password=EMPTY_NTLM_HASH,
+                is_hash=True,
+                hash_type="ntlm",
+            ),
+            AuditEntry(
+                name="CORP",
+                username="LegacyUser",
+                password=_ntlm_upper("Legacyuser"),
+                is_hash=True,
+                hash_type="ntlm",
+                has_lm_hash=True,
+            ),
+            AuditEntry(
+                name="CORP",
+                username="john.doe",
+                password=_ntlm_upper("John.Doe"),
+                is_hash=True,
+                hash_type="ntlm",
+            ),
+            AuditEntry(
+                name="CORP",
+                username="DC01$",
+                password=_ntlm_upper("dc01"),
+                is_hash=True,
+                hash_type="ntlm",
+            ),
+            AuditEntry(
+                name="CORP",
+                username="upn.user@corp.local",
+                password=_sha1_upper("UPN.USER"),
+                is_hash=True,
+                hash_type="sha1",
+            ),
+            AuditEntry(
+                name="Portal",
+                username="PlainUser",
+                password="plainuser",
+            ),
+            AuditEntry(
+                name="NoUser",
+                username="",
+                password="StrongPassword99!",
+            ),
+            AuditEntry(
+                name="CleanAD",
+                username="safe_user",
+                password=_ntlm_upper("TotallyUnrelatedStrong!99"),
+                is_hash=True,
+                hash_type="ntlm",
+            ),
+            AuditEntry(
+                name="DollarOnly",
+                username="$",
+                password=_ntlm_upper("TotallyDifferent!"),
+                is_hash=True,
+                hash_type="ntlm",
+            ),
+            AuditEntry(
+                name="AtOnly",
+                username="@corp.local",
+                password=_ntlm_upper("AnotherDifferent!"),
+                is_hash=True,
+                hash_type="ntlm",
+            ),
+        ]
+
+        sync_client = MagicMock(spec=PwnedPasswordsClient)
+        sync_client.check_hash.return_value = 0
+        sync_client.check_password.return_value = 0
+
+        class _FakeAsyncClient:
+            async def check_hash(
+                self, hash_hex: str, *, ntlm: bool = False, pad: bool = False
+            ) -> int:
+                return 0
+
+            async def check_password(
+                self, password: str, *, ntlm: bool = False, pad: bool = False
+            ) -> int:
+                return 0
+
+        # Off by default -> ad_findings omitted from exclude_unset dump
+        plain_summary = audit_entries(entries, sync_client)
+        assert "ad_findings" not in plain_summary.model_dump(exclude_unset=True)
+
+        sync_summary = audit_entries(entries, sync_client, check_ad_hygiene=True)
+        async_summary = asyncio.run(
+            async_audit_entries(
+                entries,
+                _FakeAsyncClient(),  # type: ignore[arg-type]
+                check_ad_hygiene=True,
+            )
+        )
+        assert sync_summary == async_summary
+        assert "ad_findings" in sync_summary.model_dump(exclude_unset=True)
+
+        expected = [
+            ADHygieneFinding(
+                name="CORP",
+                username="blank_user",
+                issue="empty_ntlm",
+                detail="Account has an empty NTLM password hash.",
+            ),
+            ADHygieneFinding(
+                name="CORP",
+                username="LegacyUser",
+                issue="lm_hash_present",
+                detail="Legacy LM hash is stored for this account.",
+            ),
+            ADHygieneFinding(
+                name="CORP",
+                username="DC01$",
+                issue="username_as_password",
+                detail="Password matches account username.",
+            ),
+            ADHygieneFinding(
+                name="CORP",
+                username="LegacyUser",
+                issue="username_as_password",
+                detail="Password matches account username.",
+            ),
+            ADHygieneFinding(
+                name="CORP",
+                username="john.doe",
+                issue="username_as_password",
+                detail="Password matches account username.",
+            ),
+            ADHygieneFinding(
+                name="CORP",
+                username="upn.user@corp.local",
+                issue="username_as_password",
+                detail="Password matches account username.",
+            ),
+            ADHygieneFinding(
+                name="Portal",
+                username="PlainUser",
+                issue="username_as_password",
+                detail="Password matches account username.",
+            ),
+        ]
+        assert sync_summary.ad_findings == expected
+        dumped_json = sync_summary.model_dump_json()
+        assert "plainuser" not in dumped_json
+        assert "StrongPassword99!" not in dumped_json
+
+    def test_custom_wordlist_plaintext_ntlm_sha1_sync_and_async(self) -> None:
+        wordlist = ["AcmeCorp2026!", "Welcome123", ""]
+        entries = [
+            AuditEntry(name="PlainExact", username="u1", password="AcmeCorp2026!"),
+            AuditEntry(name="PlainCI", username="u2", password="acmecorp2026!"),
+            AuditEntry(name="PlainSafe", username="u3", password="UniqueSafe!99"),
+            AuditEntry(
+                name="NtlmExact",
+                username="u4",
+                password=_ntlm_upper("AcmeCorp2026!"),
+                is_hash=True,
+                hash_type="ntlm",
+            ),
+            AuditEntry(
+                name="NtlmCI",
+                username="u5",
+                password=_ntlm_upper("WELCOME123"),
+                is_hash=True,
+                hash_type="ntlm",
+            ),
+            AuditEntry(
+                name="NtlmSafe",
+                username="u6",
+                password=_ntlm_upper("NotBanned!99"),
+                is_hash=True,
+                hash_type="ntlm",
+            ),
+            AuditEntry(
+                name="Sha1Exact",
+                username="u7",
+                password=_sha1_upper("Welcome123"),
+                is_hash=True,
+                hash_type="sha1",
+            ),
+            AuditEntry(
+                name="Sha1CI",
+                username="u8",
+                password=_sha1_upper("welcome123"),
+                is_hash=True,
+                hash_type="sha1",
+            ),
+            AuditEntry(
+                name="Sha1Safe",
+                username="u9",
+                password=_sha1_upper("AlsoNotBanned!99"),
+                is_hash=True,
+                hash_type="sha1",
+            ),
+        ]
+
+        sync_client = MagicMock(spec=PwnedPasswordsClient)
+        sync_client.check_hash.return_value = 0
+        sync_client.check_password.return_value = 0
+
+        class _FakeAsyncClient:
+            async def check_hash(
+                self, hash_hex: str, *, ntlm: bool = False, pad: bool = False
+            ) -> int:
+                return 0
+
+            async def check_password(
+                self, password: str, *, ntlm: bool = False, pad: bool = False
+            ) -> int:
+                return 0
+
+        # Without custom_wordlist -> fields stay unset
+        no_wl = audit_entries(entries, sync_client)
+        no_wl_dump = no_wl.model_dump(exclude_unset=True)
+        assert "wordlist_matches" not in no_wl_dump
+        assert "wordlist_findings" not in no_wl_dump
+
+        # Empty custom_wordlist -> fields present with 0 / []
+        empty_wl = audit_entries(entries, sync_client, custom_wordlist=[])
+        empty_wl_dump = empty_wl.model_dump(exclude_unset=True)
+        assert empty_wl_dump["wordlist_matches"] == 0
+        assert empty_wl_dump["wordlist_findings"] == []
+
+        # Populated custom_wordlist on empty entries -> 0 / []
+        empty_entries = audit_entries([], sync_client, custom_wordlist=wordlist)
+        assert empty_entries.wordlist_matches == 0
+        assert empty_entries.wordlist_findings == []
+
+        # Full sync vs async parity
+        sync_summary = audit_entries(entries, sync_client, custom_wordlist=wordlist)
+        async_summary = asyncio.run(
+            async_audit_entries(
+                entries,
+                _FakeAsyncClient(),  # type: ignore[arg-type]
+                custom_wordlist=wordlist,
+            )
+        )
+        assert sync_summary == async_summary
+        assert sync_summary.wordlist_matches == 6
+        assert sync_summary.wordlist_findings == [
+            WordlistFinding(name="NtlmCI", username="u5", match_type="case_insensitive"),
+            WordlistFinding(name="NtlmExact", username="u4", match_type="exact"),
+            WordlistFinding(name="PlainCI", username="u2", match_type="case_insensitive"),
+            WordlistFinding(name="PlainExact", username="u1", match_type="exact"),
+            WordlistFinding(name="Sha1CI", username="u8", match_type="case_insensitive"),
+            WordlistFinding(name="Sha1Exact", username="u7", match_type="exact"),
+        ]
+
+        # Never leak plaintext passwords or wordlist terms into JSON output
+        dumped_json = sync_summary.model_dump_json()
+        assert "AcmeCorp2026!" not in dumped_json
+        assert "Welcome123" not in dumped_json
+        assert "acmecorp2026!" not in dumped_json
+
+    def test_untyped_hash_entries_respect_ntlm_flag(self) -> None:
+        entries = [
+            AuditEntry(
+                name="CORP",
+                username="blank",
+                password=EMPTY_NTLM_HASH,
+                is_hash=True,
+                hash_type=None,
+            ),
+            AuditEntry(
+                name="CORP",
+                username="jdoe",
+                password=_ntlm_upper("Acme2026!"),
+                is_hash=True,
+                hash_type=None,
+            ),
+        ]
+        client = MagicMock(spec=PwnedPasswordsClient)
+        client.check_hash.return_value = 0
+
+        summary = audit_entries(
+            entries,
+            client,
+            ntlm=True,
+            check_ad_hygiene=True,
+            custom_wordlist=["Acme2026!"],
+        )
+        assert [f.issue for f in summary.ad_findings] == ["empty_ntlm"]
+        assert summary.wordlist_findings == [
+            WordlistFinding(name="CORP", username="jdoe", match_type="exact")
+        ]

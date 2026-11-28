@@ -13,6 +13,7 @@ from pwned.audit import (
     ExportSource,
     async_audit_entries,
     audit_entries,
+    load_custom_wordlist,
     load_export,
 )
 from pwned.baseline import diff_search_result, load_baseline, save_baseline
@@ -503,6 +504,22 @@ def domain_verify_meta_check(ctx: click.Context, domain: str) -> None:
     help="Flag weak passwords and compute vault risk score.",
 )
 @click.option(
+    "--check-ad-hygiene",
+    is_flag=True,
+    help="Check AD hygiene (empty NTLM hashes, legacy LM hashes, username-as-password).",
+)
+@click.option(
+    "--exclude-machines",
+    is_flag=True,
+    help="Exclude Active Directory computer accounts ending with '$'.",
+)
+@click.option(
+    "--custom-wordlist",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to a newline-delimited custom banned wordlist file.",
+)
+@click.option(
     "--concurrency",
     "--parallelism",
     "-p",
@@ -534,7 +551,7 @@ def domain_verify_meta_check(ctx: click.Context, domain: str) -> None:
     "--fail-if-found",
     "fail_if_pwned",
     is_flag=True,
-    help="Exit with code 8 if compromised.",
+    help="Exit with code 8 if compromised, banned-wordlist, or AD hygiene findings exist.",
 )
 @click.pass_context
 @handle_errors
@@ -548,6 +565,9 @@ def audit(
     threshold: int,
     check_reuse: bool,
     check_strength: bool,
+    check_ad_hygiene: bool,
+    exclude_machines: bool,
+    custom_wordlist: Path | None,
     concurrency: int,
     offline_db: Path | None,
     notify_webhook: str | None,
@@ -571,8 +591,12 @@ def audit(
             path,
             source=cast(ExportSource, source),
             master_password=master_password,
+            exclude_machines=exclude_machines,
         )
-    except (ValueError, RuntimeError) as exc:
+        wordlist_terms = (
+            load_custom_wordlist(custom_wordlist) if custom_wordlist is not None else None
+        )
+    except (OSError, UnicodeDecodeError, ValueError, RuntimeError) as exc:
         raise FileOrStoreError(str(exc)) from exc
 
     settings = ctx.obj["settings"]
@@ -591,6 +615,8 @@ def audit(
                 pad=pad,
                 check_reuse=check_reuse,
                 check_strength=check_strength,
+                check_ad_hygiene=check_ad_hygiene,
+                custom_wordlist=wordlist_terms,
             )
     else:
 
@@ -608,6 +634,8 @@ def audit(
                     check_reuse=check_reuse,
                     check_strength=check_strength,
                     concurrency=concurrency,
+                    check_ad_hygiene=check_ad_hygiene,
+                    custom_wordlist=wordlist_terms,
                 )
 
         summary = asyncio.run(_run_online_audit())
@@ -618,7 +646,9 @@ def audit(
         summary,
         title="pwned Vault Audit Alert",
     )
-    if fail_if_pwned and summary.compromised_entries > 0:
+    if fail_if_pwned and (
+        summary.compromised_entries > 0 or summary.wordlist_matches > 0 or bool(summary.ad_findings)
+    ):
         sys.exit(int(ExitCode.FINDINGS))
 
 

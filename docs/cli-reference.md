@@ -97,7 +97,7 @@ Query the raw Pwned Passwords *k*-anonymity range for a 5-character hexadecimal 
 | `--cache / --no-cache` | `False` | Global option: cache `/range/{prefix}` responses locally |
 
 #### `pwned audit [PATH]`
-Audit a password-manager export, browser CSV, Active Directory `pwdump` file, or local `pass`/`gopass` store. Supports `--mode [sha1|ntlm]`, `-n`/`--ntlm`, `--concurrency`/`--parallelism`/`-p`, and `--offline-db` (accepting either a single sorted dump file or a per-prefix range directory `00000.txt`–`FFFFF.txt`). See [Vault & Active Directory Auditing](vault-auditing.md).
+Audit a password-manager export, browser CSV, Active Directory `pwdump` file, or local `pass`/`gopass` store. Supports `--mode [sha1|ntlm]`, `-n`/`--ntlm`, `--check-reuse`, `--check-strength`, `--check-ad-hygiene`, `--exclude-machines`, `--custom-wordlist FILE`, `--concurrency`/`--parallelism`/`-p`, `--offline-db` (accepting either a single sorted dump file or a per-prefix range directory `00000.txt`–`FFFFF.txt`), `--notify-webhook`, and `--fail-if-pwned` (exit `8` on compromised, AD hygiene, or banned-wordlist findings). See [Vault & Active Directory Auditing](vault-auditing.md).
 
 #### `pwned offline download OUTPUT`
 Download an offline Pwned Passwords corpus (`00000`–`FFFFF`) as a per-prefix range directory (`00000.txt`–`FFFFF.txt`, default) or a single merged sorted dump (`--single` / `-s`). See [Offline Lookups & Local MCP Server](offline-and-mcp.md).

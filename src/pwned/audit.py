@@ -11,13 +11,24 @@ import shutil
 import subprocess  # noqa: S404
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypedDict
 
 from pydantic import Field
 
-from pwned._parsers import parse_pwdump_lines
+from pwned._parsers import (
+    EMPTY_LM_HASH as EMPTY_LM_HASH,
+)
+from pwned._parsers import (
+    EMPTY_NTLM_HASH as EMPTY_NTLM_HASH,
+)
+from pwned._parsers import (
+    _md4,
+    parse_input_lines,
+    parse_pwdump_records,
+)
 from pwned.models import NonNegativeInt, PasswordChecker, _HIBPBase
 from pwned.passwords import AsyncPwnedPasswordsClient
 from pwned.strength import compute_vault_risk_score, evaluate_password_strength
@@ -42,6 +53,10 @@ ExportSource = Literal[
 ]
 
 
+ADHygieneIssue = Literal["empty_ntlm", "lm_hash_present", "username_as_password"]
+WordlistMatchType = Literal["exact", "case_insensitive"]
+
+
 @dataclass(frozen=True)
 class AuditEntry:
     """Internal credential record parsed from a password-manager export."""
@@ -51,6 +66,7 @@ class AuditEntry:
     password: str = field(repr=False)
     is_hash: bool = False
     hash_type: Literal["sha1", "ntlm"] | None = None
+    has_lm_hash: bool = False
 
 
 class AuditFinding(_HIBPBase):
@@ -78,6 +94,23 @@ class StrengthFinding(_HIBPBase):
     reasons: list[str] = Field(default_factory=list)
 
 
+class ADHygieneFinding(_HIBPBase):
+    """Active Directory credential hygiene finding without exposing secrets."""
+
+    name: str
+    username: str
+    issue: ADHygieneIssue
+    detail: str
+
+
+class WordlistFinding(_HIBPBase):
+    """Custom organizational wordlist match without exposing secrets."""
+
+    name: str
+    username: str
+    match_type: WordlistMatchType
+
+
 class AuditSummary(_HIBPBase):
     """Summary of an audited password-manager export."""
 
@@ -89,6 +122,9 @@ class AuditSummary(_HIBPBase):
     weak_entries: NonNegativeInt = 0
     strength_findings: list[StrengthFinding] = Field(default_factory=list)
     risk_score: int | None = Field(default=None, ge=0, le=100)
+    ad_findings: list[ADHygieneFinding] = Field(default_factory=list)
+    wordlist_matches: NonNegativeInt = 0
+    wordlist_findings: list[WordlistFinding] = Field(default_factory=list)
 
 
 def _extract_bitwarden_entries(data: object) -> list[AuditEntry]:
@@ -474,7 +510,7 @@ def parse_keepass(path: Path, *, master_password: str) -> list[AuditEntry]:
     return entries
 
 
-def parse_pwdump(path: Path) -> list[AuditEntry]:
+def parse_pwdump(path: Path, *, exclude_machines: bool = False) -> list[AuditEntry]:
     """Parse an impacket secretsdump / pwdump file into pre-hashed NTLM audit entries."""
     with path.open(encoding="utf-8") as fh:
         return [
@@ -484,9 +520,23 @@ def parse_pwdump(path: Path) -> list[AuditEntry]:
                 password=nt_hash,
                 is_hash=True,
                 hash_type="ntlm",
+                has_lm_hash=bool(lm_hash and lm_hash != EMPTY_LM_HASH),
             )
-            for domain, user, nt_hash in parse_pwdump_lines(fh)
+            for domain, user, lm_hash, nt_hash in parse_pwdump_records(fh)
+            if not (exclude_machines and user.endswith("$"))
         ]
+
+
+def load_custom_wordlist(path: Path, *, ignore_comments: bool = True) -> list[str]:
+    """Load deduplicated banned password terms from a UTF-8 newline-delimited file."""
+    with path.open(encoding="utf-8-sig") as fh:
+        return parse_input_lines(
+            fh,
+            strip=True,
+            ignore_comments=ignore_comments,
+            deduplicate=True,
+            skip_empty=True,
+        )
 
 
 def parse_lastpass_csv(path: Path) -> list[AuditEntry]:
@@ -648,25 +698,33 @@ def load_export(
     *,
     source: ExportSource,
     master_password: str | None = None,
+    exclude_machines: bool = False,
 ) -> list[AuditEntry]:
     """Load credential entries from a supported password-manager export file or store."""
     if source == "pass":
-        return parse_pass_store(path)
-    if source == "gopass":
-        return parse_gopass_store(path)
-    if source not in ("keepass", "bitwarden-encrypted-json") and source not in _SIMPLE_PARSERS:
-        raise ValueError(f"Unsupported export source: {source!r}")
-    if path is None:
-        raise ValueError(f"A file path is required for source {source!r}.")
-    if source == "keepass":
-        if master_password is None:
-            raise ValueError("master_password is required for KeePass exports.")
-        return parse_keepass(path, master_password=master_password)
-    if source == "bitwarden-encrypted-json":
-        if master_password is None:
-            raise ValueError("master_password is required for encrypted Bitwarden JSON exports.")
-        return parse_bitwarden_encrypted_json(path, master_password=master_password)
-    return _SIMPLE_PARSERS[source](path)
+        entries = parse_pass_store(path)
+    elif source == "gopass":
+        entries = parse_gopass_store(path)
+    else:
+        if source not in ("keepass", "bitwarden-encrypted-json") and source not in _SIMPLE_PARSERS:
+            raise ValueError(f"Unsupported export source: {source!r}")
+        if path is None:
+            raise ValueError(f"A file path is required for source {source!r}.")
+        if source == "keepass":
+            if master_password is None:
+                raise ValueError("master_password is required for KeePass exports.")
+            entries = parse_keepass(path, master_password=master_password)
+        elif source == "bitwarden-encrypted-json":
+            if master_password is None:
+                raise ValueError(
+                    "master_password is required for encrypted Bitwarden JSON exports."
+                )
+            entries = parse_bitwarden_encrypted_json(path, master_password=master_password)
+        else:
+            entries = _SIMPLE_PARSERS[source](path)
+    if exclude_machines:
+        return [entry for entry in entries if not entry.username.endswith("$")]
+    return entries
 
 
 _CheckKey = tuple[bool, Literal["sha1", "ntlm"] | None, str]
@@ -677,6 +735,168 @@ class _OptionalSummaryFields(TypedDict, total=False):
     weak_entries: int
     strength_findings: list[StrengthFinding]
     risk_score: int
+    ad_findings: list[ADHygieneFinding]
+    wordlist_matches: int
+    wordlist_findings: list[WordlistFinding]
+
+
+def _case_variants(value: str) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            (
+                value,
+                value.lower(),
+                value.upper(),
+                value.capitalize(),
+                value.title(),
+            )
+        )
+    )
+
+
+def _username_candidates(username: str) -> tuple[str, ...]:
+    if not username:
+        return ()
+    bases = [username]
+    if username.endswith("$"):
+        stripped = username.rstrip("$")
+        if stripped:
+            bases.append(stripped)
+    if "@" in username:
+        local = username.split("@", 1)[0]
+        if local:
+            bases.append(local)
+    return tuple(dict.fromkeys(variant for base in bases for variant in _case_variants(base)))
+
+
+def _ntlm_digest(secret: str) -> str:
+    return _md4(secret.encode("utf-16-le")).upper()
+
+
+def _sha1_digest(secret: str) -> str:
+    return hashlib.sha1(secret.encode("utf-8")).hexdigest().upper()  # noqa: S324
+
+
+def _entry_is_ntlm(entry: AuditEntry, ntlm: bool) -> bool:
+    return entry.hash_type == "ntlm" or (entry.hash_type is None and ntlm)
+
+
+def _matches_username_password(entry: AuditEntry, *, ntlm: bool = False) -> bool:
+    candidates = _username_candidates(entry.username)
+    if not candidates:
+        return False
+    if entry.is_hash:
+        target = entry.password.upper()
+        hasher = _ntlm_digest if _entry_is_ntlm(entry, ntlm) else _sha1_digest
+        return any(hasher(candidate) == target for candidate in candidates)
+    target_folded = entry.password.casefold()
+    return any(candidate.casefold() == target_folded for candidate in candidates)
+
+
+def _collect_ad_hygiene_findings(
+    entries: Sequence[AuditEntry],
+    *,
+    ntlm: bool = False,
+) -> list[ADHygieneFinding]:
+    findings: list[ADHygieneFinding] = []
+    for entry in entries:
+        if (
+            entry.is_hash
+            and _entry_is_ntlm(entry, ntlm)
+            and entry.password.upper() == EMPTY_NTLM_HASH
+        ):
+            findings.append(
+                ADHygieneFinding(
+                    name=entry.name,
+                    username=entry.username,
+                    issue="empty_ntlm",
+                    detail="Account has an empty NTLM password hash.",
+                )
+            )
+        if entry.has_lm_hash:
+            findings.append(
+                ADHygieneFinding(
+                    name=entry.name,
+                    username=entry.username,
+                    issue="lm_hash_present",
+                    detail="Legacy LM hash is stored for this account.",
+                )
+            )
+        if _matches_username_password(entry, ntlm=ntlm):
+            findings.append(
+                ADHygieneFinding(
+                    name=entry.name,
+                    username=entry.username,
+                    issue="username_as_password",
+                    detail="Password matches account username.",
+                )
+            )
+    findings.sort(key=lambda finding: (finding.issue, finding.name, finding.username))
+    return findings
+
+
+def _build_hash_wordlist_sets(
+    terms: Sequence[str],
+    hasher: Callable[[str], str],
+) -> tuple[set[str], set[str]]:
+    exact: set[str] = set()
+    case_insensitive: set[str] = set()
+    for term in terms:
+        exact.add(hasher(term))
+        for variant in _case_variants(term):
+            case_insensitive.add(hasher(variant))
+    case_insensitive -= exact
+    return exact, case_insensitive
+
+
+def _collect_wordlist_findings(
+    entries: Sequence[AuditEntry],
+    custom_wordlist: Sequence[str] | AbstractSet[str],
+    *,
+    ntlm: bool = False,
+) -> list[WordlistFinding]:
+    terms = list(dict.fromkeys(term for term in custom_wordlist if term))
+    if not terms or not entries:
+        return []
+
+    exact_plain = set(terms)
+    ci_plain = {term.casefold() for term in terms}
+    ntlm_sets: tuple[set[str], set[str]] | None = None
+    sha1_sets: tuple[set[str], set[str]] | None = None
+
+    findings: list[WordlistFinding] = []
+    for entry in entries:
+        match_type: WordlistMatchType | None = None
+        if entry.is_hash:
+            digest = entry.password.upper()
+            if _entry_is_ntlm(entry, ntlm):
+                if ntlm_sets is None:
+                    ntlm_sets = _build_hash_wordlist_sets(terms, _ntlm_digest)
+                exact_hashes, ci_hashes = ntlm_sets
+            else:
+                if sha1_sets is None:
+                    sha1_sets = _build_hash_wordlist_sets(terms, _sha1_digest)
+                exact_hashes, ci_hashes = sha1_sets
+            if digest in exact_hashes:
+                match_type = "exact"
+            elif digest in ci_hashes:
+                match_type = "case_insensitive"
+        elif entry.password in exact_plain:
+            match_type = "exact"
+        elif entry.password.casefold() in ci_plain:
+            match_type = "case_insensitive"
+
+        if match_type is not None:
+            findings.append(
+                WordlistFinding(
+                    name=entry.name,
+                    username=entry.username,
+                    match_type=match_type,
+                )
+            )
+
+    findings.sort(key=lambda finding: (finding.name, finding.username, finding.match_type))
+    return findings
 
 
 def _entry_check_key(entry: AuditEntry) -> _CheckKey:
@@ -705,9 +925,12 @@ def _build_audit_summary(
     counts: Mapping[_CheckKey, int],
     *,
     threshold: int,
+    ntlm: bool,
     check_reuse: bool,
     check_strength: bool,
     min_strength_score: int,
+    check_ad_hygiene: bool,
+    custom_wordlist: Sequence[str] | AbstractSet[str] | None,
 ) -> AuditSummary:
     findings = [
         AuditFinding(
@@ -768,6 +991,14 @@ def _build_audit_summary(
         extra["strength_findings"] = strength_findings
         extra["risk_score"] = risk_score
 
+    if check_ad_hygiene:
+        extra["ad_findings"] = _collect_ad_hygiene_findings(entries, ntlm=ntlm)
+
+    if custom_wordlist is not None:
+        wordlist_findings = _collect_wordlist_findings(entries, custom_wordlist, ntlm=ntlm)
+        extra["wordlist_matches"] = len(wordlist_findings)
+        extra["wordlist_findings"] = wordlist_findings
+
     return AuditSummary(
         total_entries=len(entries),
         unique_passwords=len(counts),
@@ -787,6 +1018,8 @@ def audit_entries(
     check_reuse: bool = False,
     check_strength: bool = False,
     min_strength_score: int = 2,
+    check_ad_hygiene: bool = False,
+    custom_wordlist: Sequence[str] | AbstractSet[str] | None = None,
 ) -> AuditSummary:
     """Check unique entry passwords against Pwned Passwords via k-anonymity."""
     _validate_audit_options(threshold, min_strength_score)
@@ -812,9 +1045,12 @@ def audit_entries(
         entries,
         counts,
         threshold=threshold,
+        ntlm=ntlm,
         check_reuse=check_reuse,
         check_strength=check_strength,
         min_strength_score=min_strength_score,
+        check_ad_hygiene=check_ad_hygiene,
+        custom_wordlist=custom_wordlist,
     )
 
 
@@ -829,6 +1065,8 @@ async def async_audit_entries(
     check_strength: bool = False,
     min_strength_score: int = 2,
     concurrency: int = 10,
+    check_ad_hygiene: bool = False,
+    custom_wordlist: Sequence[str] | AbstractSet[str] | None = None,
 ) -> AuditSummary:
     """Concurrently check unique entry passwords against Pwned Passwords."""
     _validate_audit_options(threshold, min_strength_score)
@@ -858,7 +1096,10 @@ async def async_audit_entries(
         entries,
         counts,
         threshold=threshold,
+        ntlm=ntlm,
         check_reuse=check_reuse,
         check_strength=check_strength,
         min_strength_score=min_strength_score,
+        check_ad_hygiene=check_ad_hygiene,
+        custom_wordlist=custom_wordlist,
     )

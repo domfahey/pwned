@@ -4,14 +4,21 @@ from importlib.metadata import PackageNotFoundError, version
 
 from pwned.async_client import AsyncHIBPClient
 from pwned.audit import (
+    EMPTY_LM_HASH,
+    EMPTY_NTLM_HASH,
+    ADHygieneFinding,
+    ADHygieneIssue,
     AuditEntry,
     AuditFinding,
     AuditSummary,
     ExportSource,
     ReuseGroup,
     StrengthFinding,
+    WordlistFinding,
+    WordlistMatchType,
     async_audit_entries,
     audit_entries,
+    load_custom_wordlist,
     load_export,
     parse_dashlane_csv,
     parse_gopass_store,
@@ -126,6 +133,8 @@ except PackageNotFoundError:  # pragma: no cover
     __version__ = "0.0.0"
 
 __all__ = [
+    "ADHygieneFinding",
+    "ADHygieneIssue",
     "AccountBatchItem",
     "AsyncHIBPClient",
     "AsyncPwnedPasswordsClient",
@@ -148,6 +157,8 @@ __all__ = [
     "DoctorReport",
     "DomainReport",
     "DownloadStats",
+    "EMPTY_LM_HASH",
+    "EMPTY_NTLM_HASH",
     "EmailAlias",
     "ExitCode",
     "ExportSource",
@@ -183,6 +194,8 @@ __all__ = [
     "UnauthorizedError",
     "WEBHOOK_FORMATS",
     "WebhookFormat",
+    "WordlistFinding",
+    "WordlistMatchType",
     "__version__",
     "async_audit_entries",
     "async_batch_check_accounts",
@@ -212,6 +225,7 @@ __all__ = [
     "has_exposures",
     "keyring_available",
     "load_baseline",
+    "load_custom_wordlist",
     "load_export",
     "load_monitor_config",
     "load_settings",

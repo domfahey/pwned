@@ -61,6 +61,8 @@ def has_exposures(data: Any) -> bool:
                 bool(serialized.get("findings"))
                 or bool(serialized.get("reused_groups"))
                 or bool(serialized.get("strength_findings"))
+                or bool(serialized.get("ad_findings"))
+                or bool(serialized.get("wordlist_findings"))
             )
         if "new_exposures" in serialized:
             return int(serialized["new_exposures"]) > 0

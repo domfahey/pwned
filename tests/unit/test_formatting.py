@@ -8,7 +8,13 @@ from typing import Any
 
 import pytest
 
-from pwned.audit import AuditFinding, AuditSummary, ReuseGroup
+from pwned.audit import (
+    ADHygieneFinding,
+    AuditFinding,
+    AuditSummary,
+    ReuseGroup,
+    WordlistFinding,
+)
 from pwned.batch import AccountBatchItem, PasswordBatchItem
 from pwned.formatting import (
     OUTPUT_FORMATS,
@@ -418,6 +424,35 @@ class TestFormatSarif:
         doc = self._assert_valid_sarif_envelope(format_output(summary, fmt="sarif"))
         assert doc["runs"][0]["results"] == []
 
+    def test_sarif_audit_summary_with_ad_hygiene_and_wordlist(self) -> None:
+        summary = AuditSummary(
+            total_entries=3,
+            unique_passwords=3,
+            compromised_entries=1,
+            findings=[AuditFinding(name="CORP", username="alice", pwn_count=12)],
+            ad_findings=[
+                ADHygieneFinding(
+                    name="CORP",
+                    username="legacy",
+                    issue="lm_hash_present",
+                    detail="Legacy LM hash is stored for this account.",
+                ),
+            ],
+            wordlist_matches=1,
+            wordlist_findings=[
+                WordlistFinding(name="CORP", username="bob", match_type="exact"),
+            ],
+        )
+        doc = self._assert_valid_sarif_envelope(format_output(summary, fmt="sarif"))
+        rule_ids = {r["id"] for r in doc["runs"][0]["tool"]["driver"]["rules"]}
+        assert {"HIBP005", "HIBP006"} <= rule_ids
+        results = doc["runs"][0]["results"]
+        assert [r["ruleId"] for r in results] == ["HIBP002", "HIBP005", "HIBP006"]
+        assert "lm_hash_present" in results[1]["message"]["text"]
+        assert "legacy" in results[1]["message"]["text"]
+        assert "bob" in results[2]["message"]["text"]
+        assert "exact" in results[2]["message"]["text"]
+
     def test_sarif_search_result_full(self) -> None:
         sr = SearchResult(
             breaches=[Breach(Name="Adobe", Domain="adobe.com", PwnCount=152445165)],
@@ -539,6 +574,18 @@ class TestFormatMarkdown:
             reused_groups=[
                 ReuseGroup(entries=["GitHub", "GitLab"], count=2, pwn_count=42),
             ],
+            ad_findings=[
+                ADHygieneFinding(
+                    name="CORP|HQ",
+                    username="legacy",
+                    issue="lm_hash_present",
+                    detail="Legacy LM hash is stored for this account.",
+                ),
+            ],
+            wordlist_matches=1,
+            wordlist_findings=[
+                WordlistFinding(name="CORP", username="bob", match_type="case_insensitive"),
+            ],
         )
         payload = serialize(summary)
         payload["strength_findings"] = [
@@ -549,12 +596,18 @@ class TestFormatMarkdown:
         assert "| Total Entries | 10 |" in out
         assert "| Unique Passwords | 8 |" in out
         assert "| Compromised Entries | 2 |" in out
+        assert "| AD Hygiene Findings | 1 |" in out
+        assert "| Custom Wordlist Matches | 1 |" in out
         assert "### Compromised Credentials" in out
         assert "| GitHub\\|Prod | alice bob | 42 |" in out
         assert "### Reused Passwords" in out
         assert "| GitHub, GitLab | 2 | 42 |" in out
         assert "### Weak Passwords" in out
         assert "| Router | admin | 1 | Too short |" in out
+        assert "### AD Hygiene Findings" in out
+        assert "| CORP\\|HQ | legacy | lm_hash_present |" in out
+        assert "### Custom Wordlist Matches" in out
+        assert "| CORP | bob | case_insensitive |" in out
 
     def test_markdown_audit_summary_clean(self) -> None:
         summary = AuditSummary(
@@ -562,13 +615,20 @@ class TestFormatMarkdown:
             unique_passwords=5,
             compromised_entries=0,
             findings=[],
+            ad_findings=[],
+            wordlist_matches=0,
+            wordlist_findings=[],
         )
         out = format_output(summary, fmt="markdown")
         assert "## Vault Audit Summary" in out
         assert "| Total Entries | 5 |" in out
+        assert "| AD Hygiene Findings | 0 |" in out
+        assert "| Custom Wordlist Matches | 0 |" in out
         assert "### Compromised Credentials" not in out
         assert "### Reused Passwords" not in out
         assert "### Weak Passwords" not in out
+        assert "### AD Hygiene Findings" not in out
+        assert "### Custom Wordlist Matches" not in out
 
         minimal_out = format_output({"total_entries": 1, "findings": []}, fmt="markdown")
         assert "## Vault Audit Summary" in minimal_out
