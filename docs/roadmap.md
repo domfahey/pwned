@@ -129,6 +129,26 @@ Prioritized from cross-ecosystem research (official `HaveIBeenPwned.Cli` / `have
 - [x] **SQLite exposure history & remediation tracking (`monitor --db`)** — persist first-seen and resolved exposure timestamps in a stdlib `sqlite3` store to track breach trends and rotated credentials across runs, feeding trend summaries into `domain-report`, `--format markdown`, and `--format html`.
 - [x] **Expanded alert destinations** — add Microsoft Teams (Adaptive Cards), PagerDuty (Events API v2), SMTP email, and GitHub Issue auto-creation/commenting for CI monitoring pipelines.
 
+## Planned
+
+Focused on workflows outside the official [`hibp` CLI](https://haveibeenpwned.com/cli), which covers one-off API lookups. Items marked **(priority)** come first.
+
+### Organizations
+- [ ] **Directory matching (priority)**: pull users from Entra ID, Okta, or Google Workspace and join them to domain search and stealer-log results to separate active from departed staff, attach managers, and optionally force password resets through the identity provider's API.
+- [ ] **Multi-tenant mode for managed service providers**: one config covering many client domains, with a branded `domain-report` per client and alerts routed to each client's own channels.
+- [ ] **Stealer logs vs. SaaS inventory**: compare stealer-log website domains against a list of approved company apps to flag infected devices signing into sanctioned tools.
+- [ ] **SIEM export**: send findings to Splunk (HEC) or Elastic in the OCSF security-event format, alongside the existing SARIF output.
+
+### Blocking Breached Passwords at the Source
+- [ ] **Linux password filter (priority)**: a PAM hook (via `pam_exec`) that rejects breached passwords on `passwd` using the local `PWNL` Bloom filter, with no network calls.
+- [ ] **Login-time checks for web apps**: FastAPI/Starlette middleware and Flask/Django hooks that recheck passwords on successful login (NIST 800-63B), backed by `pwned serve` or a local Bloom filter.
+- [ ] **Hardening `pwned serve`**: Helm chart, health checks, and scheduled index refreshes for air-gapped deployments of a self-hosted Pwned Passwords API.
+
+### Compliance & Analysis
+- [ ] **Compliance evidence (priority)**: a report showing breached-password screening is in place, mapped to NIST 800-63B, PCI DSS 4.0, and SOC 2 controls, built from `audit`, `history`, and validator data.
+- [ ] **Password-policy simulator**: run a proposed policy (length, complexity rules) against breached passwords to measure how many would still be allowed.
+- [ ] **Breach-trend analysis**: load the breach catalogue into pandas to analyze trends by data class, industry, or year.
+
 ## Backlog / External
 
 - [ ] **PyPI publishing (optional)** — pick a non-colliding distribution name (since `pwned` is already taken on PyPI) while keeping the `pwned` CLI entrypoint, and configure OIDC Trusted Publishing in `.github/workflows/release.yml`.
