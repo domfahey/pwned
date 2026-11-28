@@ -13,11 +13,11 @@ An unofficial, typed Python SDK and security-workflow toolkit for [Troy Hunt](ht
 - **Privacy-first password checks** — *k*-anonymity (SHA-1 & NTLM, 5-char prefix only, padded by default), air-gapped `O(1)` per-prefix range directories, ~50% smaller `PWNB` compact binary indexes, sub-1 GB `PWNL` Bloom filters, `O(log N)` sorted text dumps, and self-hosted `pwned serve` range servers; plaintext passwords never leave your machine.
 - **18 vault & Active Directory audit sources** — Bitwarden (JSON, PBKDF2/Argon2id encrypted JSON, CSV, live `bw`/`rbw` CLI), 1Password (CSV, 1PUX, live `op` CLI), LastPass, Dashlane, Proton Pass, Chrome/Edge, Firefox, Apple Passwords, generic CSV, KeePass `.kdbx`, AD `pwdump`/`secretsdump` (with hygiene checks & banned wordlists), and live Unix `pass`/`gopass`, plus Watchtower-style breach & stealer-log correlation.
 - **CI/CD & reporting ready** — `text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, and standalone `html` outputs, declarative `pwned.toml` monitoring with SQLite exposure history & baseline diffing, Slack/Discord/Teams/PagerDuty/SMTP/GitHub Issues alerts, GitHub Action, and multi-arch container images.
-- **Python SDK with full HIBP API v3 coverage**: all 21 / 21 endpoints in sync and async clients, strict Pydantic v2 models, and Pydantic/FastAPI/Django password validators ([coverage matrix](docs/hibp-api-coverage.md)).
+- **Python SDK with full HIBP API v3 coverage** — all 21 / 21 endpoints in sync and async clients, strict Pydantic v2 models, and Pydantic/FastAPI/Django password validators ([coverage matrix](docs/hibp-api-coverage.md)).
 
 ### `pwned` or the official CLI?
 
-Have I Been Pwned publishes an official [.NET CLI (`hibp`)](https://haveibeenpwned.com/cli). **For one-off breach, account, domain, or password lookups, use `hibp`.** It is maintained by HIBP and covers the API directly. `pwned` keeps the same exit codes and similar flags (`--markdown`, `--outfile`, `--fail-if-found`), so scripts move between the two easily.
+Have I Been Pwned publishes an official [.NET CLI (`hibp`)](https://haveibeenpwned.com/cli), currently in preview (requires the .NET 10 SDK; install with `dotnet tool install --global HaveIBeenPwned.Cli --prerelease`). **For one-off breach, account, domain, or password lookups, use `hibp`.** It is maintained by HIBP and covers the API directly. `pwned` uses the same exit codes and shares some flags (`--markdown`, `--outfile`, and `--fail-if-found`, an alias of `--fail-if-pwned`). Command names and default output differ, though: `hibp` prints JSON by default, while `pwned` prints text unless given `--json`.
 
 Use `pwned` when you need what the official CLI doesn't do:
 
