@@ -4,7 +4,7 @@ import platform
 import re
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Literal, cast
+from typing import BinaryIO, Literal, cast
 
 from pydantic import Field
 
@@ -17,11 +17,12 @@ from pwned.config import (
     mask_api_key,
 )
 from pwned.models import NonNegativeInt, _HIBPBase
-from pwned.offline import OfflinePasswordsClient, _read_directory_mode
+from pwned.offline import OfflinePasswordsClient, _find_line_start, _read_directory_mode
 from pwned.passwords import PwnedPasswordsClient
 
 _PREFIX_FILE_RE = re.compile(r"^[0-9A-Fa-f]{5}\.txt$")
-_DUMP_LINE_RE = re.compile(rb"^([0-9A-Fa-f]{32}|[0-9A-Fa-f]{40}):[0-9]+$")
+_DUMP_LINE_RE = re.compile(rb"^([0-9A-Fa-f]{32}|[0-9A-Fa-f]{40}):([0-9]+)$")
+_DUMP_SAMPLE_POINTS = 16
 
 
 class DoctorCheck(_HIBPBase):
@@ -69,6 +70,23 @@ def _inspect_cache(cache_dir: Path) -> tuple[int, int]:
             entries += 1
             total_bytes += path.stat().st_size
     return entries, total_bytes
+
+
+def _sample_line_offsets(handle: BinaryIO, size: int) -> list[int]:
+    """Return deduplicated ascending line-start offsets sampled across the dump file."""
+    handle.seek(max(0, size - 2))
+    tail = handle.read(2)
+    trimmed = len(tail) - len(tail.rstrip(b"\r\n"))
+    last_pos = max(0, size - trimmed - 1)
+    offsets: list[int] = []
+    seen: set[int] = set()
+    for step in range(_DUMP_SAMPLE_POINTS + 1):
+        probe = (last_pos * step) // _DUMP_SAMPLE_POINTS
+        start = _find_line_start(handle, probe)
+        if start not in seen:
+            seen.add(start)
+            offsets.append(start)
+    return offsets
 
 
 def _inspect_offline_db(
@@ -147,20 +165,59 @@ def _inspect_offline_db(
                 ),
             )
         with offline_db.open("rb") as handle:
-            first_line = handle.readline().rstrip(b"\r\n")
-        match = _DUMP_LINE_RE.match(first_line)
-        if match is None:
-            return (
-                "file",
-                None,
-                None,
-                DoctorCheck(
-                    name="offline_db",
-                    status="error",
-                    detail=f"Unrecognized dump format (expected HASH:COUNT lines): {offline_db}",
-                ),
-            )
-        file_mode: Literal["sha1", "ntlm"] = "ntlm" if len(match.group(1)) == 32 else "sha1"
+            offsets = _sample_line_offsets(handle, size)
+            prev_hash: bytes | None = None
+            expected_len: int | None = None
+            samples: list[str] = []
+            for offset in offsets:
+                handle.seek(offset)
+                raw_line = handle.readline().rstrip(b"\r\n")
+                match = _DUMP_LINE_RE.match(raw_line)
+                if match is None:
+                    return (
+                        "file",
+                        None,
+                        None,
+                        DoctorCheck(
+                            name="offline_db",
+                            status="error",
+                            detail=(
+                                f"Unrecognized dump format (expected HASH:COUNT lines): "
+                                f"{offline_db}"
+                            ),
+                        ),
+                    )
+                digest = match.group(1).upper()
+                if expected_len is None:
+                    expected_len = len(digest)
+                elif len(digest) != expected_len:
+                    return (
+                        "file",
+                        None,
+                        None,
+                        DoctorCheck(
+                            name="offline_db",
+                            status="error",
+                            detail=f"Inconsistent hash lengths in dump file: {offline_db}",
+                        ),
+                    )
+                if prev_hash is not None and digest <= prev_hash:
+                    return (
+                        "file",
+                        "ntlm" if expected_len == 32 else "sha1",
+                        None,
+                        DoctorCheck(
+                            name="offline_db",
+                            status="error",
+                            detail=(
+                                f"Dump file is not sorted in strictly ascending hash order: "
+                                f"{offline_db}"
+                            ),
+                        ),
+                    )
+                prev_hash = digest
+                samples.append(digest.decode("ascii"))
+        file_mode: Literal["sha1", "ntlm"] = "ntlm" if expected_len == 32 else "sha1"
         if ntlm is not None and (("ntlm" if ntlm else "sha1") != file_mode):
             requested = "NTLM" if ntlm else "SHA1"
             return (
@@ -177,7 +234,8 @@ def _inspect_offline_db(
                 ),
             )
         with OfflinePasswordsClient(offline_db, ntlm=(file_mode == "ntlm")) as client:
-            client.check_password("password")
+            client.check_hash(samples[0])
+            client.check_hash(samples[-1])
         return (
             "file",
             file_mode,
@@ -185,7 +243,10 @@ def _inspect_offline_db(
             DoctorCheck(
                 name="offline_db",
                 status="ok",
-                detail=f"Sorted dump file ({file_mode.upper()}, {size:,} bytes)",
+                detail=(
+                    f"Sorted dump file ({file_mode.upper()}, {size:,} bytes, "
+                    f"{len(samples)} sampled records verified)"
+                ),
             ),
         )
     except OSError as exc:

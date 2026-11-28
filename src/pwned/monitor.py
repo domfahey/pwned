@@ -25,7 +25,6 @@ from pwned.models import Breach, NonNegativeInt, SearchResult, _HIBPBase
 from pwned.notify import WebhookFormat, send_webhook_notification
 
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
-_LATEST_BREACH_FILENAME = "_latest_breach.json"
 
 
 def _validate_non_empty(value: str, *, field_name: str) -> str:
@@ -277,31 +276,31 @@ def _latest_breach_marker(breach: Breach) -> dict[str, str | None]:
     }
 
 
-def _load_latest_breach_marker(path: Path) -> dict[str, Any] | None:
-    if not path.is_file():
-        return None
-    try:
-        loaded = load_baseline(path)
-    except (OSError, ValueError):
-        return None
-    return loaded if isinstance(loaded, dict) else None
-
-
 def _check_domain_target(
     target: MonitorDomainTarget,
     client: HIBPClient,
     *,
     baseline_dir: Path | None,
     save_baselines: bool,
-    skip_breaches: bool = False,
-) -> tuple[MonitorDomainResult, int]:
-    if skip_breaches and baseline_dir is not None:
-        if not target.include_stealer_logs:
-            return MonitorDomainResult(domain=target.domain, status="clean"), 0
+    latest_breach_marker: dict[str, str | None] | None = None,
+) -> tuple[MonitorDomainResult, int, bool]:
+    path: Path | None = None
+    previous: dict[str, Any] | None = None
+    if baseline_dir is not None:
         path = _baseline_path(baseline_dir, "domain", target.domain)
-        previous = load_baseline(path)
-        if not isinstance(previous, dict):
-            raise ValueError("Baseline domain snapshot must be a JSON object.")
+        if path.is_file():
+            loaded = load_baseline(path)
+            if not isinstance(loaded, dict):
+                raise ValueError("Baseline domain snapshot must be a JSON object.")
+            previous = loaded
+
+    if (
+        latest_breach_marker is not None
+        and previous is not None
+        and previous.get("latest_breach") == latest_breach_marker
+    ):
+        if not target.include_stealer_logs:
+            return MonitorDomainResult(domain=target.domain, status="clean"), 0, True
         prev_breaches = previous.get("breaches")
         prev_logs = previous.get("stealer_logs")
         try:
@@ -318,13 +317,15 @@ def _check_domain_target(
                     error=str(exc),
                 ),
                 0,
+                True,
             )
-        if save_baselines:
+        if save_baselines and path is not None:
             save_baseline(
                 path,
                 {
                     "breaches": {} if prev_breaches is None else prev_breaches,
                     "stealer_logs": stealer_logs,
+                    "latest_breach": latest_breach_marker,
                 },
             )
         new_stealer_logs = diff_domain_breaches(
@@ -339,6 +340,7 @@ def _check_domain_target(
                 status="pwned" if count > 0 else "clean",
             ),
             count,
+            True,
         )
 
     try:
@@ -355,6 +357,7 @@ def _check_domain_target(
                 error=str(exc),
             ),
             0,
+            False,
         )
 
     stealer_logs = {}
@@ -373,16 +376,19 @@ def _check_domain_target(
                     error=str(exc),
                 ),
                 0,
+                False,
             )
 
-    if baseline_dir is not None:
-        path = _baseline_path(baseline_dir, "domain", target.domain)
-        previous = load_baseline(path) if path.is_file() else None
+    if path is not None:
         if save_baselines:
-            save_baseline(path, {"breaches": domain_breaches, "stealer_logs": stealer_logs})
+            snapshot: dict[str, Any] = {
+                "breaches": domain_breaches,
+                "stealer_logs": stealer_logs,
+            }
+            if latest_breach_marker is not None:
+                snapshot["latest_breach"] = latest_breach_marker
+            save_baseline(path, snapshot)
         if previous is not None:
-            if not isinstance(previous, dict):
-                raise ValueError("Baseline domain snapshot must be a JSON object.")
             prev_breaches = previous.get("breaches")
             prev_logs = previous.get("stealer_logs")
             new_aliases = diff_domain_breaches(
@@ -410,6 +416,7 @@ def _check_domain_target(
             status=status,
         ),
         count,
+        False,
     )
 
 
@@ -444,43 +451,25 @@ def run_monitor(
 
     effective_precheck = config.smart_precheck or smart_precheck_override
     current_marker: dict[str, str | None] | None = None
-    latest_unchanged = False
     if effective_precheck and config.baseline_dir is not None and config.domains:
         try:
             current_marker = _latest_breach_marker(client.get_latest_breach())
         except HIBPError:
             current_marker = None
-        if current_marker is not None:
-            marker_path = config.baseline_dir / _LATEST_BREACH_FILENAME
-            previous_marker = _load_latest_breach_marker(marker_path)
-            latest_unchanged = previous_marker is not None and current_marker == previous_marker
 
     domains_skipped = 0
     for domain_target in config.domains:
-        skip_breaches = (
-            latest_unchanged
-            and config.baseline_dir is not None
-            and _baseline_path(config.baseline_dir, "domain", domain_target.domain).is_file()
-        )
-        if skip_breaches:
-            domains_skipped += 1
-        dom_result, count = _check_domain_target(
+        dom_result, count, was_skipped = _check_domain_target(
             domain_target,
             client,
             baseline_dir=config.baseline_dir,
             save_baselines=save_baselines,
-            skip_breaches=skip_breaches,
+            latest_breach_marker=current_marker,
         )
+        if was_skipped:
+            domains_skipped += 1
         domain_results.append(dom_result)
         total_exposures += count
-
-    if (
-        save_baselines
-        and current_marker is not None
-        and config.baseline_dir is not None
-        and all(item.status != "error" for item in domain_results)
-    ):
-        save_baseline(config.baseline_dir / _LATEST_BREACH_FILENAME, current_marker)
 
     report = MonitorReport(
         accounts_checked=len(config.accounts),

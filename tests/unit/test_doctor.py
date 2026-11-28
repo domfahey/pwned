@@ -256,9 +256,12 @@ class TestRunDoctor:
     def test_offline_db_single_file_checks(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Valid SHA-1 file
+        # Valid multi-line sorted SHA-1 file
         sha1_file = tmp_path / "sha1.txt"
-        sha1_file.write_text(f"{_sha1_hex('password')}:99\r\n", encoding="utf-8")
+        sha1_file.write_text(
+            f"{'0' * 40}:1\r\n{_sha1_hex('password')}:99\r\n{'F' * 40}:2\r\n",
+            encoding="utf-8",
+        )
         res_sha1 = run_doctor(
             offline_db=sha1_file,
             cache_dir=tmp_path / "cache",
@@ -267,7 +270,41 @@ class TestRunDoctor:
         assert res_sha1.healthy is True
         assert res_sha1.offline_db_kind == "file"
         assert res_sha1.offline_db_mode == "sha1"
-        assert {c.name: c for c in res_sha1.checks}["offline_db"].status == "ok"
+        sha1_check = {c.name: c for c in res_sha1.checks}["offline_db"]
+        assert sha1_check.status == "ok"
+        assert "sampled records verified" in sha1_check.detail
+
+        # Unsorted file -> error (must NOT report healthy!)
+        unsorted_file = tmp_path / "unsorted.txt"
+        unsorted_file.write_text(
+            f"{'F' * 40}:1\r\n{'0' * 40}:2\r\n",
+            encoding="utf-8",
+        )
+        res_unsorted = run_doctor(
+            offline_db=unsorted_file,
+            cache_dir=tmp_path / "cache",
+            check_network=False,
+        )
+        assert res_unsorted.healthy is False
+        unsorted_check = {c.name: c for c in res_unsorted.checks}["offline_db"]
+        assert unsorted_check.status == "error"
+        assert "not sorted" in unsorted_check.detail
+
+        # Mixed SHA-1 + NTLM hash lengths -> error
+        mixed_file = tmp_path / "mixed.txt"
+        mixed_file.write_text(
+            f"{'0' * 40}:1\r\n{'F' * 32}:2\r\n",
+            encoding="utf-8",
+        )
+        res_mixed = run_doctor(
+            offline_db=mixed_file,
+            cache_dir=tmp_path / "cache",
+            check_network=False,
+        )
+        assert res_mixed.healthy is False
+        mixed_check = {c.name: c for c in res_mixed.checks}["offline_db"]
+        assert mixed_check.status == "error"
+        assert "Inconsistent hash lengths" in mixed_check.detail
 
         # Valid NTLM file + explicit mismatch
         ntlm_file = tmp_path / "ntlm.txt"

@@ -656,8 +656,11 @@ include_stealer_logs = true
     assert stub1.domain_stealer_calls == ["stealer.example"]
     assert report1.domains_skipped == 0
     assert report1.new_exposures == 3
-    marker_file = baseline_dir / "_latest_breach.json"
-    assert marker_file.is_file()
+    ex_file = baseline_dir / f"domain_{_domain_hash('example.com')}.json"
+    st_file = baseline_dir / f"domain_{_domain_hash('stealer.example')}.json"
+    assert json.loads(ex_file.read_text(encoding="utf-8"))["latest_breach"]["Name"] == "BreachV1"
+    assert json.loads(st_file.read_text(encoding="utf-8"))["latest_breach"]["Name"] == "BreachV1"
+    assert not (baseline_dir / "_latest_breach.json").exists()
 
     # 2. Second run with identical latestBreach: skips domain breach calls,
     # still runs stealer logs for stealer.example and reports new stealer log!
@@ -723,7 +726,8 @@ include_stealer_logs = true
     assert report3.domains_skipped == 1
     assert report3.new_exposures == 1
 
-    # 4. New latestBreach arrives, but one domain errors -> marker is NOT updated.
+    # 4. Per-domain marker: temporarily omit stealer.example while BreachV2 arrives.
+    # example.com errors (stays at V1); brandnew.example succeeds (advances to V2).
     latest_v2 = Breach(Name="BreachV2")
     stub4 = _StubHIBPClient(
         domain_breaches={
@@ -740,27 +744,36 @@ include_stealer_logs = true
     )
     assert report4.domains_skipped == 0
     assert report4.domains[0].status == "error"
-    assert json.loads(marker_file.read_text(encoding="utf-8"))["Name"] == "BreachV1"
+    assert json.loads(ex_file.read_text(encoding="utf-8"))["latest_breach"]["Name"] == "BreachV1"
+    bn_file = baseline_dir / f"domain_{_domain_hash('brandnew.example')}.json"
+    assert json.loads(bn_file.read_text(encoding="utf-8"))["latest_breach"]["Name"] == "BreachV2"
 
-    # 5. Next run succeeds -> marker advances to BreachV2.
+    # 5. Restoring stealer.example (still stamped V1) alongside brandnew.example (V2)
+    # and example.com (still V1): skips ONLY brandnew.example and refreshes both V1 domains!
+    cfg_restored = MonitorConfig(
+        baseline_dir=baseline_dir,
+        smart_precheck=True,
+        domains=[
+            MonitorDomainTarget(domain="example.com"),
+            MonitorDomainTarget(domain="brandnew.example"),
+            MonitorDomainTarget(domain="stealer.example"),
+        ],
+    )
     stub5 = _StubHIBPClient(
         domain_breaches={
             "example.com": {"alice": ["Adobe", "BreachV2"]},
-            "brandnew.example": {"carol": ["Canva"]},
+            "stealer.example": {"bob": ["Adobe", "BreachV2"]},
         },
         latest_breach=latest_v2,
     )
-    report5 = run_monitor(
-        cfg_with_new,
-        stub5,  # type: ignore[arg-type]
-        save_baselines=True,
-        smart_precheck_override=True,
-    )
-    assert report5.domains_skipped == 0
-    assert report5.new_exposures == 1
-    assert json.loads(marker_file.read_text(encoding="utf-8"))["Name"] == "BreachV2"
+    report5 = run_monitor(cfg_restored, stub5, save_baselines=True)  # type: ignore[arg-type]
+    assert stub5.domain_breach_calls == ["example.com", "stealer.example"]
+    assert report5.domains_skipped == 1
+    assert report5.new_exposures == 2
+    assert json.loads(ex_file.read_text(encoding="utf-8"))["latest_breach"]["Name"] == "BreachV2"
+    assert json.loads(st_file.read_text(encoding="utf-8"))["latest_breach"]["Name"] == "BreachV2"
 
-    # 6. get_latest_breach() raising HIBPError or corrupt marker falls back gracefully.
+    # 6. get_latest_breach() raising HIBPError falls back gracefully.
     stub_err_latest = _StubHIBPClient(
         domain_breaches={"example.com": {"alice": ["Adobe", "BreachV2"]}},
         latest_breach=HIBPError("Network timeout"),
@@ -774,32 +787,20 @@ include_stealer_logs = true
     assert stub_err_latest.domain_breach_calls == ["example.com"]
     assert report_fallback.domains_skipped == 0
 
-    marker_file.write_text("{corrupt json", encoding="utf-8")
-    stub_corrupt_marker = _StubHIBPClient(
-        domain_breaches={"example.com": {"alice": ["Adobe", "BreachV2"]}},
-        latest_breach=latest_v2,
-    )
-    report_corrupt = run_monitor(cfg_single, stub_corrupt_marker)  # type: ignore[arg-type]
-    assert stub_corrupt_marker.domain_breach_calls == ["example.com"]
-    assert report_corrupt.domains_skipped == 0
-
-    # 7. Corrupt domain baseline with unchanged latestBreach + stealer logs raises ValueError.
+    # 7. Corrupt domain baseline JSON raises ValueError instead of silently skipping.
     corrupt_dom_file = baseline_dir / f"domain_{_domain_hash('stealer.example')}.json"
     corrupt_dom_file.write_text(json.dumps(["bad"]), encoding="utf-8")
-    marker_file.write_text(
-        json.dumps({"Name": "BreachV2", "AddedDate": None, "ModifiedDate": None}), encoding="utf-8"
-    )
-    cfg_corrupt_stealer = MonitorConfig(
+    cfg_corrupt = MonitorConfig(
         baseline_dir=baseline_dir,
         smart_precheck=True,
-        domains=[MonitorDomainTarget(domain="stealer.example", include_stealer_logs=True)],
+        domains=[MonitorDomainTarget(domain="stealer.example")],
     )
     stub_corrupt_dom = _StubHIBPClient(
-        domain_stealer_logs={"stealer.example": {}},
+        domain_breaches={"stealer.example": {}},
         latest_breach=latest_v2,
     )
     with pytest.raises(ValueError, match="JSON object"):
-        run_monitor(cfg_corrupt_stealer, stub_corrupt_dom)  # type: ignore[arg-type]
+        run_monitor(cfg_corrupt, stub_corrupt_dom)  # type: ignore[arg-type]
 
 
 def test_run_monitor_with_real_hibp_client_type(httpx_mock: Any) -> None:
