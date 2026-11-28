@@ -11,16 +11,16 @@
 An unofficial command-line tool and typed Python SDK for querying [Troy Hunt](https://www.troyhunt.com)'s [Have I Been Pwned](https://haveibeenpwned.com/) service (API v3) — with offline password auditing, declarative breach monitoring, and a local stdio MCP server.
 
 - **100% HIBP API v3 parity** — all 21 / 21 endpoints across sync/async clients and the CLI ([coverage matrix](docs/hibp-api-coverage.md)).
-- **Privacy-first password checks** — *k*-anonymity (SHA-1 & NTLM, 5-char prefix only, padded by default) or air-gapped `O(1)` per-prefix range directories and `O(log N)` offline hash dumps; plaintext passwords never leave your machine.
-- **16 vault & Active Directory audit sources** — Bitwarden (JSON, PBKDF2/Argon2id encrypted JSON, CSV), 1Password (CSV, 1PUX), LastPass, Dashlane, Proton Pass, Chrome/Edge, Firefox, Apple Passwords, generic CSV, KeePass `.kdbx`, AD `pwdump`/`secretsdump`, and live Unix `pass`/`gopass`.
-- **CI/CD & reporting ready** — `text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, and standalone `html` outputs, declarative `pwned.toml` monitoring, baseline diffing, Slack/Discord/generic webhooks, GitHub Action, and multi-arch container images.
+- **Privacy-first password checks** — *k*-anonymity (SHA-1 & NTLM, 5-char prefix only, padded by default), air-gapped `O(1)` per-prefix range directories, ~50% smaller `PWNB` compact binary indexes, sub-1 GB `PWNL` Bloom filters, `O(log N)` sorted text dumps, and self-hosted `pwned serve` range servers; plaintext passwords never leave your machine.
+- **18 vault & Active Directory audit sources** — Bitwarden (JSON, PBKDF2/Argon2id encrypted JSON, CSV, live `bw`/`rbw` CLI), 1Password (CSV, 1PUX, live `op` CLI), LastPass, Dashlane, Proton Pass, Chrome/Edge, Firefox, Apple Passwords, generic CSV, KeePass `.kdbx`, AD `pwdump`/`secretsdump` (with hygiene checks & banned wordlists), and live Unix `pass`/`gopass`, plus Watchtower-style breach & stealer-log correlation.
+- **CI/CD & reporting ready** — `text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, and standalone `html` outputs, declarative `pwned.toml` monitoring with SQLite exposure history & baseline diffing, Slack/Discord/Teams/PagerDuty/SMTP/GitHub Issues alerts, GitHub Action, and multi-arch container images.
 
 ## Quickstart
 
 Try a public breach lookup without installing anything (free, no API key or secrets required):
 
 ```bash
-uvx --from git+https://github.com/domfahey/pwned.git@v0.5.0 pwned breach Adobe
+uvx --from git+https://github.com/domfahey/pwned.git@v0.6.0 pwned breach Adobe
 ```
 
 Common workflows once installed from a pinned or verified release:
@@ -49,10 +49,10 @@ Read the hosted docs at **[domfahey.github.io/pwned](https://domfahey.github.io/
 | [CLI Reference](docs/cli-reference.md) | Commands, short aliases, global flags, output formats, credential precedence, exit codes |
 | [HIBP API v3 Coverage](docs/hibp-api-coverage.md) | 21 / 21 endpoint parity matrix, response models, rate limiting, error handling, test accounts |
 | [Python Library Guide](docs/python-api.md) | Sync/async clients, caching, retry jitter, batching, Pydantic/FastAPI/Django validators |
-| [Vault & Active Directory Auditing](docs/vault-auditing.md) | 16 vault/browser/`pwdump`/`pass`/`gopass` sources, Argon2id, reuse & strength scoring |
-| [Monitoring, Webhooks & CI/CD](docs/monitoring-and-ci.md) | `pwned.toml`, baselines, webhooks, SARIF/Markdown/HTML, GitHub Action, pre-commit, Docker |
-| [Offline Lookups & Local MCP Server](docs/offline-and-mcp.md) | Resumable offline dump downloads, `OfflinePasswordsClient`, and `pwned mcp` |
-| [Roadmap](docs/roadmap.md) | Completed milestones and planned `v0.6.0` improvements |
+| [Vault & Active Directory Auditing](docs/vault-auditing.md) | 18 vault/browser/`pwdump`/`pass`/`gopass`/live CLI sources, Argon2id, AD hygiene, banned wordlists, breach correlation, reuse & strength scoring |
+| [Monitoring, Webhooks & CI/CD](docs/monitoring-and-ci.md) | `pwned.toml`, SQLite history, baselines, Slack/Discord/Teams/PagerDuty/SMTP/GitHub Issues, SARIF/Markdown/HTML, GitHub Action, pre-commit, Docker |
+| [Offline Lookups & Local MCP Server](docs/offline-and-mcp.md) | Resumable offline dumps, compact `PWNB`/Bloom `PWNL` indexes, `pwned serve`, `OfflinePasswordsClient`, and `pwned mcp` |
+| [Roadmap](docs/roadmap.md) | Completed milestones through `v0.6.0` and future backlog |
 
 ## Installation
 
@@ -61,13 +61,13 @@ Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/) (or Docker/Podman for
 ### Global CLI (`uv tool`)
 
 ```bash
-uv tool install git+https://github.com/domfahey/pwned.git@v0.5.0
+uv tool install git+https://github.com/domfahey/pwned.git@v0.6.0
 
 # With all optional extras (KeePass, OS Keychain, Bitwarden encryption, zxcvbn)
-uv tool install "pwned[all] @ git+https://github.com/domfahey/pwned.git@v0.5.0"
+uv tool install "pwned[all] @ git+https://github.com/domfahey/pwned.git@v0.6.0"
 ```
 
-For sensitive password or vault audits, prefer a pinned release tag, verified [GitHub Release](https://github.com/domfahey/pwned/releases) wheel (`SHA256SUMS.txt` + `gh attestation verify`), or audited local clone (`uv sync --frozen`).
+For sensitive password or vault audits, prefer a pinned release tag, verified [GitHub Release](https://github.com/domfahey/pwned/releases) wheel (`SHA256SUMS.txt`, CycloneDX SBOM, and Sigstore `gh attestation verify`), or audited local clone (`uv sync --frozen`).
 
 Optional extras: `keepass` (`pykeepass`), `keyring` (OS Keychain), `crypto` (`cryptography>=44.0` for Bitwarden PBKDF2 & Argon2id encrypted JSON), `strength` (`zxcvbn`), or `all`.
 
@@ -119,7 +119,7 @@ Commands are grouped by HIBP subscription tier. Protected commands (`Core` and a
 
 | Plan Tier | Commands |
 |---|---|
-| **Free / No API key** | `password` (`pw`), `password-range` (`pr`), `audit`, `offline download`, `mcp`, `breach`, `breaches`, `latest-breach` (`lb`), `dataclasses` (`dc`), `cache clear`, `auth set\|show\|clear`, `doctor`, `completion` |
+| **Free / No API key** | `password` (`pw`), `password-range` (`pr`), `audit`, `offline download\|compact\|build-bloom`, `serve`, `mcp`, `breach`, `breaches`, `latest-breach` (`lb`), `dataclasses` (`dc`), `cache clear`, `auth set\|show\|clear`, `doctor`, `completion` |
 | **Core / Pro / High RPM** | `account` (`ba`), `search`, `pastes` (`pa`), `subscription`, `domain` (`bd`), `domain-report`, `monitor`, `subscribed-domains` (`sd`) |
 | **Pro / High RPM** | `account-range` (`bar`) |
 | **Pro** | `stealer email\|website\|domain`, `domain-verify dns-token\|dns-check\|meta-tag\|meta-check\|email`, `subscribed-domains remove` |
@@ -222,12 +222,12 @@ pwned monitor --config pwned.toml --save-baselines
 
 ### GitHub Action
 
-Run scheduled exposure monitoring or local vault/hash audits in GitHub Actions with `domfahey/pwned@v0.5.0`:
+Run scheduled exposure monitoring or local vault/hash audits in GitHub Actions with `domfahey/pwned@v0.6.0`:
 
 ```yaml
 steps:
   - uses: actions/checkout@v4
-  - uses: domfahey/pwned@v0.5.0
+  - uses: domfahey/pwned@v0.6.0
     env:
       PWNED_WEBHOOK_URL: ${{ secrets.PWNED_WEBHOOK_URL }}
     with:
@@ -252,7 +252,7 @@ Add `pwned-audit` to `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/domfahey/pwned
-    rev: v0.5.0
+    rev: v0.6.0
     hooks:
       - id: pwned-audit
 ```
@@ -314,21 +314,25 @@ src/pwned/
 ├── batch.py            # Sync & async batching with RPM pacing and stats
 ├── cache.py            # File-based XDG TTL response caching
 ├── cli.py              # Click command groups and global option parser
-├── cli_commands.py     # Additional CLI commands (auth, search, audit, offline, monitor, mcp, ...)
+├── cli_commands.py     # Additional CLI commands (auth, search, audit, offline, serve, monitor, mcp, ...)
 ├── cli_helpers.py      # CLI output rendering, error handling, and validation helpers
 ├── client.py           # Sync HIBP API client (haveibeenpwned.com)
 ├── config.py           # pydantic-settings config with XDG fallback and OS Keychain
+├── doctor.py           # End-user environment, credential, cache, offline DB, and API diagnostics
 ├── filtering.py        # Breach filtering and sorting helpers
 ├── formatting.py       # Output formatters (text, json, jsonl, csv, table, sarif, markdown, html)
+├── history.py          # SQLite exposure history & remediation tracking (ExposureHistoryStore)
 ├── mcp_server.py       # Local privacy-first stdio MCP server
 ├── models.py           # Pydantic v2 response models
 ├── monitor.py          # Declarative TOML monitoring engine
-├── notify.py           # HTTPS webhook notifications (Slack, Discord, generic JSON)
-├── offline.py          # Offline sorted hash file lookups (OfflinePasswordsClient)
+├── notify.py           # Alert notifications (Slack, Discord, Teams, PagerDuty, SMTP, GitHub Issues, JSON)
+├── offline.py          # Offline hash lookups across directories, PWNB/PWNL indexes, and text dumps
 ├── offline_download.py # Resumable official Pwned Passwords dump downloader
+├── offline_index.py    # Compact binary prefix-indexed dumps (PWNB) and mmap-able Bloom filters (PWNL)
 ├── passwords.py        # Sync & async Pwned Passwords clients (k-anonymity)
 ├── py.typed            # PEP 561 type marker
 ├── reporting.py        # Domain exposure risk summary reporting
+├── server.py           # Self-hosted k-anonymity HTTP range server & caching proxy (PwnedRangeServer)
 ├── strength.py         # Password strength heuristics & optional zxcvbn integration
 └── validators.py       # Framework password validators (Pydantic / FastAPI / Django)
 

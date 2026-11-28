@@ -109,7 +109,7 @@ Planned and completed improvements for `pwned`, prioritized from peer HIBP CLI/S
 - [x] **Smart `latestBreach` pre-check in `pwned monitor`** — poll unauthenticated `GET /latestBreach` (Cloudflare-cached) first and skip `GET /breachedDomain/{domain}` queries when no new breach has been added since each domain's last baseline snapshot.
 - [x] **CC BY 4.0 attribution footer in Markdown reports** — append a compact HIBP attribution footer to `--format markdown` breach, paste, domain, audit, and monitor reports (matching `README.md` and `--format html`).
 
-## Planned (v0.6.0)
+## Completed (v0.6.0)
 
 Prioritized from cross-ecosystem research (official `HaveIBeenPwned.Cli` / `haveibeenpwned.com/cli`, `DSInternals`, `easybill/easypwned`, `ScottHelme/when-pwned-passwords-bloom`, `alexbrazier/pwned-bloom`, `HaveIBeenPwned/PwnedPasswordsCloudflareWorker`, `Keyguard`, `1Password`/`Bitwarden` CLIs, `brycx/checkpwn`, and `wneessen/go-hibp`).
 
@@ -133,5 +133,5 @@ Prioritized from cross-ecosystem research (official `HaveIBeenPwned.Cli` / `have
 
 - [ ] **PyPI publishing (optional)** — pick a non-colliding distribution name (since `pwned` is already taken on PyPI) while keeping the `pwned` CLI entrypoint, and configure OIDC Trusted Publishing in `.github/workflows/release.yml`.
 - [ ] **Homebrew tap (`domfahey/homebrew-tap`)** — publish `packaging/homebrew/pwned.rb` and automate formula URL/SHA256 updates on release tags.
-- [ ] **GitHub Marketplace Action listing** — check **Publish this Action to the GitHub Marketplace** on the `v0.5.0` release UI after accepting the GitHub Marketplace Developer Agreement.
+- [ ] **GitHub Marketplace Action listing** — check **Publish this Action to the GitHub Marketplace** on the `v0.6.0` release UI after accepting the GitHub Marketplace Developer Agreement.
 - [ ] **OpenSSF Best Practices badge** — manual web registration on `bestpractices.dev`.

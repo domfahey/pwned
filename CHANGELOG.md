@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-28
+
 ### Added
 - Release assets now include a CycloneDX SBOM (`pwned-<version>.cdx.json`) and the Sigstore-signed build provenance bundle (`pwned-<version>.sigstore.json`), verifiable with `gh attestation verify <file> --bundle pwned-<version>.sigstore.json --repo domfahey/pwned`.
 - Added extended Active Directory `pwdump` credential hygiene checks (`--check-ad-hygiene`, `--exclude-machines`, `ADHygieneFinding`, `EMPTY_LM_HASH`, `EMPTY_NTLM_HASH`, `parse_pwdump_records()`) to detect empty NTLM hashes (`31D6CFE0D16AE931B73C59D7E0C089C0`), present legacy LM hashes, and username-as-password matches (including case variants, `$` computer names, and UPN local-parts), plus `$` machine-account filtering across CLI, Python API, and local MCP `audit_vault`.
@@ -170,7 +172,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured error hierarchy (`HIBPError`, `NotFoundError`, `UnauthorizedError`, `ForbiddenError`, `RateLimitError`) and automatic 429 retry with capped `Retry-After`
 - Strict `mypy`, `ruff` (including Bandit `S` rules), GitHub Actions CI, and unit + integration test suites
 
-[Unreleased]: https://github.com/domfahey/pwned/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/domfahey/pwned/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/domfahey/pwned/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/domfahey/pwned/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/domfahey/pwned/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/domfahey/pwned/compare/v0.3.0...v0.4.0

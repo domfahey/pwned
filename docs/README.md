@@ -9,9 +9,9 @@ Complete user and developer documentation for `pwned` — the command-line inter
 | [CLI Reference](cli-reference.md) | All commands, subcommands, short aliases, global options, output formats (`text`, `json`, `jsonl`, `csv`, `table`, `sarif`, `markdown`, `html`), credential precedence, and exit codes |
 | [HIBP API v3 Coverage](hibp-api-coverage.md) | Full 21 / 21 HIBP API v3 endpoint matrix, response model field parity, headers, rate limiting, error parsing, and test accounts |
 | [Python Library Guide](python-api.md) | Sync & async HIBP and Pwned Passwords clients, caching, retry jitter, batching, framework validators (Pydantic/FastAPI/Django), reporting, webhooks, and exception handling |
-| [Vault & Active Directory Auditing](vault-auditing.md) | Auditing 16 password manager, browser, Active Directory `pwdump`/`secretsdump`, and Unix `pass`/`gopass` sources locally with `--check-reuse` and `--check-strength` |
-| [Monitoring, Webhooks & CI/CD](monitoring-and-ci.md) | Declarative `pwned.toml` monitoring, baseline diffing, Slack/Discord/generic webhooks, SARIF/Markdown/HTML reports, GitHub Action, pre-commit hook, and Docker images |
-| [Offline Lookups & Local MCP Server](offline-and-mcp.md) | Resumable Pwned Passwords dump downloads, `O(log N)` air-gapped binary search, and local privacy-first stdio MCP server (`pwned mcp`) vs. HIBP's remote MCP server |
+| [Vault & Active Directory Auditing](vault-auditing.md) | Auditing 18 password manager, browser, live CLI (`bw`/`rbw`/`op`), Active Directory `pwdump`/`secretsdump`, and Unix `pass`/`gopass` sources locally with AD hygiene checks, banned wordlists, breach correlation, `--check-reuse`, and `--check-strength` |
+| [Monitoring, Webhooks & CI/CD](monitoring-and-ci.md) | Declarative `pwned.toml` monitoring, SQLite exposure history, baseline diffing, Slack/Discord/Teams/PagerDuty/SMTP/GitHub Issues alerts, SARIF/Markdown/HTML reports, GitHub Action, pre-commit hook, and Docker images |
+| [Offline Lookups & Local MCP Server](offline-and-mcp.md) | Resumable Pwned Passwords dump downloads, compact `PWNB` binary & `PWNL` Bloom indexes, self-hosted `pwned serve` range server, `OfflinePasswordsClient`, and local privacy-first stdio MCP server (`pwned mcp`) vs. HIBP's remote MCP server |
 
 ## Project References
 
