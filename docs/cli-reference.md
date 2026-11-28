@@ -103,8 +103,8 @@ Audit a password-manager export, browser CSV, Active Directory `pwdump` file, lo
 Manage local offline Pwned Passwords dumps and binary indexes. See [Offline Lookups & Local MCP Server](offline-and-mcp.md):
 
 - `pwned offline download OUTPUT` — Download an offline Pwned Passwords corpus (`00000`–`FFFFF`) as a per-prefix range directory (`00000.txt`–`FFFFF.txt`, default) or a single merged sorted dump (`--single` / `-s`).
-- `pwned offline compact SOURCE OUTPUT [--mode sha1|ntlm] [-n/--ntlm] [-o/--overwrite]` — Compile a per-prefix range directory or sorted text dump into a fixed-width `PWNB` binary prefix-indexed dump (~50% smaller than ASCII, `O(1)` 1,048,576-prefix jump table, exact counts preserved).
-- `pwned offline build-bloom SOURCE OUTPUT [--mode sha1|ntlm] [-n/--ntlm] [--fpr 0.01] [--expected-items N] [-o/--overwrite]` — Build a sub-1 GB mmap-able `PWNL` Bloom filter with zero false negatives (`1`/`0` presence lookups; no exact counts).
+- `pwned offline compact SOURCE OUTPUT [--mode sha1|ntlm] [-n/--ntlm] [-o/--overwrite]` — Compile a per-prefix range directory or sorted text dump into a fixed-width `PWNB` binary prefix-indexed dump (~40–45% smaller than ASCII, `O(1)` 1,048,576-prefix jump table, exact counts preserved).
+- `pwned offline build-bloom SOURCE OUTPUT [--mode sha1|ntlm] [-n/--ntlm] [--fpr 0.01] [--expected-items N] [-o/--overwrite]` — Build an mmap-able `PWNL` Bloom filter (~1.2 bytes per hash at the default 1% FPR) with zero false negatives (`1`/`0` presence lookups; no exact counts).
 
 #### `pwned serve`
 Run a self-hosted HIBP-compatible *k*-anonymity HTTP range server (`GET /range/<5-hex>`, `GET /healthz`, `GET /metrics`) backed by `--offline-db` (per-prefix range directory, compact binary index `PWNB`, or sorted text dump; Bloom filters `PWNL` are rejected because they cannot enumerate suffix lists) or an upstream caching proxy (combine with global `--cache`). See [Offline Lookups & Local MCP Server](offline-and-mcp.md).

@@ -49,12 +49,12 @@ Once you have a local range directory or sorted text dump, `pwned` can compile i
 
 | Format | Magic | Size vs. ASCII | Lookup | Exact Counts | `pwned serve` Support |
 |---|---|---|---|---|---|
-| Compact binary index (`compact`) | `PWNB` | ~50% smaller | `O(1)` prefix jump (`1,048,576` prefixes) + mmap binary search | Yes | Yes |
-| Bloom filter (`bloom`) | `PWNL` | Sub-1 GB RAM/mmap | `O(k)` mmap bitset probes (zero false negatives) | No (`1` or `0`) | No (rejected) |
+| Compact binary index (`compact`) | `PWNB` | ~40–45% smaller | `O(1)` prefix jump (`1,048,576` prefixes) + mmap binary search | Yes | Yes |
+| Bloom filter (`bloom`) | `PWNL` | ~1.2 bytes per hash at 1% FPR | `O(k)` mmap bitset probes (zero false negatives) | No (`1` or `0`) | No (rejected) |
 
 ### Fixed-Width Compact Binary Index (`pwned offline compact`)
 
-`pwned offline compact SOURCE OUTPUT` compiles a per-prefix range directory (`00000.txt`–`FFFFF.txt`) or sorted single-file text dump into a single memory-mapped `PWNB` binary file with an `O(1)` 1,048,576-prefix jump table and fixed-width sorted records (24 bytes/record for SHA-1; 20 bytes/record for NTLM). Exact breach prevalence counts are preserved (zero-count entries omitted) at ~50% of the ASCII dump size, and the index is supported across `OfflinePasswordsClient`, `pwned password --offline-db`, `pwned audit --offline-db`, `pwned serve --offline-db`, `pwned mcp --offline-db`, and `pwned doctor --offline-db`.
+`pwned offline compact SOURCE OUTPUT` compiles a per-prefix range directory (`00000.txt`–`FFFFF.txt`) or sorted single-file text dump into a single memory-mapped `PWNB` binary file with an `O(1)` 1,048,576-prefix jump table and fixed-width sorted records (24 bytes/record for SHA-1; 20 bytes/record for NTLM). Exact breach prevalence counts are preserved (zero-count entries omitted) at ~55–60% of the ASCII dump size (about 39% smaller than a per-prefix directory and 46% smaller than a single sorted file), and the index is supported across `OfflinePasswordsClient`, `pwned password --offline-db`, `pwned audit --offline-db`, `pwned serve --offline-db`, `pwned mcp --offline-db`, and `pwned doctor --offline-db`.
 
 ```bash
 # Compile a SHA-1 range directory or sorted text dump into a compact binary index
@@ -72,14 +72,14 @@ pwned offline compact /data/pwned-passwords-ntlm.txt /data/pwned-ntlm.pwnb --mod
 
 ### Mmap-able Bloom Filter (`pwned offline build-bloom`)
 
-`pwned offline build-bloom SOURCE OUTPUT` compiles a compact binary index (fastest single-pass build), per-prefix range directory, or text dump into a memory-mapped `PWNL` probabilistic Bloom filter. At the default `--fpr 0.01` (1% false-positive rate), the entire HIBP corpus fits in a sub-1 GB RAM/mmap-resident file suitable for containers and CI runners with **zero false negatives** (`lookup_hash` returns `1` for a possible match or `0` for guaranteed absence).
+`pwned offline build-bloom SOURCE OUTPUT` compiles a compact binary index (fastest single-pass build), per-prefix range directory, or text dump into a memory-mapped `PWNL` probabilistic Bloom filter. At the default `--fpr 0.01` (1% false-positive rate) the filter needs about 1.2 bytes per hash (~1.08 GB for 900 million hashes); `--fpr 0.02` needs about 1 byte per hash (~0.92 GB for 900 million) for a sub-1 GB RAM/mmap-resident file suitable for containers and CI runners. Either way the filter has **zero false negatives** (`lookup_hash` returns `1` for a possible match or `0` for guaranteed absence).
 
 !!! note "Bloom filter limitations"
     Bloom filters are probabilistic presence-only filters: they do **not** store exact breach counts (`lookup_hash` returns `1` or `0`, so `--threshold > 1` will never match) and they **cannot** enumerate suffix lists for `/range/<prefix>`. Bloom filters work with `OfflinePasswordsClient`, `pwned password --offline-db`, `pwned audit --offline-db`, `pwned mcp --offline-db`, and `pwned doctor --offline-db`, and are rejected by `pwned serve --offline-db`.
 
 ```bash
-# Build a sub-1 GB Bloom filter from a compact index (or directory/text dump)
-pwned offline build-bloom /data/pwned-sha1.pwnb /data/pwned-sha1.bloom --fpr 0.01 --overwrite
+# Build a sub-1 GB Bloom filter (2% FPR) from a compact index (or directory/text dump)
+pwned offline build-bloom /data/pwned-sha1.pwnb /data/pwned-sha1.bloom --fpr 0.02 --overwrite
 
 # Build an NTLM Bloom filter with an explicit item-count hint (avoids counting pass on text/dir)
 pwned offline build-bloom /data/pwned-ntlm /data/pwned-ntlm.bloom \
@@ -131,7 +131,7 @@ with OfflinePasswordsClient(Path("/data/pwned-sha1.bloom")) as bloom_client:
 
 - **Per-prefix range directory** (`format == "directory"`): `O(1)` direct prefix lookup over `00000.txt`–`FFFFF.txt`.
 - **Compact binary index (`PWNB`)** (`format == "compact"`): `O(1)` prefix jump table + mmap binary search with exact counts.
-- **Bloom filter (`PWNL`)** (`format == "bloom"`): sub-1 GB mmap presence filter returning `1`/`0` (supported by lookup commands and `doctor`; rejected by `pwned serve`).
+- **Bloom filter (`PWNL`)** (`format == "bloom"`): mmap presence filter (~1.2 bytes per hash at 1% FPR) returning `1`/`0` (supported by lookup commands and `doctor`; rejected by `pwned serve`).
 - **Single sorted text dump** (`format == "text"`): `O(log N)` binary search over `HASH:COUNT` lines.
 
 ### CLI Usage

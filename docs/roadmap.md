@@ -40,7 +40,7 @@ Planned and completed improvements for `pwned`. Early releases were prioritized 
 
 ### Password & Vault Auditing
 - [x] **Pre-hashed password lookups (`--hashed` / `check_hash()`)** — accept 40-char SHA-1 or 32-char NTLM hashes directly on `pwned password` and in `PwnedPasswordsClient` / `AsyncPwnedPasswordsClient` (for AD NTLM dumps and pre-hashed lists).
-- [x] **Async concurrent password batch & vault auditing** — run `batch_check_passwords` and `audit_entries` concurrently via `AsyncPwnedPasswordsClient` with bounded concurrency (`--concurrency`) for ~10x faster vault audits.
+- [x] **Async concurrent password batch & vault auditing** — run `batch_check_passwords` and `audit_entries` concurrently via `AsyncPwnedPasswordsClient` with bounded concurrency (`--concurrency`) for faster vault audits.
 - [x] **Reused-password detection (`pwned audit --check-reuse`)** — report entries sharing duplicate passwords locally during vault audits.
 - [x] **Additional password manager & browser export formats** — add zero-dep parsers for 1Password CSV/1PUX, Chrome/Edge CSV, Firefox CSV, and Apple Passwords CSV, plus optional Bitwarden encrypted JSON decryption (`cryptography` extra).
 
@@ -123,10 +123,11 @@ Prioritized from cross-ecosystem research (official `HaveIBeenPwned.Cli` / `have
 
 ### Offline Scale & Self-Hosted Infrastructure
 - [x] **Self-hosted k-anonymity HTTP server / caching proxy (`pwned serve`)** — expose a drop-in `/range/{prefix}` endpoint, `/healthz`, and optional Prometheus `/metrics` backed by `--offline-db` or an upstream TTL cache for air-gapped services and high-QPS auth backends.
-- [x] **Compact offline hash indexes (`pwned offline build-bloom` / `compact`)** — build sub-1 GB mmap-able Bloom filters for RAM-resident checks in containers/CI runners, plus a fixed-width binary prefix-indexed format (~50% smaller than ASCII dumps with `O(1)` prefix jump).
+- [x] **Compact offline hash indexes (`pwned offline build-bloom` / `compact`)** — build mmap-able Bloom filters (~1.2 bytes per hash at 1% FPR; under 1 GB at `--fpr 0.02`) for RAM-resident checks in containers/CI runners, plus a fixed-width binary prefix-indexed format (~40–45% smaller than ASCII dumps with `O(1)` prefix jump).
 
 ### Continuous Monitoring, History & Alerting
 - [x] **SQLite exposure history & remediation tracking (`monitor --db`)** — persist first-seen and resolved exposure timestamps in a stdlib `sqlite3` store to track breach trends and rotated credentials across runs, feeding trend summaries into `domain-report`, `--format markdown`, and `--format html`.
+- [x] **Release supply-chain assets** — attach a CycloneDX SBOM (`pwned-<version>.cdx.json`) and the Sigstore-signed build provenance bundle to each GitHub Release.
 - [x] **Expanded alert destinations** — add Microsoft Teams (Adaptive Cards), PagerDuty (Events API v2), SMTP email, and GitHub Issue auto-creation/commenting for CI monitoring pipelines.
 
 ## Planned
